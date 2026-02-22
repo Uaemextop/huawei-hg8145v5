@@ -111,8 +111,16 @@ CRAWLABLE_TYPES = {
     "text/plain",
 }
 
-# Signals that the session has expired and we need to re-authenticate
+# Signals that the session has expired – checked only against HTML responses
 _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
+
+# URL path patterns for write-action endpoints that must NEVER be crawled.
+# Fetching these would terminate the session (logout) or make irreversible
+# changes to the router (reboot, factory-reset, firmware upgrade).
+_BLOCKED_PATH_RE = re.compile(
+    r"/(logout|reboot|factory|restore|reset|upgrade\.cgi)\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +139,14 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
-    # Explicit keep-alive: reuse the TCP connection across requests so the
-    # router does not see each request as a new visitor and expire auth sooner.
+    # Mimic a real browser so the router does not reject requests based on
+    # User-Agent.  Also request keep-alive to reuse the TCP connection.
     session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
         "Connection": "keep-alive",
         "Keep-Alive": "timeout=60, max=1000",
     })
@@ -169,17 +182,19 @@ def get_rand_token(session: requests.Session, host: str) -> str:
     return token
 
 
-def login(session: requests.Session, host: str, username: str, password: str) -> bool:
+def login(session: requests.Session, host: str, username: str, password: str) -> str | None:
     """
     Two-step login for the HG8145V5 admin interface:
       1. GET /index.asp  → router sets initial session cookies
       2. POST /asp/GetRandCount.asp  → obtain anti-CSRF token
       3. POST /login.cgi with UserName, Base64(Password), Language, token
 
-    The pre-login cookie  Cookie=body:Language:english:id=-1;path=/
+    The pre-login cookie  Cookie=body:Language:english:id=-1  (path=/)
     is set to mimic what the login page's JavaScript does before submission.
 
-    Returns True on success, False on failure.
+    Returns the post-login redirect URL (the admin home page) on success,
+    or None on failure.  The caller can use this URL as the starting seed
+    and as the Referer for subsequent authenticated requests.
     """
     # Step 1 – load login page so the router sets initial session cookies
     try:
@@ -197,15 +212,19 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         token = get_rand_token(session, host)
     except requests.RequestException as exc:
         log.error("Failed to get auth token: %s", exc)
-        return False
+        return None
 
     # Step 3 – submit credentials
     # Replicate:  var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
     #             document.cookie = cookie2;
+    # In JavaScript document.cookie syntax, ';path=/' is a cookie ATTRIBUTE,
+    # not part of the value.  Pass it as the path= keyword argument here so
+    # the server receives the correct value: 'body:Language:english:id=-1'.
     session.cookies.set(
         "Cookie",
-        "body:Language:english:id=-1;path=/",
+        "body:Language:english:id=-1",
         domain=host,
+        path="/",
     )
 
     payload = {
@@ -224,7 +243,7 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
     except requests.RequestException as exc:
         log.error("Login POST failed: %s", exc)
-        return False
+        return None
 
     # A successful login redirects away from the login form.
     # If the response still contains the login form, credentials were wrong.
@@ -233,22 +252,40 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
             "Login failed – router returned the login form. "
             "Check your credentials."
         )
-        return False
+        return None
 
-    log.info("Login successful (HTTP %s). Active cookies: %s",
-             resp.status_code, list(session.cookies.keys()))
-    return True
+    post_login_url = resp.url
+    log.info("Login successful (HTTP %s). Post-login URL: %s. Active cookies: %s",
+             resp.status_code, post_login_url, list(session.cookies.keys()))
+    return post_login_url
 
 
 def is_session_expired(resp: requests.Response) -> bool:
     """
-    Return True when the router has redirected us back to the login page,
-    meaning the authenticated session has expired.
+    Return True only when the router has genuinely redirected to the login form.
+
+    Avoids two classes of false positives that caused session-expiry loops:
+      * URL-based FP: 'login' in url matches /Cuscss/login.css, safelogin.js, etc.
+        → now checks only the specific login-page paths /index.asp and /login.asp.
+      * Body-based FP: JS files contain login marker strings as DOM element IDs
+        (e.g. document.getElementById('txt_Password')), CSS contains .loginbutton.
+        → now ignores non-HTML content types and requires ALL markers together.
     """
-    final_url = resp.url
-    if "login" in final_url.lower():
+    # A redirect to the specific login-page paths is the most reliable signal.
+    # We only match the path (not substrings of other paths).
+    final_path = urllib.parse.urlparse(resp.url).path.lower()
+    if final_path in ("/index.asp", "/login.asp"):
         return True
-    return any(marker in resp.text for marker in _LOGIN_MARKERS)
+
+    # Non-HTML responses (JS, CSS, images) can legitimately contain login-related
+    # identifier strings – skip the body check for them entirely.
+    ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if ct and ct not in ("text/html", "application/xhtml+xml"):
+        return False
+
+    # A genuine login form has ALL three markers present at the same time.
+    # Using all() prevents a single marker in an HTML snippet from firing.
+    return all(marker in resp.text for marker in _LOGIN_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +575,8 @@ def save_file(local_path: Path, content: bytes) -> None:
 # The crawler will discover additional URLs on its own; these seeds ensure that
 # pages which are not linked from other pages are still reached.
 SEED_PATHS: list[str] = [
-    # Entry points
-    "/",
+    # Entry points (NOT "/" – the root always returns the login form HTML,
+    # even when authenticated; start from the authenticated admin pages instead)
     "/index.asp",
     "/login.asp",
     "/main.asp",
@@ -671,8 +708,15 @@ class Crawler:
         log.info("Target router    : %s", self.base)
         log.info("Username         : %s", self.username)
 
-        if not login(self.session, self.host, self.username, self.password):
+        post_login_url = login(self.session, self.host, self.username, self.password)
+        if not post_login_url:
             sys.exit(1)
+
+        # Set Referer to the post-login page so all subsequent requests
+        # appear to come from within the admin interface.  Many Huawei routers
+        # enforce a Referer check on admin ASP pages and return 403 without it.
+        self.session.headers["Referer"] = post_login_url
+        log.debug("Referer set to: %s", post_login_url)
 
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
@@ -681,7 +725,9 @@ class Crawler:
             if n:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
-        # Seed the queue with all known admin paths
+        # Seed the queue: start with the authenticated home page, then all
+        # known admin page paths.
+        self._enqueue(post_login_url)
         for path in SEED_PATHS:
             self._enqueue(self.base + path)
 
@@ -789,6 +835,12 @@ class Crawler:
             return
         self._visited.add(key)
 
+        # Never crawl write-action endpoints (logout terminates the session;
+        # reboot/reset/factory would change the router's state).
+        if _BLOCKED_PATH_RE.search(urllib.parse.urlparse(url).path):
+            log.debug("Blocked write-action URL, skipping: %s", url)
+            return
+
         local = url_to_local_path(url, self.output_dir)
 
         # ----------------------------------------------------------------
@@ -820,8 +872,13 @@ class Crawler:
                 self._relogin_count += 1
                 # Clear old auth cookies before re-logging in
                 self.session.cookies.clear()
-                if login(self.session, self.host, self.username, self.password):
+                new_login_url = login(
+                    self.session, self.host, self.username, self.password
+                )
+                if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)
+                    # Update Referer to the new post-login page
+                    self.session.headers["Referer"] = new_login_url
                     # Remove from visited so we retry this URL
                     self._visited.discard(key)
                     self._queue.appendleft(url)
