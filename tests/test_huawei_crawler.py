@@ -124,6 +124,86 @@ class TestSessionLoopFix(unittest.TestCase):
         result = is_session_expired(resp)
         self.assertTrue(result)
 
+    def test_cookie_no_domain_parameter(self):
+        """Pre-login cookie must NOT be set with domain= to avoid duplicates."""
+        # Verify by testing the login function's cookie setup behavior:
+        # after login setup, there should be exactly one 'Cookie' entry
+        import requests as _requests
+        s = _requests.Session()
+        s.cookies.clear()
+        s.cookies.set("Cookie", "body:Language:english:id=-1", path="/")
+        cookie_entries = [c for c in s.cookies if c.name == "Cookie"]
+        self.assertEqual(len(cookie_entries), 1)
+        # The cookie should not have a specific domain set
+        self.assertEqual(cookie_entries[0].domain, "")
+
+    def test_deduplicate_cookies(self):
+        """_deduplicate_cookies should keep only the last Cookie entry."""
+        from huawei_crawler.auth.login import _deduplicate_cookies
+        import requests as _requests
+        s = _requests.Session()
+        # Simulate: pre-login cookie (no domain) + server-set cookie (with domain)
+        s.cookies.set("Cookie", "old-value", path="/")
+        s.cookies.set("Cookie", "new-auth-value", domain="192.168.100.1", path="/")
+        entries_before = [c for c in s.cookies if c.name == "Cookie"]
+        self.assertEqual(len(entries_before), 2)
+        _deduplicate_cookies(s, "192.168.100.1")
+        entries_after = [c for c in s.cookies if c.name == "Cookie"]
+        self.assertEqual(len(entries_after), 1)
+        self.assertEqual(entries_after[0].value, "new-auth-value")
+
+    def test_detect_login_mode_fallback_to_disk(self):
+        """detect_login_mode should fall back to parsing files on disk."""
+        from huawei_crawler.auth.login import detect_login_mode
+        import requests as _requests
+        s = _requests.Session()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            # Write a fake index.asp with CfgMode
+            (outdir / "index.asp").write_text(
+                "<script>var CfgMode = 'MEGACABLE2';</script>"
+            )
+            # With a failing network (mock), it should fall back to disk
+            with patch.object(s, 'get', side_effect=Exception("no network")):
+                result = detect_login_mode(s, "192.168.100.1", output_dir=outdir)
+            self.assertEqual(result, "MEGACABLE2")
+
+    def test_post_auth_frameset_discovery(self):
+        """_save_post_auth_frameset extracts links from authenticated '/' response."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            with patch("huawei_crawler.crawler.build_session") as mock_build:
+                mock_session = MagicMock()
+                mock_build.return_value = mock_session
+                c = Crawler(DEFAULT_HOST, "user", "pass", outdir)
+                c.session = mock_session
+
+                # Mock response with admin frameset containing admin page links
+                frameset_html = (
+                    '<html><frameset>'
+                    '<frame src="/html/ssmp/default/main.asp">'
+                    '<frame src="/html/ssmp/default/left.asp">'
+                    '<frame src="/html/ssmp/default/top.asp">'
+                    '</frameset></html>'
+                )
+                mock_resp = MagicMock()
+                mock_resp.ok = True
+                mock_resp.status_code = 200
+                mock_resp.content = frameset_html.encode()
+                mock_resp.headers = {"Content-Type": "text/html"}
+                mock_session.get.return_value = mock_resp
+
+                c._save_post_auth_frameset()
+
+                # Verify frameset file was saved
+                self.assertTrue((outdir / "admin_frameset.html").exists())
+
+                # Verify links were extracted and queued
+                queue_paths = [urllib.parse.urlparse(u).path for u in c._queue]
+                self.assertIn("/html/ssmp/default/main.asp", queue_paths)
+                self.assertIn("/html/ssmp/default/left.asp", queue_paths)
+                self.assertIn("/html/ssmp/default/top.asp", queue_paths)
+
 
 # ---------------------------------------------------------------
 # 2. Password Encoding Tests

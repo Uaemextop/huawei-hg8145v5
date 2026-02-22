@@ -18,6 +18,7 @@ from .config import (
     TOKEN_URL,
     _AUTH_PAGE_PATHS,
     _BLOCKED_PATH_RE,
+    _LOGIN_MARKERS,
 )
 from .logging_setup import log
 from .session import base_url, build_session
@@ -100,7 +101,8 @@ class Crawler:
         # and marked visited, preventing false session-expiry detection.
         self._save_pre_auth("/")  # prevents infinite re-login loop (root = login page)
 
-        post_login_url = login(self.session, self.host, self.username, self.password)
+        post_login_url = login(self.session, self.host, self.username, self.password,
+                               output_dir=self.output_dir)
         if not post_login_url:
             sys.exit(1)
 
@@ -113,6 +115,13 @@ class Crawler:
         # Fetch a fresh X_HW_Token right after login.
         # GetRandToken.asp also needs the correct Referer, which is now set.
         self._refresh_token()
+
+        # --- Post-login admin frameset discovery ---
+        # After authentication, "/" may serve a different page than before
+        # login (e.g. the admin frameset with navigation frames).  Fetch it
+        # now and save the authenticated version, extracting links to admin
+        # pages that are only visible after login.
+        self._save_post_auth_frameset()
 
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
@@ -131,7 +140,11 @@ class Crawler:
         if post_login_url and post_path not in _AUTH_PAGE_PATHS:
             self._enqueue(post_login_url)
 
-        log.info("Seeding from pre-auth pages + post-login URL. Dynamic discovery begins.")
+        log.info(
+            "Seeding from pre-auth + post-auth pages. Queue: %d URLs. "
+            "Dynamic discovery begins.",
+            len(self._queue),
+        )
 
         # Exhaust the queue with optional tqdm progress bar
         if tqdm_available:
@@ -282,6 +295,56 @@ class Crawler:
         except requests.RequestException as exc:
             log.debug("Could not pre-download %s: %s", path, exc)
 
+    def _save_post_auth_frameset(self) -> None:
+        """
+        Fetch "/" with the authenticated session to get the admin frameset.
+
+        After login, "/" may return a completely different page (the admin UI
+        with navigation frames) than before login (the login form).  This
+        method fetches the authenticated version, saves it for offline
+        analysis, and extracts links to admin pages that are only accessible
+        after authentication.
+
+        The content is saved as 'admin_frameset.html' to avoid overwriting
+        the pre-auth index.html.  Links are extracted and seeded into the
+        BFS queue.
+        """
+        url = self.base + "/"
+        try:
+            resp = self.session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            if not resp.ok:
+                log.debug("Post-auth frameset fetch failed: HTTP %s", resp.status_code)
+                return
+
+            ct = resp.headers.get("Content-Type", "text/html")
+            content = resp.content
+
+            # If the response still contains the login form, the session
+            # is not actually authenticated — skip saving.
+            from .config import _LOGIN_MARKERS
+            text = content.decode("utf-8", errors="replace")
+            if all(marker in text for marker in _LOGIN_MARKERS):
+                log.debug("Post-auth '/' still shows login form — skipping frameset save")
+                return
+
+            # Save as admin_frameset.html (separate from pre-auth index.html)
+            frameset_path = self.output_dir / "admin_frameset.html"
+            save_file(frameset_path, content)
+            log.info("Post-auth frameset saved: %d bytes", len(content))
+
+            # Extract and enqueue links from the authenticated frameset
+            added = 0
+            for link in extract_links(content, ct, url, self.base):
+                k = url_key(link)
+                if k not in self._visited:
+                    self._queue.append(link)
+                    added += 1
+            if added:
+                log.info("Post-auth frameset: +%d new URLs discovered", added)
+
+        except requests.RequestException as exc:
+            log.debug("Could not fetch post-auth frameset: %s", exc)
+
     def _heartbeat(self) -> None:
         """
         POST to GetRandToken.asp to refresh both the session idle timer and
@@ -389,7 +452,8 @@ class Crawler:
                 self._relogin_count += 1
                 self.session.cookies.clear()
                 new_login_url = login(
-                    self.session, self.host, self.username, self.password
+                    self.session, self.host, self.username, self.password,
+                    output_dir=self.output_dir,
                 )
                 if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)

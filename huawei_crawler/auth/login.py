@@ -2,6 +2,7 @@
 
 import re
 import urllib.parse
+from pathlib import Path
 
 import requests
 
@@ -18,23 +19,70 @@ from .password import b64encode_password, pbkdf2_sha256_password
 from .token import get_rand_token
 
 
-def detect_login_mode(session: requests.Session, host: str) -> str:
+def detect_login_mode(session: requests.Session, host: str,
+                      output_dir: Path | None = None) -> str:
     """
-    Fetch /index.asp and parse the embedded JavaScript to determine which
-    login method the router uses.
+    Determine which login method the router uses by parsing CfgMode from JS.
+
+    Tries three sources in order:
+      1. GET /index.asp from the router (live)
+      2. Pre-downloaded index.asp on disk (output_dir/index.asp)
+      3. Pre-downloaded index.html on disk (output_dir/index.html, from "/" save)
 
     Returns the CfgMode string (e.g. 'MEGACABLE2', 'DVODACOM2WIFI', …).
     Returns an empty string on failure (safe fallback = base64 path).
     """
+    _CFG_RE = re.compile(r"""var\s+CfgMode\s*=\s*['"]([^'"]+)['"]""")
+
+    # 1. Try live fetch
     try:
         resp = session.get(base_url(host) + LOGIN_PAGE, timeout=REQUEST_TIMEOUT)
-        cfg_mode = re.search(r"""var\s+CfgMode\s*=\s*['"]([^'"]+)['"]""", resp.text)
-        return cfg_mode.group(1) if cfg_mode else ""
+        m = _CFG_RE.search(resp.text)
+        if m:
+            return m.group(1)
     except Exception:
-        return ""
+        pass
+
+    # 2. Fallback: check pre-downloaded files on disk
+    if output_dir:
+        for name in ("index.asp", "index.html"):
+            p = output_dir / name
+            if p.exists() and p.stat().st_size > 0:
+                try:
+                    m = _CFG_RE.search(p.read_text(encoding="utf-8", errors="replace"))
+                    if m:
+                        log.debug("CfgMode found in local %s", name)
+                        return m.group(1)
+                except OSError:
+                    pass
+
+    return ""
 
 
-def login(session: requests.Session, host: str, username: str, password: str) -> str | None:
+def _deduplicate_cookies(session: requests.Session, host: str) -> None:
+    """
+    Remove duplicate 'Cookie' entries from the session cookie jar.
+
+    The pre-login cookie is set without domain=, while the router's Set-Cookie
+    response creates an entry with domain='192.168.100.1'.  Both coexist in the
+    jar, but only the server-set value represents the authenticated session.
+    We keep the last (newest) entry and remove all others.
+    """
+    cookie_entries = []
+    for cookie in session.cookies:
+        if cookie.name == "Cookie":
+            cookie_entries.append(cookie)
+    if len(cookie_entries) > 1:
+        # Keep the last one (server-set), remove the rest
+        for old in cookie_entries[:-1]:
+            session.cookies.clear(old.domain, old.path, old.name)
+        kept = cookie_entries[-1]
+        log.debug("Deduplicated cookies: kept value=%s domain=%s",
+                  kept.value[:40] if kept.value else "", kept.domain)
+
+
+def login(session: requests.Session, host: str, username: str, password: str,
+          output_dir: Path | None = None) -> str | None:
     """
     Authenticate against the HG8145V5 admin interface.
 
@@ -51,10 +99,10 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     or None on failure.  The URL is used as a seed and as the Referer header.
     """
     # Step 1 – load login page; also detect router config mode
-    cfg_mode = detect_login_mode(session, host)
+    cfg_mode = detect_login_mode(session, host, output_dir=output_dir)
     log.debug("Router CfgMode: %r", cfg_mode)
 
-    log.debug("Cookies after GET /index.asp: %s", dict(session.cookies))
+    log.debug("Cookies before login setup: %s", dict(session.cookies))
 
     use_sha256 = cfg_mode.upper() == "DVODACOM2WIFI"
 
@@ -91,15 +139,17 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # Set the pre-login cookie to mimic what the login page JS does:
         #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
         #   document.cookie = cookie2;
-        # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
-        # not part of the value.  We specify it via the path= kwarg here so
-        # the router receives the correct value: 'body:Language:english:id=-1'.
+        # IMPORTANT: Do NOT set domain= on the cookie.  Setting domain=host
+        # prevents the router's Set-Cookie from updating the value, because
+        # requests creates a duplicate entry.  Without domain=, the cookie
+        # is properly replaced by the server's response.
+        session.cookies.clear()
         session.cookies.set(
             "Cookie",
             "body:Language:english:id=-1",
-            domain=host,
             path="/",
         )
+        log.debug("Pre-login cookie set (no domain): %s", dict(session.cookies))
         try:
             token = get_rand_token(session, host)
         except requests.RequestException as exc:
@@ -125,6 +175,13 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     except requests.RequestException as exc:
         log.error("Login POST failed: %s", exc)
         return None
+
+    # Deduplicate cookies: the login POST may have set a new cookie with
+    # domain from the server (e.g. '192.168.100.1') while our pre-login
+    # cookie has domain=''.  Keep only the last (server-set) value.
+    _deduplicate_cookies(session, host)
+
+    log.debug("Cookies after login POST: %s", dict(session.cookies))
 
     # A successful login redirects away from the login form.
     # If the response still contains the login form, credentials were wrong.
