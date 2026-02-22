@@ -2,15 +2,35 @@
 
 Python crawler for the Huawei HG8145V5 router admin web interface.
 
-Logs into the router at `http://192.168.100.1`, crawls all admin pages and
-downloads every reachable file (HTML/ASP, JavaScript, CSS, images, fonts, …)
-preserving the original server directory structure.  The result is a local
-offline copy of the interface suitable for static code analysis.
+Logs into the router at `http://192.168.100.1`, then **exhaustively crawls
+every reachable admin page and static asset** (HTML/ASP, JavaScript, CSS,
+images, fonts, JSON, XML, …) until no new URLs remain.  Preserves the
+original server directory structure on disk for fully-offline code analysis.
+
+## Features
+
+* **Two-step authenticated login** – replicates the router's anti-CSRF token
+  flow (POST to `/asp/GetRandCount.asp`, then POST to `/login.cgi` with a
+  Base64-encoded password)
+* **Dynamic cookie management** – session cookies are automatically tracked;
+  if the session expires mid-crawl the script re-authenticates and retries
+* **Exhaustive recursive BFS** – continues until the queue is completely empty
+* **Deep link extraction** from every content type:
+
+  | Source | Patterns extracted |
+  |--------|--------------------|
+  | HTML / ASP | `href`, `src`, `action`, `data-src`, `srcset`, inline `<style>`, inline `<script>` |
+  | CSS | `url()`, `@import` |
+  | JavaScript | `Form.setAction()`, `$.ajax({url:})`, `window.location`, `location.href`, all root-relative `'/...'` string literals, `RequestFile=` in CGI query strings, `document.write(...)` |
+
+* **Seed list of 60+ known HG8145V5 paths** (admin menus, status pages, WAN,
+  WLAN, LAN, security, QoS, voice, TR-069, system, …)
+* **ASP responses treated as HTML** regardless of the `Content-Type` header
 
 ## Requirements
 
 - Python 3.10+
-- Dependencies listed in `requirements.txt`
+- Dependencies in `requirements.txt`
 
 ## Installation
 
@@ -21,16 +41,19 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Default settings (host 192.168.100.1, user Mega_gpon, prompts for password)
+# Prompts for password if not set in environment
 python crawler.py
 
-# Supply password via environment variable (recommended)
-ROUTER_PASSWORD=your_password_here python crawler.py
+# Password via environment variable (recommended – avoids shell history)
+set ROUTER_PASSWORD=your_password_here   # Windows
+export ROUTER_PASSWORD=your_password_here  # Linux / macOS
+python crawler.py
 
-# Explicit flags
-python crawler.py --host 192.168.100.1 --user Mega_gpon --password your_password_here --output downloaded_site
+# All options explicit
+python crawler.py --host 192.168.100.1 --user Mega_gpon \
+    --password your_password_here --output downloaded_site
 
-# Verbose debug output
+# Verbose debug output (shows every cookie, every new URL enqueued)
 python crawler.py --debug
 ```
 
@@ -40,21 +63,26 @@ python crawler.py --debug
 |------|---------|-------------|
 | `--host` | `192.168.100.1` | Router IP address |
 | `--user` | `Mega_gpon` | Admin username |
-| `--password` | `796cce597901a5cf` | Admin password |
+| `--password` | *(env / prompt)* | Admin password |
 | `--output` | `downloaded_site` | Local output directory |
-| `--debug` | off | Enable verbose logging |
+| `--no-verify-ssl` | off | Disable TLS verification (for self-signed certs) |
+| `--debug` | off | Verbose logging (cookies, queued URLs, byte counts) |
 
-## How it works
+## How the login works
 
-1. **Login** – replicates the two-step authentication used by the router:
-   - POST to `/asp/GetRandCount.asp` to obtain an anti-CSRF token (`x.X_HW_Token`).
-   - POST to `/login.cgi` with the username, Base64-encoded password, and the token.
-2. **Crawl** – starts from a seed list of known admin pages (`/index.asp`,
-   `/main.asp`, `/frame.asp`, …) and follows every link found in HTML, CSS,
-   and JavaScript responses.
-3. **Save** – writes each downloaded resource to a local path that mirrors the
-   server's directory structure (e.g. `/Cuscss/login.css` →
-   `downloaded_site/Cuscss/login.css`).
+The router login page (`index.asp`) uses a two-step flow:
+
+1. `GET /index.asp` – router sets initial session cookies
+2. `POST /asp/GetRandCount.asp` – returns a one-time anti-CSRF token
+3. `POST /login.cgi` with:
+   - `UserName` = your username
+   - `PassWord` = `Base64(UTF-8(password))`  *(replicated from `util.js`)*
+   - `Language` = `english`
+   - `x.X_HW_Token` = token from step 2
+   - Cookie `Cookie=body:Language:english:id=-1;path=/`  *(replicated from login page JS)*
+
+A successful login redirects to the main admin frame; if the login form is
+returned again the credentials are incorrect.
 
 ## Output structure (example)
 
@@ -73,9 +101,17 @@ downloaded_site/
 │       ├── md5.js
 │       ├── util.js
 │       └── ...
-└── frameaspdes/
-    └── english/
-        └── ssmpdes.js
+├── frameaspdes/
+│   └── english/
+│       └── ssmpdes.js
+├── html/
+│   └── ssmp/
+│       ├── home.asp
+│       ├── wlan.asp
+│       ├── lan.asp
+│       └── ...
+└── images/
+    └── hwlogo.ico
 ```
 
 ## Default credentials (from router label)
