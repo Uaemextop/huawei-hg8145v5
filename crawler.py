@@ -7,6 +7,11 @@ authenticates using the login mechanism found in index.asp, and
 downloads all accessible pages and resources preserving the original
 directory structure for offline analysis.
 
+The crawler is fully dynamic and recursive: it obtains cookies
+automatically, parses **every** downloaded file (HTML, ASP, JS, CSS)
+to discover new URLs, and keeps crawling until no new resources are
+found.
+
 Usage:
     python crawler.py [options]
 
@@ -15,7 +20,7 @@ Options:
     --user USER        Login username (default: Mega_gpon)
     --password PASS    Login password (default: 796cce597901a5cf)
     --output DIR       Output directory (default: ./router_dump)
-    --max-depth N      Maximum crawl depth (default: 10)
+    --max-depth N      Maximum crawl depth, 0 for unlimited (default: 0)
     --delay SECONDS    Delay between requests in seconds (default: 0.5)
 """
 
@@ -39,7 +44,7 @@ DEFAULT_HOST = os.environ.get("HG8145V5_HOST", "192.168.100.1")
 DEFAULT_USER = os.environ.get("HG8145V5_USER", "Mega_gpon")
 DEFAULT_PASSWORD = os.environ.get("HG8145V5_PASSWORD", "796cce597901a5cf")
 DEFAULT_OUTPUT = "router_dump"
-DEFAULT_MAX_DEPTH = 10
+DEFAULT_MAX_DEPTH = 0  # 0 = unlimited
 DEFAULT_DELAY = 0.5
 
 # Common admin pages known to exist on Huawei HG8145V5 routers.
@@ -100,17 +105,23 @@ SEED_PATHS = [
     "/resource/common/jquery.min.js",
     "/resource/common/crypto-js.js",
     "/frameaspdes/english/ssmpdes.js",
+    # Additional common .cgi endpoints
+    "/asp/GetRandCount.asp",
+    "/asp/GetRandInfo.asp",
 ]
 
-# File extensions considered as downloadable resources.
-RESOURCE_EXTENSIONS = {
-    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp",
-    ".svg", ".woff", ".woff2", ".ttf", ".eot", ".map",
+# Extensions whose content should be scanned for further URLs.
+# The crawler analyses ALL text content (JS, CSS, ASP, HTML, etc.)
+# to discover every possible route.
+PARSEABLE_EXTENSIONS = {
+    ".asp", ".html", ".htm", ".cgi", ".js", ".css", "",
 }
 
-# Extensions that may contain links to crawl further.
-CRAWLABLE_EXTENSIONS = {
-    ".asp", ".html", ".htm", ".cgi", "",
+# Valid file extensions for paths found via regex heuristics.
+VALID_PATH_EXTENSIONS = {
+    ".asp", ".html", ".htm", ".cgi", ".js", ".css",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".svg",
+    ".woff", ".woff2", ".ttf", ".eot", ".map",
 }
 
 logging.basicConfig(
@@ -132,7 +143,7 @@ class HuaweiCrawler:
         self.username = username
         self.password = password
         self.output_dir = output_dir
-        self.max_depth = max_depth
+        self.max_depth = max_depth  # 0 means unlimited
         self.delay = delay
 
         self.session = requests.Session()
@@ -151,6 +162,19 @@ class HuaweiCrawler:
         self.saved_files = []
         # Queue of (url, depth) tuples.
         self.queue = deque()
+        # Count consecutive failures to detect session expiry.
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 10
+
+    # ------------------------------------------------------------------
+    # Cookie helpers
+    # ------------------------------------------------------------------
+    def _log_cookies(self, label=""):
+        """Log current session cookies for debugging."""
+        cookies = {c.name: c.value for c in self.session.cookies}
+        if cookies:
+            logger.debug("Cookies%s: %s", f" ({label})" if label else "", cookies)
+        return cookies
 
     # ------------------------------------------------------------------
     # Authentication
@@ -160,10 +184,13 @@ class HuaweiCrawler:
         Authenticate with the router using the login flow from index.asp.
 
         Flow:
-        1. GET /index.asp to initialise the session.
+        1. GET /index.asp to initialise the session and capture cookies.
         2. POST /asp/GetRandCount.asp to obtain the CSRF token.
         3. POST /login.cgi with UserName, base64-encoded PassWord,
            Language, and the CSRF token.
+
+        All cookies are captured and maintained automatically by
+        requests.Session.
         """
         logger.info("Starting login to %s as '%s' …", self.base_url, self.username)
 
@@ -176,6 +203,7 @@ class HuaweiCrawler:
             )
             resp.raise_for_status()
             logger.info("Loaded login page (HTTP %s).", resp.status_code)
+            self._log_cookies("after loading login page")
         except requests.RequestException as exc:
             logger.error("Cannot reach router at %s: %s", self.base_url, exc)
             return False
@@ -192,7 +220,7 @@ class HuaweiCrawler:
 
         # Set the cookie expected by the router.
         self.session.cookies.set(
-            "Cookie", f"body:Language:english:id=-1", path="/",
+            "Cookie", "body:Language:english:id=-1", path="/",
         )
 
         login_data = {
@@ -211,6 +239,7 @@ class HuaweiCrawler:
                 allow_redirects=True,
             )
             logger.info("Login response: HTTP %s, URL: %s", resp.status_code, resp.url)
+            self._log_cookies("after login")
         except requests.RequestException as exc:
             logger.error("Login request failed: %s", exc)
             return False
@@ -218,6 +247,10 @@ class HuaweiCrawler:
         # The router usually redirects to a main frame page on success.
         if resp.status_code == 200:
             logger.info("Login appears successful.")
+            # Extract any links from the post-login page.
+            if resp.text:
+                self._extract_links(resp.text, resp.url or self.base_url, -1)
+            self._consecutive_failures = 0
             return True
 
         logger.warning(
@@ -241,12 +274,25 @@ class HuaweiCrawler:
             logger.warning("GetRandCount.asp request failed: %s", exc)
         return None
 
+    def _try_relogin(self):
+        """Attempt to re-authenticate when the session appears expired."""
+        logger.warning("Session may have expired – attempting re-login …")
+        self._consecutive_failures = 0
+        return self.login()
+
     # ------------------------------------------------------------------
     # Crawling
     # ------------------------------------------------------------------
     def crawl(self):
-        """Run the main crawl loop."""
-        logger.info("Starting crawl with max depth %d …", self.max_depth)
+        """Run the main crawl loop.
+
+        Crawls recursively and dynamically: every downloaded file is
+        analysed for new URLs (HTML tags, JS string literals, CSS
+        url() references, etc.) and the crawler keeps going until the
+        queue is empty – i.e. no new resources are found.
+        """
+        depth_desc = f"max depth {self.max_depth}" if self.max_depth else "unlimited depth"
+        logger.info("Starting crawl (%s) …", depth_desc)
 
         # Seed the queue with known pages.
         for path in SEED_PATHS:
@@ -259,7 +305,7 @@ class HuaweiCrawler:
 
             if normalised in self.visited:
                 continue
-            if depth > self.max_depth:
+            if self.max_depth and depth > self.max_depth:
                 continue
             if not self._is_same_host(url):
                 continue
@@ -270,10 +316,10 @@ class HuaweiCrawler:
             if content is None:
                 continue
 
-            # Determine if we should parse for more links.
-            path = urlparse(url).path
-            ext = os.path.splitext(path)[1].lower()
-            if ext in CRAWLABLE_EXTENSIONS:
+            # Parse ALL text content for links – HTML, ASP, JS, CSS.
+            path_str = urlparse(url).path
+            ext = os.path.splitext(path_str)[1].lower()
+            if ext in PARSEABLE_EXTENSIONS:
                 self._extract_links(content, url, depth)
 
             if self.delay > 0:
@@ -283,6 +329,7 @@ class HuaweiCrawler:
         """Download *url* and save it to the output directory.
 
         Returns the response body as text (or None on failure).
+        Automatically re-authenticates if the session appears expired.
         """
         try:
             resp = self.session.get(url, timeout=15, verify=False)
@@ -290,9 +337,48 @@ class HuaweiCrawler:
             logger.warning("Failed to download %s: %s", url, exc)
             return None
 
+        # Detect session expiry: the router often redirects to the
+        # login page or returns a 302/401 when the session is lost.
+        if resp.status_code in (302, 401, 403):
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                logger.warning("Too many failures – attempting re-login.")
+                if self._try_relogin():
+                    try:
+                        resp = self.session.get(url, timeout=15, verify=False)
+                    except requests.RequestException:
+                        return None
+                else:
+                    return None
+            else:
+                logger.debug("HTTP %s for %s", resp.status_code, url)
+                return None
+
         if resp.status_code != 200:
+            self._consecutive_failures += 1
             logger.debug("HTTP %s for %s", resp.status_code, url)
             return None
+
+        # Also detect login-page redirect in body.
+        if (
+            'login.asp' in (resp.url or '')
+            and 'login.asp' not in url
+            and 'index.asp' not in url
+        ):
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                if self._try_relogin():
+                    try:
+                        resp = self.session.get(url, timeout=15, verify=False)
+                    except requests.RequestException:
+                        return None
+                else:
+                    return None
+            else:
+                return None
+
+        self._consecutive_failures = 0
+        self._log_cookies("after download")
 
         # Determine local file path from the URL path.
         parsed = urlparse(url)
@@ -329,12 +415,19 @@ class HuaweiCrawler:
     # ------------------------------------------------------------------
     # Link extraction
     # ------------------------------------------------------------------
-    def _extract_links(self, html, source_url, depth):
-        """Parse *html* and enqueue any discovered links."""
-        if not html:
+    def _extract_links(self, text, source_url, depth):
+        """Parse *text* (HTML, JS, CSS, ASP) and enqueue discovered URLs.
+
+        Analyses content exhaustively: HTML tags, inline JS, CSS url()
+        references, string literals that look like router paths, and
+        Huawei-specific JS patterns (setAction, $.ajax, RequestFile,
+        loadLanguage, etc.).
+        """
+        if not text:
             return
 
-        soup = BeautifulSoup(html, "html.parser")
+        # --- HTML tag-based extraction (using BeautifulSoup) ----------
+        soup = BeautifulSoup(text, "html.parser")
 
         # <a href>, <area href>
         for tag in soup.find_all(["a", "area"], href=True):
@@ -356,42 +449,105 @@ class HuaweiCrawler:
         for tag in soup.find_all(["frame", "iframe"], src=True):
             self._enqueue(tag["src"], source_url, depth)
 
-        # Inline url() references in style attributes and <style> blocks.
-        for match in re.findall(r'url\(["\']?([^"\'()]+)["\']?\)', html):
+        # <form action>
+        for tag in soup.find_all("form", action=True):
+            self._enqueue(tag["action"], source_url, depth)
+
+        # <input> with src (some routers use image inputs)
+        for tag in soup.find_all("input", src=True):
+            self._enqueue(tag["src"], source_url, depth)
+
+        # <embed src>, <object data>
+        for tag in soup.find_all("embed", src=True):
+            self._enqueue(tag["src"], source_url, depth)
+        for tag in soup.find_all("object", data=True):
+            self._enqueue(tag["data"], source_url, depth)
+
+        # --- Regex-based extraction (raw text) ------------------------
+        self._extract_links_regex(text, source_url, depth)
+
+    def _extract_links_regex(self, text, source_url, depth):
+        """Extract URLs from raw text using regex patterns.
+
+        Works on any text content: HTML, JS, CSS, ASP, etc.
+        """
+        # CSS url() references.
+        for match in re.findall(r'url\(["\']?([^"\'()]+)["\']?\)', text):
             self._enqueue(match, source_url, depth)
 
-        # document.write('<script … src="…">') patterns.
-        for match in re.findall(r'src=["\']([^"\']+)["\']', html):
+        # src="…" / src='…' anywhere.
+        for match in re.findall(r'src=["\']([^"\']+)["\']', text):
             self._enqueue(match, source_url, depth)
 
-        # href="…" anywhere (catches dynamically-written links).
-        for match in re.findall(r'href=["\']([^"\']+)["\']', html):
+        # href="…" / href='…' anywhere.
+        for match in re.findall(r'href=["\']([^"\']+)["\']', text):
             self._enqueue(match, source_url, depth)
 
-        # window.location or .href = "…" redirects.
-        for match in re.findall(r'(?:location|href)\s*=\s*["\']([^"\']+)["\']', html):
+        # window.location / .href = "…" redirects.
+        for match in re.findall(
+            r'(?:location|\.href)\s*=\s*["\']([^"\']+)["\']', text,
+        ):
             self._enqueue(match, source_url, depth)
 
         # $.ajax url: '…' patterns.
-        for match in re.findall(r"url\s*:\s*['\"]([^'\"]+)['\"]", html):
+        for match in re.findall(r"url\s*:\s*['\"]([^'\"]+)['\"]", text):
             self._enqueue(match, source_url, depth)
 
-        # setAction('…') patterns (form actions in the router JS).
-        for match in re.findall(r"setAction\(['\"]([^'\"]+)['\"]\)", html):
+        # setAction('…') patterns (Huawei form submission).
+        for match in re.findall(r"setAction\(['\"]([^'\"]+)['\"]\)", text):
             self._enqueue(match, source_url, depth)
 
-        # loadLanguage references.
+        # loadLanguage("id", "/path/to/file.js", …)
         for match in re.findall(
-            r'loadLanguage\([^,]+,\s*["\']([^"\']+)["\']', html,
+            r'loadLanguage\([^,]+,\s*["\']([^"\']+)["\']', text,
         ):
+            self._enqueue(match, source_url, depth)
+
+        # RequestFile=/path/to/file.asp in query strings.
+        for match in re.findall(r'RequestFile=([^\s&"\']+)', text):
+            self._enqueue(match, source_url, depth)
+
+        # Generic string literals that look like router paths:
+        #   '/some/path.asp'  or  "/some/path.js"
+        for match in re.findall(
+            r"""(?:['"])(\/[a-zA-Z0-9_\-/.]+\.(?:asp|js|css|html?|cgi|gif|jpg|png|ico))(?:['"])""",
+            text,
+        ):
+            self._enqueue(match, source_url, depth)
+
+        # Bare .cgi endpoint references:  'something.cgi' or "something.cgi"
+        for match in re.findall(
+            r"""['\"]([a-zA-Z0-9_\-/]+\.cgi)(?:\?[^'"]*)?['"]""", text,
+        ):
+            self._enqueue(match, source_url, depth)
+
+        # Bare .asp page references:  'something.asp' or "something.asp"
+        for match in re.findall(
+            r"""['\"]([a-zA-Z0-9_\-/]+\.asp)(?:\?[^'"]*)?['"]""", text,
+        ):
+            self._enqueue(match, source_url, depth)
+
+        # document.write patterns with src or href.
+        for match in re.findall(
+            r"document\.write\(['\"].*?(?:src|href)=['\\\"]([^'\\\"]+)", text,
+        ):
+            self._enqueue(match, source_url, depth)
+
+        # Image source assignments: .src = '…'
+        for match in re.findall(r'\.src\s*=\s*["\']([^"\']+)["\']', text):
             self._enqueue(match, source_url, depth)
 
     def _enqueue(self, raw_url, source_url, depth):
         """Resolve and enqueue a URL if it is worth fetching."""
+        if not raw_url:
+            return
+
         # Strip query strings and fragments for the file save,
         # but resolve relative paths first.
         raw_url = raw_url.split("?")[0].split("#")[0].strip()
         if not raw_url or raw_url.startswith("javascript:"):
+            return
+        if raw_url.startswith("data:"):
             return
 
         absolute = urljoin(source_url, raw_url)
@@ -441,6 +597,8 @@ class HuaweiCrawler:
         logger.info("  URLs visited  : %d", len(self.visited))
         logger.info("  Files saved   : %d", len(self.saved_files))
         logger.info("  Output folder : %s", os.path.abspath(self.output_dir))
+        cookies = {c.name: c.value for c in self.session.cookies}
+        logger.info("  Session cookies: %s", cookies)
         logger.info("=" * 60)
 
 
@@ -469,7 +627,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--max-depth", type=int, default=DEFAULT_MAX_DEPTH,
-        help=f"Maximum crawl depth (default: {DEFAULT_MAX_DEPTH})",
+        help=f"Maximum crawl depth, 0 for unlimited (default: {DEFAULT_MAX_DEPTH})",
     )
     parser.add_argument(
         "--delay", type=float, default=DEFAULT_DELAY,
