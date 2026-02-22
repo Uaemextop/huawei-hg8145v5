@@ -115,7 +115,7 @@ BROADCAST_MAC = b"\xff\xff\xff\xff\xff\xff"
 NULL_MAC = "00:00:00:00:00:00"
 
 # Used for local-IP detection via a non-routed UDP connect
-_PUBLIC_DNS_IP = "8.8.8.8"
+_IP_DETECTION_TARGET = "8.8.8.8"  # used only for local IP detection via UDP connect
 
 # IP protocol numbers
 IPPROTO_TCP = 6
@@ -1698,7 +1698,7 @@ class TrafficAnalyzer:
         """Best-effort detection of our local IP by connecting to a dummy target."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((_PUBLIC_DNS_IP, 80))
+            s.connect((_IP_DETECTION_TARGET, 80))
             ip = s.getsockname()[0]
             s.close()
             return ip

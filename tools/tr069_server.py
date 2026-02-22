@@ -226,6 +226,8 @@ MEGACABLE_ISP_CONFIG = {
     "custom_info_detail": "megacable",
     "firmware_original": "V500R022C00SPC368A2406290391",
     "firmware_current": "V500R022",
+    # X_HW_Path is a ManagementServer session token / path identifier
+    # set by the ISP ACS during provisioning (MD5 hash format).
     "x_hw_path": "57352c84da092f5d2e257fe48d9f86c9",
     "local_admin_name": "Mega_gpon",
     "local_user_name": "user",
@@ -445,7 +447,7 @@ CERT_PARAMS = [
 SERVICE_PARAMS = [
     "InternetGatewayDevice.X_HW_ServiceManage.FtpEnable",
     "InternetGatewayDevice.X_HW_ServiceManage.FtpPort",
-    "InternetGatewayDevice.X_HW_ServiceManage.FtpRoorDir",
+    "InternetGatewayDevice.X_HW_ServiceManage.FtpRoorDir",  # sic — Huawei firmware typo
 ]
 
 SYSLOG_PARAMS = [
