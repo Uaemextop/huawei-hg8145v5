@@ -342,6 +342,9 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # the router receives the correct value: 'body:Language:english:id=-1'.
         # NOTE: We do NOT set domain= to allow the router's Set-Cookie response
         # to properly update this cookie value after successful authentication.
+        # IMPORTANT: Clear existing cookies first to prevent duplicate Cookie entries
+        # that cause CookieConflictError when the router sets the authenticated cookie.
+        session.cookies.clear()
         session.cookies.set(
             "Cookie",
             "body:Language:english:id=-1",
@@ -377,6 +380,20 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     log.debug("login.cgi response status: %s", resp.status_code)
     log.debug("login.cgi Set-Cookie headers: %s", resp.headers.get('Set-Cookie'))
     log.debug("login.cgi response cookies: %s", dict(resp.cookies))
+
+    # Deduplicate cookies to prevent CookieConflictError
+    # If the router sets a cookie with domain while we have one without domain,
+    # we can end up with duplicates. Keep only the most recent (authenticated) cookie.
+    cookie_list = list(session.cookies)
+    if len(cookie_list) > 1:
+        # Find all cookies named "Cookie"
+        cookie_entries = [c for c in cookie_list if c.name == "Cookie"]
+        if len(cookie_entries) > 1:
+            log.debug("Found %d duplicate 'Cookie' entries, keeping only the last one", len(cookie_entries))
+            # Remove all but the last one (most recent, which should be the authenticated one)
+            for cookie_to_remove in cookie_entries[:-1]:
+                session.cookies.clear(cookie_to_remove.domain, cookie_to_remove.path, cookie_to_remove.name)
+
     log.debug("Session cookies after login.cgi POST: %s", dict(session.cookies))
 
     # A successful login redirects away from the login form.
