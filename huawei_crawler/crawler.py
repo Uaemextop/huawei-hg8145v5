@@ -103,12 +103,11 @@ class Crawler:
         # expects Referer: http://192.168.100.1/ — not login.cgi.
         self.session.headers["Referer"] = self.base + "/"
 
-        # Refresh X_HW_Token right after login.
-        # The session cookie is preserved inside refresh_token() even if the
-        # token endpoint is unavailable on this firmware version.
-        self._current_token = refresh_token(
-            self.session, self.host, self._current_token
-        )
+        # Do NOT proactively refresh the X_HW_Token here.
+        # The token endpoint may not exist on all firmware versions; an absent
+        # endpoint can respond with Set-Cookie: Cookie=default, invalidating
+        # the just-acquired session.  The token is fetched lazily on demand
+        # inside _retry_with_token() when a 403 response is encountered.
 
         # Resume: scan previously downloaded files
         if not self.force:
@@ -350,10 +349,9 @@ class Crawler:
                 if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)
                     self.session.headers["Referer"] = self.base + "/"
-                    # Refresh token with session-cookie protection
-                    self._current_token = refresh_token(
-                        self.session, self.host, self._current_token
-                    )
+                    # Token is refreshed lazily on the next 403 – do NOT call
+                    # refresh_token() here to avoid the token endpoint resetting
+                    # Cookie=default on the freshly re-acquired session.
                     self._visited.discard(key)
                     self._queue.appendleft(url)
                     return

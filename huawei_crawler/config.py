@@ -54,6 +54,12 @@ CRAWLABLE_TYPES = frozenset({
 # All three markers must appear together for a genuine login-form response.
 LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 
+# Maximum length for a valid X_HW_Token string.
+# Real tokens from GetRandCount.asp / GetRandToken.asp are short numeric or
+# hex strings (typically 10-20 chars).  Anything longer almost certainly means
+# the endpoint returned an HTML error page (which must NOT be stored as a token).
+MAX_TOKEN_LENGTH = 64
+
 # URL path patterns for write-action endpoints that must NEVER be crawled.
 import re
 BLOCKED_PATH_RE = re.compile(

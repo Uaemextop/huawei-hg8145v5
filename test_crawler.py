@@ -114,6 +114,94 @@ class TestRefreshTokenSessionSafety(unittest.TestCase):
         self.assertEqual(session.cookies.get("Cookie"), "default")
 
 
+class TestPreLoginCookieDomain(unittest.TestCase):
+    """
+    Verify the pre-login cookie / session cookie interaction.
+
+    Empirically verified (Python http.cookiejar behaviour):
+
+      * Manually setting cookie WITHOUT domain= stores it under domain="" in
+        the jar.  When the router responds with Set-Cookie (domain from request
+        URL = "192.168.100.1"), that creates a SECOND entry → duplicate cookies
+        → both sent to router → pre-login value (id=-1) can take precedence.
+
+      * Manually setting cookie WITH domain="192.168.100.1" stores it under
+        the same key that the router's Set-Cookie response will write to →
+        server's authenticated cookie OVERWRITES ours → single clean entry. ✓
+
+    Therefore login() uses domain=host when setting the pre-login cookie.
+    """
+
+    def _make_server_cookie(self, value):
+        """Build a cookie resembling what the router's Set-Cookie header produces."""
+        import http.cookiejar
+        return http.cookiejar.Cookie(
+            version=0, name="Cookie", value=value,
+            port=None, port_specified=False,
+            domain="192.168.100.1", domain_specified=False, domain_initial_dot=False,
+            path="/", path_specified=True,
+            secure=False, expires=None, discard=True,
+            comment=None, comment_url=None, rest={}, rfc2109=False,
+        )
+
+    def test_domain_host_allows_server_to_overwrite_prelogin_cookie(self):
+        """
+        With domain=host the server's Set-Cookie (domain_specified=False) overwrites
+        the pre-login cookie stored under the same domain key → single entry. ✓
+        """
+        session = requests.Session()
+        session.cookies.set("Cookie", "body:Language:english:id=-1",
+                            domain="192.168.100.1", path="/")
+
+        # Simulate Set-Cookie from the router (domain_specified=False)
+        session.cookies.set_cookie(self._make_server_cookie("body:Language:english:id=7"))
+
+        all_cookies = [c for c in session.cookies if c.name == "Cookie"]
+        self.assertEqual(len(all_cookies), 1,
+                         "Expected exactly one Cookie entry with domain=host")
+        self.assertEqual(session.cookies.get("Cookie"), "body:Language:english:id=7")
+
+    def test_no_domain_arg_creates_duplicate_entries(self):
+        """
+        Without domain=, the manually-set cookie (domain='') and the server-set
+        cookie (domain='192.168.100.1') are stored in different jar buckets
+        → duplicate entries → the pre-login value may be sent to the router. ✗
+        """
+        session = requests.Session()
+        # No domain= : stored under domain=""
+        session.cookies.set("Cookie", "body:Language:english:id=-1", path="/")
+
+        session.cookies.set_cookie(self._make_server_cookie("body:Language:english:id=7"))
+
+        all_cookies = [c for c in session.cookies if c.name == "Cookie"]
+        # Two entries exist: domain="" and domain="192.168.100.1"
+        self.assertGreater(len(all_cookies), 1,
+                           "Without domain= there should be duplicate Cookie entries")
+
+    def test_refresh_token_rejects_html_response(self):
+        """
+        An HTML error page returned by a missing token endpoint must NOT be
+        stored as X_HW_Token.
+        """
+        from huawei_crawler.auth import refresh_token
+
+        session = requests.Session()
+        session.cookies.set("Cookie", "body:Language:english:id=1",
+                            domain="192.168.100.1", path="/")
+
+        def _html_403(*args, **kwargs):
+            resp = MagicMock()
+            resp.text = "<!DOCTYPE html><html><body>403 Forbidden</body></html>"
+            return resp
+
+        with patch.object(session, "post", side_effect=_html_403):
+            token = refresh_token(session, "192.168.100.1", current_token="prev")
+
+        # HTML body must NOT be stored as the token
+        self.assertEqual(token, "prev",
+                         "HTML error page must not replace a valid previous token")
+
+
 class TestCrawlerRefreshTokenFix(unittest.TestCase):
     """Same session-cookie protection test for the root crawler.py module."""
 

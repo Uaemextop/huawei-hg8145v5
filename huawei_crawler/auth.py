@@ -25,7 +25,7 @@ import requests
 
 from .config import (
     LOGIN_PAGE, LOGIN_CGI, RAND_COUNT_URL, RAND_INFO_URL, TOKEN_URL,
-    REQUEST_TIMEOUT, LOGIN_MARKERS,
+    REQUEST_TIMEOUT, LOGIN_MARKERS, MAX_TOKEN_LENGTH,
 )
 
 log = logging.getLogger("hg8145v5-crawler")
@@ -287,7 +287,10 @@ def refresh_token(
             log.debug("Session cookie restored after token refresh (endpoint reset it)")
 
         token = resp.text.strip()
-        if token and len(token) >= 8:
+        # Validate: a real X_HW_Token is a short alphanumeric string.
+        # Reject HTML error pages (contain '<', spaces, etc.) returned when the
+        # endpoint is absent or unauthenticated.
+        if token and len(token) <= MAX_TOKEN_LENGTH and token.replace("-", "").isalnum():
             log.debug("X_HW_Token refreshed: %s…", token[:12])
             return token
     except requests.RequestException as exc:
