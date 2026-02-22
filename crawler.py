@@ -164,7 +164,11 @@ class HuaweiCrawler:
         self.queue = deque()
         # Count consecutive failures to detect session expiry.
         self._consecutive_failures = 0
-        self._max_consecutive_failures = 10
+        self._max_consecutive_failures = 3
+        # Keep-alive: re-verify session every N requests.
+        self._request_count = 0
+        self._keepalive_interval = 20
+        self._max_relogin_attempts = 3
 
     # ------------------------------------------------------------------
     # Cookie helpers
@@ -277,10 +281,105 @@ class HuaweiCrawler:
         return None
 
     def _try_relogin(self):
-        """Attempt to re-authenticate when the session appears expired."""
-        logger.warning("Session may have expired – attempting re-login …")
-        self._consecutive_failures = 0
-        return self.login()
+        """Attempt to re-authenticate when the session appears expired.
+
+        Retries up to ``_max_relogin_attempts`` times with a short delay
+        between attempts.
+        """
+        for attempt in range(1, self._max_relogin_attempts + 1):
+            logger.warning(
+                "Session may have expired – re-login attempt %d/%d …",
+                attempt, self._max_relogin_attempts,
+            )
+            self._consecutive_failures = 0
+            if self.login():
+                logger.info("Re-login succeeded on attempt %d.", attempt)
+                return True
+            time.sleep(1)
+        logger.error("Re-login failed after %d attempts.", self._max_relogin_attempts)
+        return False
+
+    def _check_session(self):
+        """Proactive keep-alive: verify the session is still valid.
+
+        Called periodically (every ``_keepalive_interval`` requests) to
+        detect and recover from session expiry *before* it causes a
+        string of failures.
+        """
+        try:
+            resp = self.session.get(
+                self.base_url + "/index.asp", timeout=10, verify=False,
+            )
+            if resp.status_code == 200 and not self._response_is_login_redirect(resp, "/index.asp"):
+                logger.debug("Keep-alive check OK.")
+                return True
+        except requests.RequestException:
+            pass
+        logger.warning("Keep-alive check failed – session may have expired.")
+        return self._try_relogin()
+
+    def _response_is_login_redirect(self, resp, original_url):
+        """Return True if the response indicates the session has expired.
+
+        The router typically redirects to ``login.asp`` or serves the
+        login page when the session is no longer valid.
+        """
+        # Check if we were redirected to the login page.
+        if (
+            'login.asp' in (resp.url or '')
+            and 'login.asp' not in original_url
+            and 'index.asp' not in original_url
+        ):
+            return True
+        # Some firmware versions serve the login form directly.
+        if resp.text and 'txt_Username' in resp.text and 'login.cgi' in resp.text:
+            if 'login.asp' not in original_url and 'index.asp' not in original_url:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Resumability – skip already-downloaded files
+    # ------------------------------------------------------------------
+    def _scan_existing_files(self):
+        """Populate ``visited`` from files already on disk.
+
+        This allows the crawler to resume a previous session without
+        re-downloading files that were already saved.  Existing text
+        files (ASP, HTML, JS, CSS) are also parsed for links so newly
+        discovered URLs can still be crawled.
+        """
+        if not os.path.isdir(self.output_dir):
+            return
+
+        count = 0
+        for dirpath, _dirnames, filenames in os.walk(self.output_dir):
+            for fname in filenames:
+                local_path = os.path.join(dirpath, fname)
+                # Reconstruct the URL from the file path.
+                rel = os.path.relpath(local_path, self.output_dir)
+                # Normalise path separators to forward slashes.
+                rel = rel.replace(os.sep, "/")
+                url = self.base_url + "/" + rel
+                normalised = self._normalise_url(url)
+                self.visited.add(normalised)
+                count += 1
+
+                # Parse text files for links so we still discover new
+                # URLs that may not have been crawled yet.
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in PARSEABLE_EXTENSIONS:
+                    try:
+                        with open(local_path, "r", encoding="utf-8", errors="replace") as fh:
+                            content = fh.read()
+                        self._extract_links(content, url, 0)
+                    except OSError:
+                        pass
+
+        if count:
+            logger.info(
+                "Resumed: found %d existing files in %s – they will be skipped.",
+                count, self.output_dir,
+            )
 
     # ------------------------------------------------------------------
     # Crawling
@@ -292,9 +391,16 @@ class HuaweiCrawler:
         analysed for new URLs (HTML tags, JS string literals, CSS
         url() references, etc.) and the crawler keeps going until the
         queue is empty – i.e. no new resources are found.
+
+        Files that already exist on disk from a previous run are
+        skipped automatically (their content is still parsed for
+        links so new pages can be discovered).
         """
         depth_desc = f"max depth {self.max_depth}" if self.max_depth else "unlimited depth"
         logger.info("Starting crawl (%s) …", depth_desc)
+
+        # Resume support: load already-downloaded files into visited.
+        self._scan_existing_files()
 
         # Seed the queue with known pages.
         for path in SEED_PATHS:
@@ -314,6 +420,11 @@ class HuaweiCrawler:
 
             self.visited.add(normalised)
 
+            # Periodic keep-alive check to catch session expiry early.
+            self._request_count += 1
+            if self._request_count % self._keepalive_interval == 0:
+                self._check_session()
+
             content = self._download(url)
             if content is None:
                 continue
@@ -331,8 +442,29 @@ class HuaweiCrawler:
         """Download *url* and save it to the output directory.
 
         Returns the response body as text (or None on failure).
+        Skips files that already exist on disk (resume support).
         Automatically re-authenticates if the session appears expired.
         """
+        # --- Check if the file already exists on disk (resume) --------
+        parsed = urlparse(url)
+        rel_path = unquote(parsed.path).lstrip("/")
+        if not rel_path or rel_path.endswith("/"):
+            rel_path = rel_path + "index.html"
+        local_path = os.path.join(self.output_dir, rel_path)
+
+        if os.path.isfile(local_path):
+            logger.debug("Already on disk, skipping download: %s", local_path)
+            # Return existing content so links can still be extracted.
+            ext = os.path.splitext(local_path)[1].lower()
+            if ext in PARSEABLE_EXTENSIONS:
+                try:
+                    with open(local_path, "r", encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+                except OSError:
+                    pass
+            return None
+
+        # --- Download -------------------------------------------------
         try:
             resp = self.session.get(url, timeout=15, verify=False)
         except requests.RequestException as exc:
@@ -361,12 +493,8 @@ class HuaweiCrawler:
             logger.debug("HTTP %s for %s", resp.status_code, url)
             return None
 
-        # Also detect login-page redirect in body.
-        if (
-            'login.asp' in (resp.url or '')
-            and 'login.asp' not in url
-            and 'index.asp' not in url
-        ):
+        # Detect login-page redirect in URL or response body.
+        if self._response_is_login_redirect(resp, url):
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_consecutive_failures:
                 if self._try_relogin():
@@ -382,16 +510,8 @@ class HuaweiCrawler:
         self._consecutive_failures = 0
         self._log_cookies("after download")
 
-        # Determine local file path from the URL path.
-        parsed = urlparse(url)
-        rel_path = unquote(parsed.path).lstrip("/")
-        if not rel_path or rel_path.endswith("/"):
-            rel_path = rel_path + "index.html"
-
-        # Remove query string artefacts from the saved file name.
-        local_path = os.path.join(self.output_dir, rel_path)
+        # local_path and rel_path were already computed above.
         local_dir = os.path.dirname(local_path)
-
         os.makedirs(local_dir, exist_ok=True)
 
         # Decide binary vs text.

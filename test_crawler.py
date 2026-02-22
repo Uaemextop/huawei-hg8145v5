@@ -295,5 +295,130 @@ class TestUnlimitedDepth(unittest.TestCase):
         self.assertFalse(crawler.max_depth)
 
 
+class TestSkipExistingFiles(unittest.TestCase):
+    """Verify that already-downloaded files are skipped."""
+
+    def setUp(self):
+        self.output_dir = tempfile.mkdtemp()
+        self.crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir=self.output_dir,
+            max_depth=0,
+            delay=0,
+        )
+
+    def test_scan_existing_populates_visited(self):
+        # Create a fake existing file.
+        sub = os.path.join(self.output_dir, "html", "status")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "info.asp"), "w") as fh:
+            fh.write("<html></html>")
+
+        self.crawler._scan_existing_files()
+
+        expected = "http://192.168.100.1/html/status/info.asp"
+        self.assertIn(
+            HuaweiCrawler._normalise_url(expected),
+            self.crawler.visited,
+        )
+
+    def test_scan_existing_extracts_links(self):
+        # Create a file with a link inside.
+        sub = os.path.join(self.output_dir, "html")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "page.asp"), "w") as fh:
+            fh.write('<script src="/resource/common/util.js"></script>')
+
+        self.crawler._scan_existing_files()
+
+        urls = [u for u, _ in self.crawler.queue]
+        self.assertIn("http://192.168.100.1/resource/common/util.js", urls)
+
+    def test_scan_empty_dir_no_error(self):
+        # Should not raise when output_dir does not exist.
+        crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir="/tmp/nonexistent_dir_" + str(os.getpid()),
+            max_depth=0,
+            delay=0,
+        )
+        crawler._scan_existing_files()  # should not raise
+        self.assertEqual(len(crawler.visited), 0)
+
+    def test_download_skips_existing_file(self):
+        # Create a file that matches the URL path.
+        os.makedirs(os.path.join(self.output_dir, "html"), exist_ok=True)
+        filepath = os.path.join(self.output_dir, "html", "test.asp")
+        with open(filepath, "w") as fh:
+            fh.write("<html>cached</html>")
+
+        # _download should return the cached content without HTTP.
+        content = self.crawler._download("http://192.168.100.1/html/test.asp")
+        self.assertIn("cached", content)
+
+
+class TestSessionKeepAlive(unittest.TestCase):
+    """Verify session keep-alive configuration."""
+
+    def test_keepalive_interval_set(self):
+        crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir=tempfile.mkdtemp(),
+            max_depth=0,
+            delay=0,
+        )
+        self.assertEqual(crawler._keepalive_interval, 20)
+        self.assertEqual(crawler._max_relogin_attempts, 3)
+        self.assertEqual(crawler._max_consecutive_failures, 3)
+
+    def test_response_is_login_redirect_url(self):
+        """Detect redirect to login.asp in URL."""
+        crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir=tempfile.mkdtemp(),
+            max_depth=0,
+            delay=0,
+        )
+
+        class FakeResp:
+            url = "http://192.168.100.1/login.asp"
+            text = ""
+
+        self.assertTrue(
+            crawler._response_is_login_redirect(FakeResp(), "/html/status/info.asp"),
+        )
+        # Should NOT flag when original URL *is* login.asp.
+        self.assertFalse(
+            crawler._response_is_login_redirect(FakeResp(), "/login.asp"),
+        )
+
+    def test_response_is_login_redirect_body(self):
+        """Detect login form in response body."""
+        crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir=tempfile.mkdtemp(),
+            max_depth=0,
+            delay=0,
+        )
+
+        class FakeResp:
+            url = "http://192.168.100.1/html/status/info.asp"
+            text = '<input id="txt_Username"> <form action="login.cgi">'
+
+        self.assertTrue(
+            crawler._response_is_login_redirect(FakeResp(), "/html/status/info.asp"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

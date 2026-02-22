@@ -52,7 +52,10 @@ python crawler.py --host 192.168.100.1 --user Mega_gpon --password 796cce597901a
    - POSTs to `/asp/GetRandCount.asp` to obtain a CSRF token.
    - POSTs credentials (password is Base64-encoded) to `/login.cgi`.
    - All cookies are captured and maintained automatically throughout the
-     crawl. If the session expires, the crawler re-authenticates.
+     crawl.
+   - **Session keep-alive**: every 20 requests the session is verified
+     with a lightweight check.  If the session expires the crawler
+     automatically re-authenticates (up to 3 retries) and continues.
 2. **Crawl** – Starting from a set of known router pages, it **dynamically
    and recursively** discovers new URLs by parsing **every** downloaded file
    (HTML, ASP, JS, CSS) for:
@@ -70,6 +73,11 @@ python crawler.py --host 192.168.100.1 --user Mega_gpon --password 796cce597901a
 3. **Save** – Every downloaded file is written under the output directory
    using the same path structure as the router web server, producing an
    offline mirror suitable for static analysis.
+4. **Resume** – On startup the crawler scans the output directory.  Files
+   that already exist are **skipped** (not re-downloaded), but their
+   content is still parsed for links so newly discovered pages can be
+   crawled.  This makes it safe to stop and restart the crawler at any
+   time.
 
 ## Output structure
 
