@@ -35,9 +35,9 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-DEFAULT_HOST = "192.168.100.1"
-DEFAULT_USER = "Mega_gpon"
-DEFAULT_PASSWORD = "796cce597901a5cf"
+DEFAULT_HOST = os.environ.get("HG8145V5_HOST", "192.168.100.1")
+DEFAULT_USER = os.environ.get("HG8145V5_USER", "Mega_gpon")
+DEFAULT_PASSWORD = os.environ.get("HG8145V5_PASSWORD", "796cce597901a5cf")
 DEFAULT_OUTPUT = "router_dump"
 DEFAULT_MAX_DEPTH = 10
 DEFAULT_DELAY = 0.5
@@ -169,6 +169,8 @@ class HuaweiCrawler:
 
         # Step 1 – load the login page to get initial cookies.
         try:
+            # verify=False is required because router admin interfaces
+            # typically use self-signed TLS certificates.
             resp = self.session.get(
                 self.base_url + "/index.asp", timeout=15, verify=False,
             )

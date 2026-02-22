@@ -1,5 +1,6 @@
 """Tests for the Huawei HG8145V5 router crawler core logic."""
 
+import base64
 import os
 import tempfile
 import unittest
@@ -160,7 +161,6 @@ class TestPasswordEncoding(unittest.TestCase):
     """Verify the Base64 password encoding matches router expectations."""
 
     def test_password_base64(self):
-        import base64
         password = "796cce597901a5cf"
         encoded = base64.b64encode(password.encode("utf-8")).decode("ascii")
         # The router JS uses base64encode(Password.value).
