@@ -321,7 +321,6 @@ class Crawler:
 
             # If the response still contains the login form, the session
             # is not actually authenticated — skip saving.
-            from .config import _LOGIN_MARKERS
             text = content.decode("utf-8", errors="replace")
             if all(marker in text for marker in _LOGIN_MARKERS):
                 log.debug("Post-auth '/' still shows login form — skipping frameset save")

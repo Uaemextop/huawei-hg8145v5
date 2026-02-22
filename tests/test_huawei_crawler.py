@@ -9,6 +9,8 @@ import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests as _requests
+
 from huawei_crawler.config import (
     CRAWLABLE_TYPES,
     DEFAULT_HOST,
@@ -17,7 +19,11 @@ from huawei_crawler.config import (
     _LOGIN_MARKERS,
 )
 from huawei_crawler.auth.password import b64encode_password, pbkdf2_sha256_password
-from huawei_crawler.auth.login import is_session_expired
+from huawei_crawler.auth.login import (
+    _deduplicate_cookies,
+    detect_login_mode,
+    is_session_expired,
+)
 from huawei_crawler.extraction.links import extract_links
 from huawei_crawler.extraction.css import _extract_css_urls
 from huawei_crawler.extraction.javascript import _extract_js_paths
@@ -126,9 +132,6 @@ class TestSessionLoopFix(unittest.TestCase):
 
     def test_cookie_no_domain_parameter(self):
         """Pre-login cookie must NOT be set with domain= to avoid duplicates."""
-        # Verify by testing the login function's cookie setup behavior:
-        # after login setup, there should be exactly one 'Cookie' entry
-        import requests as _requests
         s = _requests.Session()
         s.cookies.clear()
         s.cookies.set("Cookie", "body:Language:english:id=-1", path="/")
@@ -139,8 +142,6 @@ class TestSessionLoopFix(unittest.TestCase):
 
     def test_deduplicate_cookies(self):
         """_deduplicate_cookies should keep only the last Cookie entry."""
-        from huawei_crawler.auth.login import _deduplicate_cookies
-        import requests as _requests
         s = _requests.Session()
         # Simulate: pre-login cookie (no domain) + server-set cookie (with domain)
         s.cookies.set("Cookie", "old-value", path="/")
@@ -154,8 +155,6 @@ class TestSessionLoopFix(unittest.TestCase):
 
     def test_detect_login_mode_fallback_to_disk(self):
         """detect_login_mode should fall back to parsing files on disk."""
-        from huawei_crawler.auth.login import detect_login_mode
-        import requests as _requests
         s = _requests.Session()
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir)
