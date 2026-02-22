@@ -400,12 +400,28 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
 
     redirect_url = urllib.parse.urljoin(base_url(host), redirect_path)
+
+    # Log cookies after login.cgi POST to debug session state
+    log.debug("Cookies immediately after login.cgi POST: %s", dict(session.cookies))
+
     try:
         follow_resp = session.get(
             redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         post_login_url = follow_resp.url
         log.debug("Followed JS redirect → %s", post_login_url)
+        log.debug("Cookies after following redirect: %s", dict(session.cookies))
+
+        # Verify the redirect didn't send us back to the login page
+        if is_session_expired(follow_resp):
+            log.error(
+                "The redirect to %s returned the login page. "
+                "Session may not have been established. "
+                "Cookie after redirect: %s",
+                redirect_url,
+                dict(session.cookies)
+            )
+            return None
     except requests.RequestException as exc:
         log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)
         post_login_url = redirect_url
@@ -441,12 +457,6 @@ def is_session_expired(resp: requests.Response) -> bool:
     if cookie_val.lower() == "default":
         return True
 
-    # A redirect to the specific login-page paths is the most reliable signal.
-    # We only match the path (not substrings of other paths).
-    final_path = urllib.parse.urlparse(resp.url).path.lower()
-    if final_path in ("/index.asp", "/login.asp"):
-        return True
-
     # Non-HTML responses (JS, CSS, images) can legitimately contain login-related
     # identifier strings – skip the body check for them entirely.
     ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -455,7 +465,14 @@ def is_session_expired(resp: requests.Response) -> bool:
 
     # A genuine login form has ALL three markers present at the same time.
     # Using all() prevents a single marker in an HTML snippet from firing.
-    return all(marker in resp.text for marker in _LOGIN_MARKERS)
+    # We check for markers FIRST before checking URL, because the router may serve
+    # the authenticated admin interface at /index.asp after login (not just the login form).
+    has_login_markers = all(marker in resp.text for marker in _LOGIN_MARKERS)
+
+    # Only return True if we actually see the login form.
+    # A redirect to /index.asp or /login.asp with login markers is a genuine expiry.
+    # But a redirect without markers means we're seeing the authenticated admin interface.
+    return has_login_markers
 
 
 # ---------------------------------------------------------------------------
