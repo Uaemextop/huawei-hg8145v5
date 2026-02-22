@@ -2,9 +2,107 @@
 
 ## Overview
 
-The Huawei HG8145V5 router crawler has been significantly enhanced to perform **deep, recursive, and exhaustive crawling** that extracts ALL content from the router's web interface. The crawler now analyzes JavaScript, ASP, and HTML content dynamically to discover hidden routes and endpoints.
+The Huawei HG8145V5 router crawler has been significantly enhanced to perform **deep, recursive, and exhaustive crawling** that extracts ALL content from the router's web interface. The crawler now includes session keep-alive, automatic re-authentication, and smart file skip features for robust and efficient operation.
 
-## Key Enhancements
+## Latest Enhancements (Session Management & Optimization)
+
+### 1. Session Keep-Alive
+
+**Purpose**: Maintain persistent HTTP connections for better performance.
+
+**Implementation:**
+- Added `Connection: keep-alive` header
+- Added `Keep-Alive: timeout=300, max=1000` header
+- Configured connection pooling: `pool_connections=10, pool_maxsize=20`
+
+**Benefits:**
+- Reduces connection overhead
+- Faster subsequent requests
+- More efficient network usage
+
+**Code Location:** `huawei_crawler.py:58-72`
+
+### 2. Auto Re-authentication
+
+**Purpose**: Automatically detect and recover from session expiry.
+
+**Implementation:**
+
+**Session Validation (`is_session_valid()`):**
+- Checks session validity every 30 seconds
+- Tests access to protected endpoint
+- Detects 401/403 responses and login redirects
+- Updates authentication status
+
+**Ensure Authentication (`ensure_authenticated()`):**
+- Validates session before operations
+- Automatically re-logs in if session expired
+- Returns authentication status
+
+**Retry on Auth Failure (`crawl_page()`):**
+- Detects authentication failures during requests
+- Automatically attempts re-login
+- Retries the failed request after successful re-auth
+
+**Benefits:**
+- No manual intervention needed for expired sessions
+- Robust long-running crawls
+- Handles router timeouts gracefully
+
+**Code Location:** `huawei_crawler.py:163-205, 620-628`
+
+### 3. Smart File Skip (Resume Capability)
+
+**Purpose**: Skip downloading files that already exist, enabling resume functionality.
+
+**Implementation:**
+
+**File Check (`file_already_downloaded()`):**
+- Checks if file exists at expected path
+- Verifies file has non-zero size
+- Returns boolean indicating existence
+
+**Smart Crawling:**
+- Checks file existence before HTTP request
+- Skips download if file already exists
+- Still extracts URLs from existing files
+- Maintains complete link discovery
+
+**Benefits:**
+- Resume interrupted crawls without re-downloading
+- Save bandwidth and time
+- Idempotent crawling (can run multiple times safely)
+- Useful for incremental updates
+
+**Code Location:** `huawei_crawler.py:207-221, 578-610`
+
+**Example Usage:**
+```bash
+# Start crawl
+python huawei_crawler.py
+
+# If interrupted (Ctrl+C), just run again:
+python huawei_crawler.py
+
+# It will skip already downloaded files and continue from where it left off!
+```
+
+### 4. Enhanced File Reading
+
+**Purpose**: Extract URLs from existing files without re-downloading.
+
+**Implementation:**
+- Reads cached ASP/HTML/JS/CSS files
+- Performs same extraction as fresh downloads
+- Maintains crawl completeness
+- Works seamlessly with file skip
+
+**Benefits:**
+- Complete URL discovery even when skipping downloads
+- No loss of crawl depth when resuming
+- Efficient re-analysis of existing content
+
+## Previous Enhancements (Deep Analysis)
 
 ### 1. JavaScript Route Extraction (`extract_js_routes`)
 
