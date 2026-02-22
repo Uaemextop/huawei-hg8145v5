@@ -75,6 +75,14 @@ MOCK_INDEX_ASP = """
   SetDivValue("DivErrPromt", GetLoginDes("frame014"));
   SetDivValue("DivErrIcon", html);
 
+  result = hexDecode(data);
+  result = dealDataWithFun(data);
+  return Function('"use strict";return (' + str + ')')()();
+
+  Form.setAction('login.cgi?&CheckCodeErrFile=login.asp');
+  Form.setAction('logout.cgi?RequestFile=html/logout.html');
+  url += '&SubmitType=' + submitType;
+
   Form.addParameter('PassWord', base64encode(Password.value));
 
   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
@@ -366,6 +374,53 @@ class TestSecurityAuditChecks(unittest.TestCase):
         audit._is_logged_in = False
         audit.check_v25_sensitive_tr069_paths()
         self.assertEqual(audit.results[0].status, "SKIP")
+
+    # --- V-26: Write endpoints ---
+    def test_v26_write_endpoints_accessible(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.session.get.return_value = _mock_response(status_code=200, text="OK")
+        audit.check_v26_write_endpoints()
+        self.assertEqual(audit.results[0].status, "VULN")
+
+    def test_v26_write_endpoints_404(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no write patterns</html>"
+        audit.session.get.return_value = _mock_response(status_code=404, ok=False)
+        audit.check_v26_write_endpoints()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-27: Response chain RCE ---
+    def test_v27_response_chain_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v27_response_chain_rce()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+        self.assertIn("dealDataWithFun", audit.results[0].details)
+        self.assertTrue(audit.results[0].data["hexDecode"])
+
+    def test_v27_response_chain_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>safe page</html>"
+        audit.check_v27_response_chain_rce()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-28: RequestFile injection ---
+    def test_v28_requestfile_injection_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v28_requestfile_injection()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertIn("RequestFile", audit.results[0].details)
+        self.assertIn("CheckCodeErrFile", audit.results[0].details)
+        self.assertIn("SubmitType", audit.results[0].details)
+
+    def test_v28_requestfile_injection_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no requestfile</html>"
+        audit.check_v28_requestfile_injection()
+        self.assertEqual(audit.results[0].status, "OK")
 
 
 class TestSecurityAuditResults(unittest.TestCase):

@@ -591,8 +591,9 @@ class SecurityAudit:
 
         has_dbaa1_var = "var DBAA1" in page
         # The empty-password bypass: (DBAA1 != '1') && (Password.value == "")
-        has_empty_pwd_bypass = "DBAA1 != '1'" in page and 'Password.value == ""' in page
-        has_admin_hardcode = "txt_Username').value = \"admin\"" in page
+        has_empty_pwd_bypass = ("DBAA1 != '1'" in page
+                                and 'Password.value == ""' in page)
+        has_admin_hardcode = 'txt_Username\').value = "admin"' in page
 
         dbaa1_active = False
         m = re.search(r"var\s+DBAA1\s*=\s*'([^']*)'", page)
@@ -629,7 +630,7 @@ class SecurityAudit:
         m_user = re.search(r"var\s+defaultUsername\s*=\s*'([^']*)'", page)
         m_pass = re.search(r"var\s+defaultPassword\s*=\s*'([^']*)'", page)
         m_mode = re.search(r"var\s+CfgMode\s*=\s*'([^']*)'", page)
-        has_autofill = '$("#txt_Username").val(defaultUsername)' in page
+        has_autofill = "val(defaultUsername)" in page
 
         default_user = m_user.group(1) if m_user else ""
         default_pass = m_pass.group(1) if m_pass else ""
@@ -752,9 +753,11 @@ class SecurityAudit:
                 return
 
         accessible = []
+        # Minimum response length to distinguish real data from empty/error stubs
+        min_data_len = 10
         for path, description in TR069_SENSITIVE_PATHS:
             resp = self._post(f"/getajax.cgi?{path}")
-            if resp and resp.ok and len(resp.text.strip()) > 10:
+            if resp and resp.ok and len(resp.text.strip()) > min_data_len:
                 text = resp.text.strip()
                 if "error" not in text.lower() and text != "{ }":
                     accessible.append({"path": path, "description": description,
@@ -773,6 +776,113 @@ class SecurityAudit:
                 "V-25", "Sensitive TR-069 data extraction", "OK", "CRITICAL",
                 "No sensitive TR-069 paths returned data",
             ))
+
+    def check_v26_write_endpoints(self) -> None:
+        """V-26: Check for authenticated arbitrary write endpoints."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-26", "Arbitrary write endpoints",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        has_hwgetaction = "HWGetAction" in page
+        # Check util.js patterns
+        write_indicators = []
+        for pattern in ("HWGetAction", "ajaxSumitData", "setajax.cgi",
+                        "cfgaction.cgi", "configservice.cgi"):
+            if pattern in (page or ""):
+                write_indicators.append(pattern)
+
+        # Probe write endpoints (GET only — read-only probe)
+        write_endpoints = ["/setajax.cgi", "/cfgaction.cgi",
+                           "/configservice.cgi", "/set.cgi"]
+        accessible_write = []
+        for ep in write_endpoints:
+            resp = self._get(ep)
+            if resp and resp.status_code not in (404, 405):
+                accessible_write.append(f"{ep} (HTTP {resp.status_code})")
+
+        if accessible_write:
+            self._add(CheckResult(
+                "V-26", "Arbitrary write endpoints", "VULN", "CRITICAL",
+                f"Write endpoints accessible: {', '.join(accessible_write)}",
+                data={"endpoints": accessible_write,
+                      "code_patterns": write_indicators},
+            ))
+        elif write_indicators:
+            self._add(CheckResult(
+                "V-26", "Arbitrary write endpoints", "VULN", "HIGH",
+                f"Write functions in code: {', '.join(write_indicators)} "
+                "(endpoints not probed without auth)",
+            ))
+        else:
+            self._add(CheckResult("V-26", "Arbitrary write endpoints",
+                                  "OK", "CRITICAL",
+                                  "No write endpoint patterns found"))
+
+    def check_v27_response_chain_rce(self) -> None:
+        """V-27: Check for hexDecode+dealDataWithFun response chain."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-27", "Response chain RCE",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        has_hexdecode = "hexDecode" in page
+        has_dealdatawithfun = "dealDataWithFun" in page
+        has_function_constructor = "Function(" in page
+
+        if has_dealdatawithfun and has_function_constructor:
+            severity = "CRITICAL"
+            details = ("dealDataWithFun() + Function() constructor present — "
+                       "all AJAX responses are executed as code")
+            if has_hexdecode:
+                details += "; hexDecode allows obfuscated payloads"
+            self._add(CheckResult(
+                "V-27", "Response chain RCE", "VULN", severity, details,
+                data={"hexDecode": has_hexdecode,
+                      "dealDataWithFun": has_dealdatawithfun},
+            ))
+        else:
+            self._add(CheckResult("V-27", "Response chain RCE",
+                                  "OK", "CRITICAL",
+                                  "No dangerous response processing chain found"))
+
+    def check_v28_requestfile_injection(self) -> None:
+        """V-28: Check for RequestFile parameter injection."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-28", "RequestFile parameter injection",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        requestfile_refs = page.count("RequestFile=")
+        has_submittype = "SubmitType" in page
+        has_checkcodeerrfile = "CheckCodeErrFile" in page
+
+        injection_points = []
+        if requestfile_refs > 0:
+            injection_points.append(f"RequestFile= ({requestfile_refs} refs)")
+        if has_submittype:
+            injection_points.append("SubmitType")
+        if has_checkcodeerrfile:
+            injection_points.append("CheckCodeErrFile")
+
+        if injection_points:
+            self._add(CheckResult(
+                "V-28", "RequestFile parameter injection", "VULN", "HIGH",
+                f"Unsanitized redirect parameters: {', '.join(injection_points)} — "
+                "open redirect / path traversal possible",
+                data={"injection_points": injection_points,
+                      "requestfile_count": requestfile_refs},
+            ))
+        else:
+            self._add(CheckResult("V-28", "RequestFile parameter injection",
+                                  "OK", "HIGH",
+                                  "No RequestFile injection patterns found"))
 
     def check_endpoint_accessibility(self) -> None:
         """Bonus: Probe all known endpoints for accessibility."""
@@ -822,6 +932,9 @@ class SecurityAudit:
         self.check_v22_language_path_traversal()
         self.check_v23_pbkdf2_downgrade()
         self.check_v24_dom_xss()
+        self.check_v26_write_endpoints()
+        self.check_v27_response_chain_rce()
+        self.check_v28_requestfile_injection()
 
         # Auth-required checks (only if credentials provided)
         if self.username and self.password:
