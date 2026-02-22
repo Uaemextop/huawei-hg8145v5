@@ -89,6 +89,43 @@ TR069_PATHS = [
     "InternetGatewayDevice.IPPingDiagnostics.",
 ]
 
+# TR-069 paths for certificate, key, and credential extraction (V-25)
+TR069_SENSITIVE_PATHS = [
+    # Certificates and private keys
+    ("InternetGatewayDevice.X_HW_Security.Certificate.", "TLS certificates"),
+    ("InternetGatewayDevice.X_HW_Security.Certificate.1.", "First certificate"),
+    ("InternetGatewayDevice.ManagementServer.X_HW_Certificate", "ACS client cert"),
+    ("InternetGatewayDevice.ManagementServer.X_HW_PrivateKey", "ACS private key"),
+    # Stored credentials
+    ("InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1.Password", "Web user password"),
+    ("InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.Password", "Web admin password"),
+    ("InternetGatewayDevice.ManagementServer.Username", "ACS username"),
+    ("InternetGatewayDevice.ManagementServer.Password", "ACS password"),
+    ("InternetGatewayDevice.ManagementServer.ConnectionRequestPassword", "Conn req password"),
+    ("InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password",
+     "PPPoE password"),
+    ("InternetGatewayDevice.Services.VoiceService.1.VoiceProfile.1.Line.1.SIP.AuthPassword",
+     "VoIP SIP password"),
+    # WiFi keys
+    ("InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey",
+     "WiFi 2.4GHz PSK"),
+    ("InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase",
+     "WiFi 2.4GHz passphrase"),
+    ("InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey",
+     "WiFi 5GHz PSK"),
+    # GPON/ONT parameters
+    ("InternetGatewayDevice.DeviceInfo.X_HW_OMCI.PLOAM_Password", "GPON PLOAM password"),
+    ("InternetGatewayDevice.DeviceInfo.X_HW_OMCI.LOID", "GPON LOID"),
+    ("InternetGatewayDevice.DeviceInfo.X_HW_OMCI.LOIDPassword", "GPON LOID password"),
+    ("InternetGatewayDevice.DeviceInfo.X_HW_OMCI.OntSN", "ONT serial number"),
+    # Security and ACL
+    ("InternetGatewayDevice.X_HW_Security.", "Security config"),
+    ("InternetGatewayDevice.X_HW_Security.AclServices.", "ACL services"),
+    ("InternetGatewayDevice.X_HW_Security.Firewall.", "Firewall rules"),
+    # Connected devices
+    ("InternetGatewayDevice.LANDevice.1.Hosts.Host.", "Connected devices table"),
+]
+
 # Server variables leaked in index.asp
 LEAKED_VARS_PATTERNS = [
     (r"var\s+CfgMode\s*=\s*'([^']*)'", "CfgMode"),
@@ -511,6 +548,232 @@ class SecurityAudit:
             self._add(CheckResult("V-12", "MD5 usage",
                                   "OK", "LOW", "No MD5 functions detected"))
 
+    def check_v19_userlevel_escalation(self) -> None:
+        """V-19: Check for client-side Userlevel privilege escalation."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-19", "Client-side Userlevel escalation",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        has_userlevel = "var Userlevel" in page
+        has_admin_check = "Userlevel == 2" in page
+        has_admin_cgi = "MdfPwdAdminNoLg.cgi" in page
+        has_normal_cgi = "MdfPwdNormalNoLg.cgi" in page
+
+        if has_userlevel and has_admin_check and has_admin_cgi:
+            self._add(CheckResult(
+                "V-19", "Client-side Userlevel escalation", "VULN", "CRITICAL",
+                "Userlevel variable controls admin path selection client-side; "
+                "MdfPwdAdminNoLg.cgi reachable by setting Userlevel=2 in console",
+                data={"has_admin_cgi": has_admin_cgi,
+                      "has_normal_cgi": has_normal_cgi},
+            ))
+        elif has_userlevel:
+            self._add(CheckResult(
+                "V-19", "Client-side Userlevel escalation", "VULN", "HIGH",
+                "Userlevel variable present but admin CGI path not found",
+            ))
+        else:
+            self._add(CheckResult("V-19", "Client-side Userlevel escalation",
+                                  "OK", "CRITICAL",
+                                  "No client-side Userlevel pattern found"))
+
+    def check_v20_dbaa1_admin_bypass(self) -> None:
+        """V-20: Check for DBAA1 hardcoded admin account bypass."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-20", "DBAA1 admin bypass",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        has_dbaa1_var = "var DBAA1" in page
+        # The empty-password bypass: (DBAA1 != '1') && (Password.value == "")
+        has_empty_pwd_bypass = "DBAA1 != '1'" in page and 'Password.value == ""' in page
+        has_admin_hardcode = "txt_Username').value = \"admin\"" in page
+
+        dbaa1_active = False
+        m = re.search(r"var\s+DBAA1\s*=\s*'([^']*)'", page)
+        if m:
+            dbaa1_active = m.group(1) == "1"
+
+        if dbaa1_active:
+            self._add(CheckResult(
+                "V-20", "DBAA1 admin bypass", "VULN", "CRITICAL",
+                "DBAA1='1' active — admin username hardcoded, "
+                "empty password check bypassed",
+            ))
+        elif has_dbaa1_var and has_empty_pwd_bypass:
+            self._add(CheckResult(
+                "V-20", "DBAA1 admin bypass", "VULN", "HIGH",
+                "DBAA1 bypass code present (inactive: DBAA1='0'); "
+                "can be activated via console: DBAA1='1'",
+                data={"has_admin_hardcode": has_admin_hardcode},
+            ))
+        else:
+            self._add(CheckResult("V-20", "DBAA1 admin bypass",
+                                  "OK", "CRITICAL",
+                                  "No DBAA1 bypass pattern found"))
+
+    def check_v21_antel_default_creds(self) -> None:
+        """V-21: Check if default credentials are leaked in HTML."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-21", "ANTEL default credential leak",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        m_user = re.search(r"var\s+defaultUsername\s*=\s*'([^']*)'", page)
+        m_pass = re.search(r"var\s+defaultPassword\s*=\s*'([^']*)'", page)
+        m_mode = re.search(r"var\s+CfgMode\s*=\s*'([^']*)'", page)
+        has_autofill = '$("#txt_Username").val(defaultUsername)' in page
+
+        default_user = m_user.group(1) if m_user else ""
+        default_pass = m_pass.group(1) if m_pass else ""
+        cfg_mode = m_mode.group(1) if m_mode else ""
+
+        if default_user and default_pass:
+            self._add(CheckResult(
+                "V-21", "ANTEL default credential leak", "VULN", "CRITICAL",
+                f"Default credentials in HTML: user='{default_user}', "
+                f"password present (CfgMode={cfg_mode})",
+                data={"defaultUsername": default_user, "CfgMode": cfg_mode},
+            ))
+        elif has_autofill:
+            self._add(CheckResult(
+                "V-21", "ANTEL default credential leak", "VULN", "MEDIUM",
+                "Auto-fill code present but credentials currently empty "
+                f"(CfgMode={cfg_mode})",
+            ))
+        else:
+            self._add(CheckResult("V-21", "ANTEL default credential leak",
+                                  "OK", "CRITICAL",
+                                  "No default credential auto-fill detected"))
+
+    def check_v22_language_path_traversal(self) -> None:
+        """V-22: Check for language parameter path traversal."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-22", "Language path traversal",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        # Check for dynamic script loading with Language variable
+        has_dynamic_load = ("loadLanguage" in page or
+                            "ssmpdes.js" in page or
+                            "frameaspdes" in page)
+        has_language_concat = ("frameaspdes/" in page and
+                               "Language" in page)
+
+        if has_dynamic_load and has_language_concat:
+            self._add(CheckResult(
+                "V-22", "Language path traversal", "VULN", "HIGH",
+                "Language parameter used in script src path construction "
+                "without sanitization — path traversal possible",
+            ))
+        else:
+            self._add(CheckResult("V-22", "Language path traversal",
+                                  "OK", "HIGH",
+                                  "No dynamic language script loading detected"))
+
+    def check_v23_pbkdf2_downgrade(self) -> None:
+        """V-23: Check for server-controlled PBKDF2 iterations."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-23", "PBKDF2 iterations downgrade",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        has_getrandinfo = "GetRandInfo.asp" in page
+        has_pbkdf2 = "CryptoJS.PBKDF2" in page
+        has_server_iterations = "parseInt(infos[2])" in page
+
+        if has_pbkdf2 and has_server_iterations:
+            self._add(CheckResult(
+                "V-23", "PBKDF2 iterations downgrade", "VULN", "HIGH",
+                "PBKDF2 iteration count from server response (infos[2]) — "
+                "MITM can set iterations=1 for trivial brute-force",
+                data={"has_getrandinfo": has_getrandinfo},
+            ))
+        elif has_pbkdf2:
+            self._add(CheckResult(
+                "V-23", "PBKDF2 iterations downgrade", "VULN", "MEDIUM",
+                "PBKDF2 present but server-controlled iterations not confirmed",
+            ))
+        else:
+            self._add(CheckResult("V-23", "PBKDF2 iterations downgrade",
+                                  "OK", "HIGH",
+                                  "No PBKDF2 with server-controlled iterations"))
+
+    def check_v24_dom_xss(self) -> None:
+        """V-24: Check for DOM-based XSS via innerHTML without encoding."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-24", "DOM-based XSS (innerHTML)",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        has_set_div = "SetDivValue" in page
+        has_innerhtml = ".innerHTML" in page
+        # Count calls to SetDivValue which uses raw innerHTML
+        count = page.count("SetDivValue")
+
+        if has_set_div and count > 0:
+            self._add(CheckResult(
+                "V-24", "DOM-based XSS (innerHTML)", "VULN", "HIGH",
+                f"SetDivValue() (raw innerHTML) called {count} time(s) in login page; "
+                "also setObjNoEncodeInnerHtmlValue in util.js",
+                data={"setdivvalue_count": count},
+            ))
+        elif has_innerhtml:
+            self._add(CheckResult(
+                "V-24", "DOM-based XSS (innerHTML)", "VULN", "MEDIUM",
+                "innerHTML usage found but SetDivValue not present",
+            ))
+        else:
+            self._add(CheckResult("V-24", "DOM-based XSS (innerHTML)",
+                                  "OK", "HIGH",
+                                  "No raw innerHTML patterns detected"))
+
+    def check_v25_sensitive_tr069_paths(self) -> None:
+        """V-25: Probe TR-069 paths for certs, keys, and credentials."""
+        if not self._is_logged_in:
+            if not self._login():
+                self._add(CheckResult(
+                    "V-25", "Sensitive TR-069 data extraction", "SKIP", "CRITICAL",
+                    "Login required but credentials not provided or login failed",
+                ))
+                return
+
+        accessible = []
+        for path, description in TR069_SENSITIVE_PATHS:
+            resp = self._post(f"/getajax.cgi?{path}")
+            if resp and resp.ok and len(resp.text.strip()) > 10:
+                text = resp.text.strip()
+                if "error" not in text.lower() and text != "{ }":
+                    accessible.append({"path": path, "description": description,
+                                       "response_length": len(text)})
+                    log.debug("  SENSITIVE %s → %d bytes", path, len(text))
+
+        if accessible:
+            self._add(CheckResult(
+                "V-25", "Sensitive TR-069 data extraction", "VULN", "CRITICAL",
+                f"{len(accessible)}/{len(TR069_SENSITIVE_PATHS)} sensitive paths "
+                f"returned data (certs, keys, credentials, GPON params)",
+                data={"accessible": accessible},
+            ))
+        else:
+            self._add(CheckResult(
+                "V-25", "Sensitive TR-069 data extraction", "OK", "CRITICAL",
+                "No sensitive TR-069 paths returned data",
+            ))
+
     def check_endpoint_accessibility(self) -> None:
         """Bonus: Probe all known endpoints for accessibility."""
         for endpoint in PRE_LOGIN_ENDPOINTS:
@@ -553,13 +816,24 @@ class SecurityAudit:
         self.check_v10_leaked_variables()
         self.check_v11_login_rate_limit()
         self.check_v12_md5_usage()
+        self.check_v19_userlevel_escalation()
+        self.check_v20_dbaa1_admin_bypass()
+        self.check_v21_antel_default_creds()
+        self.check_v22_language_path_traversal()
+        self.check_v23_pbkdf2_downgrade()
+        self.check_v24_dom_xss()
 
         # Auth-required checks (only if credentials provided)
         if self.username and self.password:
             self.check_v08_tr069_paths()
+            self.check_v25_sensitive_tr069_paths()
         else:
             self._add(CheckResult(
                 "V-08", "TR-069 path traversal", "SKIP", "HIGH",
+                "Provide --user and --password to test authenticated endpoints",
+            ))
+            self._add(CheckResult(
+                "V-25", "Sensitive TR-069 data extraction", "SKIP", "CRITICAL",
                 "Provide --user and --password to test authenticated endpoints",
             ))
 
