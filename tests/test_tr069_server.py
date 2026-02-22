@@ -9,22 +9,32 @@ import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch
 
 from tools.tr069_server import (
+    ALL_EXTENDED_PARAMS,
     ALL_KNOWN_PARAMS,
     CERT_PARAMS,
     CREDENTIAL_PARAMS,
     DEVICE_INFO_PARAMS,
     DNS_PARAMS,
     GPON_PARAMS,
+    MEGACABLE_ISP_CONFIG,
     MGMT_SERVER_PARAMS,
     NS_CWMP,
     NS_SOAP_ENV,
+    PRODUCT_INFO_PARAMS,
+    REMOTE_MGMT_PARAMS,
+    SERVICE_PARAMS,
+    SUPPORTED_DATA_MODEL,
+    SYSLOG_PARAMS,
     TELNET_SSH_PARAMS,
+    USER_INFO_PARAMS,
     WAN_PARAMS,
     WEB_USER_PARAMS,
+    WIFI_FULL_PARAMS,
     WIFI_PARAMS,
     ActionExecutor,
     CWMPMethod,
     CWMPSession,
+    DataModel,
     DeviceInfo,
     RPCResult,
     SOAPBuilder,
@@ -597,6 +607,246 @@ class TestCWMPConstants(unittest.TestCase):
             self.assertIn(p, CREDENTIAL_PARAMS)
         for p in WAN_PARAMS:
             self.assertIn(p, CREDENTIAL_PARAMS)
+
+    def test_product_info_params(self):
+        self.assertTrue(any("originalVersion" in p for p in PRODUCT_INFO_PARAMS))
+        self.assertTrue(any("customInfo" in p for p in PRODUCT_INFO_PARAMS))
+
+    def test_remote_mgmt_params(self):
+        self.assertTrue(any("LocalAdminName" in p for p in REMOTE_MGMT_PARAMS))
+        self.assertTrue(any("LocalAdminPassword" in p for p in REMOTE_MGMT_PARAMS))
+        self.assertTrue(any("LocalUserName" in p for p in REMOTE_MGMT_PARAMS))
+
+    def test_user_info_params(self):
+        self.assertTrue(any("UserName" in p for p in USER_INFO_PARAMS))
+        self.assertTrue(any("Status" in p for p in USER_INFO_PARAMS))
+
+    def test_wifi_full_params_has_wps(self):
+        self.assertTrue(any("WPS.Enable" in p for p in WIFI_FULL_PARAMS))
+        self.assertTrue(any("WPS.DevicePassword" in p for p in WIFI_FULL_PARAMS))
+
+    def test_wifi_full_params_both_bands(self):
+        has_24ghz = any("WLANConfiguration.1." in p for p in WIFI_FULL_PARAMS)
+        has_5ghz = any("WLANConfiguration.5." in p for p in WIFI_FULL_PARAMS)
+        self.assertTrue(has_24ghz)
+        self.assertTrue(has_5ghz)
+
+    def test_wifi_full_params_guests(self):
+        self.assertTrue(any("WLANConfiguration.2." in p for p in WIFI_FULL_PARAMS))
+
+    def test_all_extended_params_superset(self):
+        for p in ALL_KNOWN_PARAMS:
+            self.assertIn(p, ALL_EXTENDED_PARAMS)
+        for p in WIFI_FULL_PARAMS:
+            self.assertIn(p, ALL_EXTENDED_PARAMS)
+
+    def test_cert_params_includes_ssl(self):
+        self.assertTrue(any("CertPassword" in p for p in CERT_PARAMS))
+
+    def test_service_params(self):
+        self.assertTrue(any("FtpEnable" in p for p in SERVICE_PARAMS))
+
+    def test_syslog_params(self):
+        self.assertTrue(any("Syslog" in p for p in SYSLOG_PARAMS))
+
+    def test_credential_params_includes_remote_mgmt(self):
+        for p in REMOTE_MGMT_PARAMS:
+            self.assertIn(p, CREDENTIAL_PARAMS)
+
+    def test_mgmt_server_params_extended(self):
+        self.assertTrue(any("EnableCWMP" in p for p in MGMT_SERVER_PARAMS))
+        self.assertTrue(any("X_HW_Path" in p for p in MGMT_SERVER_PARAMS))
+        self.assertTrue(any("X_HW_DSCP" in p for p in MGMT_SERVER_PARAMS))
+
+
+# ---------------------------------------------------------------------------
+# DataModel tests
+# ---------------------------------------------------------------------------
+
+class TestDataModel(unittest.TestCase):
+    """Tests for the DataModel utility class."""
+
+    def test_detect_tr098(self):
+        params = {
+            "InternetGatewayDevice.DeviceInfo.SoftwareVersion": "V5R020",
+        }
+        self.assertEqual(DataModel.detect_from_inform(params), DataModel.TR098)
+
+    def test_detect_tr181(self):
+        params = {"Device.DeviceInfo.SoftwareVersion": "V5R020"}
+        self.assertEqual(DataModel.detect_from_inform(params), DataModel.TR181)
+
+    def test_detect_empty_defaults_tr098(self):
+        self.assertEqual(DataModel.detect_from_inform({}), DataModel.TR098)
+
+    def test_to_tr181_wan(self):
+        tr098 = "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username"
+        result = DataModel.to_tr181(tr098)
+        self.assertEqual(result, "Device.PPP.Interface.1.Username")
+
+    def test_to_tr181_wifi(self):
+        tr098 = "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID"
+        result = DataModel.to_tr181(tr098)
+        self.assertEqual(result, "Device.WiFi.SSID.1.SSID")
+
+    def test_to_tr181_dns(self):
+        tr098 = "InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DNSServers"
+        result = DataModel.to_tr181(tr098)
+        self.assertEqual(result, "Device.DHCPv4.Server.Pool.1.DNSServers")
+
+    def test_to_tr181_passthrough(self):
+        """Paths without explicit mapping get simple root replacement."""
+        tr098 = "InternetGatewayDevice.X_HW_CLITelnetAccess.Enable"
+        result = DataModel.to_tr181(tr098)
+        self.assertEqual(result, "Device.X_HW_CLITelnetAccess.Enable")
+
+    def test_to_tr181_already_tr181(self):
+        path = "Device.DeviceInfo.Manufacturer"
+        self.assertEqual(DataModel.to_tr181(path), path)
+
+    def test_to_tr098_roundtrip(self):
+        tr098 = "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username"
+        tr181 = DataModel.to_tr181(tr098)
+        back = DataModel.to_tr098(tr181)
+        self.assertEqual(back, tr098)
+
+    def test_to_tr098_already_tr098(self):
+        path = "InternetGatewayDevice.DeviceInfo.Manufacturer"
+        self.assertEqual(DataModel.to_tr098(path), path)
+
+    def test_translate_paths_to_tr181(self):
+        paths = [
+            "InternetGatewayDevice.DeviceInfo.Manufacturer",
+            "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID",
+        ]
+        result = DataModel.translate_paths(paths, DataModel.TR181)
+        self.assertTrue(all(p.startswith("Device.") for p in result))
+
+    def test_translate_paths_to_tr098(self):
+        paths = [
+            "InternetGatewayDevice.DeviceInfo.Manufacturer",
+        ]
+        result = DataModel.translate_paths(paths, DataModel.TR098)
+        self.assertEqual(result, paths)
+
+
+# ---------------------------------------------------------------------------
+# ISP config and supported data model constants
+# ---------------------------------------------------------------------------
+
+class TestISPConfig(unittest.TestCase):
+    """Tests for MEGACABLE ISP configuration constants."""
+
+    def test_megacable_acs_url(self):
+        self.assertEqual(
+            MEGACABLE_ISP_CONFIG["acs_url"],
+            "http://acsvip.megared.net.mx:7547/service/cwmp",
+        )
+
+    def test_megacable_acs_username(self):
+        self.assertEqual(MEGACABLE_ISP_CONFIG["acs_username"], "AdminGPON")
+
+    def test_megacable_conn_req_username(self):
+        self.assertEqual(MEGACABLE_ISP_CONFIG["conn_req_username"], "ONTconnect")
+
+    def test_megacable_firmware(self):
+        self.assertIn("V500R022", MEGACABLE_ISP_CONFIG["firmware_original"])
+
+    def test_megacable_admin_name(self):
+        self.assertEqual(MEGACABLE_ISP_CONFIG["local_admin_name"], "Mega_gpon")
+
+    def test_supported_data_model_urn(self):
+        self.assertEqual(
+            SUPPORTED_DATA_MODEL["urn"],
+            "urn:broadband-forum-org:tr-181-2-11-0",
+        )
+
+    def test_supported_data_model_features(self):
+        self.assertIn("VOICE", SUPPORTED_DATA_MODEL["features"])
+        self.assertIn("WIFI", SUPPORTED_DATA_MODEL["features"])
+        self.assertIn("Router", SUPPORTED_DATA_MODEL["features"])
+
+
+# ---------------------------------------------------------------------------
+# ActionExecutor new action tests
+# ---------------------------------------------------------------------------
+
+class TestActionExecutorNew(unittest.TestCase):
+    """Tests for new ActionExecutor actions."""
+
+    def setUp(self):
+        self.executor = ActionExecutor("0.0.0.0", 7547)
+
+    def test_dump_all_action(self):
+        rpcs = self.executor.build_rpc_queue("dump-all")
+        self.assertEqual(len(rpcs), 1)
+        method, params = rpcs[0]
+        self.assertEqual(method, "GetParameterValues")
+        self.assertEqual(len(params), len(ALL_EXTENDED_PARAMS))
+
+    def test_extract_wifi_full_action(self):
+        rpcs = self.executor.build_rpc_queue("extract-wifi-full")
+        self.assertEqual(len(rpcs), 1)
+        method, params = rpcs[0]
+        self.assertEqual(method, "GetParameterValues")
+        self.assertTrue(any("WPS" in p for p in params))
+
+    def test_extract_remote_mgmt_action(self):
+        rpcs = self.executor.build_rpc_queue("extract-remote-mgmt")
+        self.assertEqual(len(rpcs), 1)
+        method, params = rpcs[0]
+        self.assertEqual(method, "GetParameterValues")
+        self.assertTrue(any("LocalAdminName" in p for p in params))
+
+    def test_data_model_translation_tr181(self):
+        self.executor.detected_model = DataModel.TR181
+        rpcs = self.executor.build_rpc_queue("extract-wifi")
+        _, params = rpcs[0]
+        self.assertTrue(all(p.startswith("Device.") for p in params))
+
+    def test_data_model_translation_tr098(self):
+        self.executor.detected_model = DataModel.TR098
+        rpcs = self.executor.build_rpc_queue("extract-wifi")
+        _, params = rpcs[0]
+        self.assertTrue(all(
+            p.startswith("InternetGatewayDevice.") for p in params
+        ))
+
+    def test_set_params_translation_tr181(self):
+        self.executor.detected_model = DataModel.TR181
+        rpcs = self.executor.build_rpc_queue("enable-telnet")
+        _, params = rpcs[0]
+        self.assertTrue(all(k.startswith("Device.") for k in params))
+
+    def test_change_dns_translation_tr181(self):
+        self.executor.detected_model = DataModel.TR181
+        rpcs = self.executor.build_rpc_queue("change-dns")
+        _, params = rpcs[0]
+        self.assertTrue(any("DHCPv4" in k for k in params))
+
+
+# ---------------------------------------------------------------------------
+# Inform data model detection test
+# ---------------------------------------------------------------------------
+
+class TestInformDataModelDetection(unittest.TestCase):
+    """Tests for data model auto-detection from Inform."""
+
+    def test_parse_inform_detects_tr098(self):
+        device = SOAPParser.parse_inform(SAMPLE_INFORM.encode())
+        self.assertEqual(device.data_model, DataModel.TR098)
+
+    def test_parse_inform_detects_tr181(self):
+        tr181_inform = SAMPLE_INFORM.replace(
+            "InternetGatewayDevice.DeviceInfo.SoftwareVersion",
+            "Device.DeviceInfo.SoftwareVersion",
+        )
+        device = SOAPParser.parse_inform(tr181_inform.encode())
+        self.assertEqual(device.data_model, DataModel.TR181)
+
+    def test_device_info_has_data_model_field(self):
+        d = DeviceInfo()
+        self.assertEqual(d.data_model, DataModel.TR098)
 
 
 if __name__ == "__main__":

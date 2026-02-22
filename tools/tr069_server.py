@@ -5,25 +5,33 @@ for Huawei HG8145V5 Router Management.
 
 A local TR-069 Auto Configuration Server that speaks the CWMP (CPE WAN
 Management Protocol) over SOAP/HTTP.  Designed specifically for the
-Huawei HG8145V5 ONT/router, it can read configuration, push settings,
-enable remote-access services, extract credentials, and more.
+Huawei HG8145V5 ONT/router (MEGACABLE firmware V500R022C00SPC368),
+supporting both TR-098 (InternetGatewayDevice.) and TR-181-2-11-0
+(Device.) data models with automatic detection.
+
+Data model: urn:broadband-forum-org:tr-181-2-11-0 (VOICE,WIFI,Router)
+ISP ACS:    http://acsvip.megared.net.mx:7547/service/cwmp
+Username:   AdminGPON / ConnReq: ONTconnect
 
 Usage:
     # Start the ACS and wait for the CPE to connect
     python tools/tr069_server.py --listen 0.0.0.0 --port 7547
 
     # Dump the full device configuration to JSON
-    python tools/tr069_server.py --action dump-config --output config.json
+    python tools/tr069_server.py --action dump-all --output config.json
 
     # Enable Telnet on the LAN side
     python tools/tr069_server.py --action enable-telnet
 
-    # Extract all stored credentials
+    # Extract all stored credentials (web, ACS, PPPoE, VoIP, GPON, remote)
     python tools/tr069_server.py --action extract-creds --output creds.json
 
-    # Trigger a CPE connection and extract WiFi keys
-    python tools/tr069_server.py --action extract-wifi \\
+    # Trigger a CPE connection and extract WiFi keys (full: both bands)
+    python tools/tr069_server.py --action extract-wifi-full \\
         --cpe-url http://192.168.100.1:7547/ --output wifi.json
+
+    # Extract remote management credentials (X_HW_AppRemoteManage)
+    python tools/tr069_server.py --action extract-remote-mgmt
 
     # Change ACS URL to point at this server
     python tools/tr069_server.py --action change-acs
@@ -32,18 +40,21 @@ Usage:
     python tools/tr069_server.py --action reboot
 
 Supported actions:
-    dump-config      GetParameterValues on all known paths -> JSON
-    enable-telnet    Enable Telnet access on LAN
-    enable-ssh       Enable SSH access on LAN
-    extract-creds    Extract all stored credentials
-    extract-certs    Extract certificates and private keys
-    extract-wifi     Extract WiFi SSID and PSK
-    extract-gpon     Extract GPON/ONT parameters
-    change-acs       Redirect ACS URL to this server
-    change-dns       Change upstream DNS servers
-    reboot           Reboot the CPE
-    factory-reset    Factory reset the CPE
-    open-wan-mgmt    Enable WAN-side HTTP/Telnet/SSH management
+    dump-config          GetParameterValues on standard paths -> JSON
+    dump-all             GetParameterValues on ALL known paths (extended)
+    enable-telnet        Enable Telnet access on LAN
+    enable-ssh           Enable SSH access on LAN
+    extract-creds        Extract all stored credentials
+    extract-certs        Extract certificates, private keys, cert passwords
+    extract-wifi         Extract WiFi SSID and PSK (basic)
+    extract-wifi-full    Extract full WiFi config (both bands, WPS, guests)
+    extract-gpon         Extract GPON/ONT parameters
+    extract-remote-mgmt  Extract X_HW_AppRemoteManage admin/user creds
+    change-acs           Redirect ACS URL to this server
+    change-dns           Change upstream DNS servers
+    reboot               Reboot the CPE
+    factory-reset        Factory reset the CPE
+    open-wan-mgmt        Enable WAN-side HTTP/Telnet/SSH management
 """
 
 from __future__ import annotations
@@ -106,7 +117,122 @@ for prefix, uri in SOAP_NS_MAP.items():
     ET.register_namespace(prefix, uri)
 
 # ---------------------------------------------------------------------------
-# Huawei HG8145V5 TR-069 parameter paths
+# Supported Data Models
+# ---------------------------------------------------------------------------
+# The HG8145V5 (MEGACABLE firmware V500R022C00SPC368) advertises:
+#   urn:broadband-forum-org:tr-181-2-11-0  (Device.2 root)
+# but the internal configuration XML still uses the TR-098 root
+# (InternetGatewayDevice.).  Both roots are provided so the tool
+# works regardless of what the CPE actually responds with.
+# ---------------------------------------------------------------------------
+
+SUPPORTED_DATA_MODEL = {
+    "url": "https://www.broadband-forum.org/cwmp/tr-181-2-11-0-full.xml",
+    "uuid": "8862c186-5884-5341-b9ab-8c350dc33abd",
+    "urn": "urn:broadband-forum-org:tr-181-2-11-0",
+    "features": "VOICE,WIFI,Router",
+}
+
+# Data model roots
+TR098_ROOT = "InternetGatewayDevice"
+TR181_ROOT = "Device"
+
+class DataModel:
+    """Utility to work with both TR-098 and TR-181 parameter paths."""
+
+    TR098 = "TR-098"
+    TR181 = "TR-181"
+
+    @staticmethod
+    def detect_from_inform(parameters: Dict[str, str]) -> str:
+        """Auto-detect data model from Inform parameter names."""
+        for name in parameters:
+            if name.startswith("Device."):
+                return DataModel.TR181
+            if name.startswith("InternetGatewayDevice."):
+                return DataModel.TR098
+        return DataModel.TR098  # default
+
+    @staticmethod
+    def translate_paths(
+        paths: List[str], target_model: str,
+    ) -> List[str]:
+        """Convert parameter paths between TR-098 and TR-181."""
+        result = []
+        for p in paths:
+            if target_model == DataModel.TR181:
+                result.append(DataModel.to_tr181(p))
+            else:
+                result.append(DataModel.to_tr098(p))
+        return result
+
+    @staticmethod
+    def to_tr181(path: str) -> str:
+        """Convert a TR-098 path to TR-181 equivalent."""
+        if path.startswith("Device."):
+            return path
+        return _TR098_TO_TR181.get(path, path.replace(
+            "InternetGatewayDevice.", "Device.", 1))
+
+    @staticmethod
+    def to_tr098(path: str) -> str:
+        """Convert a TR-181 path to TR-098 equivalent."""
+        if path.startswith("InternetGatewayDevice."):
+            return path
+        return _TR181_TO_TR098.get(path, path.replace(
+            "Device.", "InternetGatewayDevice.", 1))
+
+
+# Mapping of TR-098 paths that have different TR-181 equivalents
+_TR098_TO_TR181: Dict[str, str] = {
+    # WAN connections
+    "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username":
+        "Device.PPP.Interface.1.Username",
+    "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password":
+        "Device.PPP.Interface.1.Password",
+    "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.ExternalIPAddress":
+        "Device.IP.Interface.1.IPv4Address.1.IPAddress",
+    # WLAN
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID":
+        "Device.WiFi.SSID.1.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey":
+        "Device.WiFi.AccessPoint.1.Security.PreSharedKey",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase":
+        "Device.WiFi.AccessPoint.1.Security.KeyPassphrase",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSID":
+        "Device.WiFi.SSID.5.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey":
+        "Device.WiFi.AccessPoint.5.Security.PreSharedKey",
+    # DNS
+    "InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DNSServers":
+        "Device.DHCPv4.Server.Pool.1.DNSServers",
+    # Hosts
+    "InternetGatewayDevice.LANDevice.1.Hosts.Host.":
+        "Device.Hosts.Host.",
+}
+
+_TR181_TO_TR098 = {v: k for k, v in _TR098_TO_TR181.items()}
+
+# ---------------------------------------------------------------------------
+# MEGACABLE ISP-specific configuration
+# ---------------------------------------------------------------------------
+
+MEGACABLE_ISP_CONFIG = {
+    "acs_url": "http://acsvip.megared.net.mx:7547/service/cwmp",
+    "acs_username": "AdminGPON",
+    "conn_req_username": "ONTconnect",
+    "periodic_inform_interval": 900,
+    "custom_info": "MEGACABLE",
+    "custom_info_detail": "megacable",
+    "firmware_original": "V500R022C00SPC368A2406290391",
+    "firmware_current": "V500R022",
+    "x_hw_path": "57352c84da092f5d2e257fe48d9f86c9",
+    "local_admin_name": "Mega_gpon",
+    "local_user_name": "user",
+}
+
+# ---------------------------------------------------------------------------
+# Huawei HG8145V5 TR-069 parameter paths (TR-098 root)
 # ---------------------------------------------------------------------------
 
 DEVICE_INFO_PARAMS = [
@@ -116,9 +242,20 @@ DEVICE_INFO_PARAMS = [
     "InternetGatewayDevice.DeviceInfo.SoftwareVersion",
     "InternetGatewayDevice.DeviceInfo.HardwareVersion",
     "InternetGatewayDevice.DeviceInfo.ProvisioningCode",
+    "InternetGatewayDevice.DeviceInfo.X_HW_UpPortMode",
+    "InternetGatewayDevice.DeviceInfo.X_HW_TotalHWReboot",
+    "InternetGatewayDevice.DeviceInfo.FirstUseDate",
+]
+
+PRODUCT_INFO_PARAMS = [
+    "InternetGatewayDevice.X_HW_ProductInfo.originalVersion",
+    "InternetGatewayDevice.X_HW_ProductInfo.currentVersion",
+    "InternetGatewayDevice.X_HW_ProductInfo.customInfo",
+    "InternetGatewayDevice.X_HW_ProductInfo.customInfoDetail",
 ]
 
 MGMT_SERVER_PARAMS = [
+    "InternetGatewayDevice.ManagementServer.EnableCWMP",
     "InternetGatewayDevice.ManagementServer.URL",
     "InternetGatewayDevice.ManagementServer.Username",
     "InternetGatewayDevice.ManagementServer.Password",
@@ -127,8 +264,19 @@ MGMT_SERVER_PARAMS = [
     "InternetGatewayDevice.ManagementServer.ConnectionRequestPassword",
     "InternetGatewayDevice.ManagementServer.PeriodicInformEnable",
     "InternetGatewayDevice.ManagementServer.PeriodicInformInterval",
+    "InternetGatewayDevice.ManagementServer.ParameterKey",
+    "InternetGatewayDevice.ManagementServer.UpgradesManaged",
+    "InternetGatewayDevice.ManagementServer.STUNEnable",
+    "InternetGatewayDevice.ManagementServer.STUNServerAddress",
+    "InternetGatewayDevice.ManagementServer.STUNServerPort",
+    "InternetGatewayDevice.ManagementServer.X_HW_EnableCertificate",
+    "InternetGatewayDevice.ManagementServer.X_HW_CertPassword",
     "InternetGatewayDevice.ManagementServer.X_HW_Certificate",
     "InternetGatewayDevice.ManagementServer.X_HW_PrivateKey",
+    "InternetGatewayDevice.ManagementServer.X_HW_DSCP",
+    "InternetGatewayDevice.ManagementServer.X_HW_IPProtocolVersion",
+    "InternetGatewayDevice.ManagementServer.X_HW_Path",
+    "InternetGatewayDevice.ManagementServer.X_HW_EnableCWMP",
 ]
 
 WEB_USER_PARAMS = [
@@ -136,6 +284,31 @@ WEB_USER_PARAMS = [
     "InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1.Password",
     "InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.UserName",
     "InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.Password",
+    "InternetGatewayDevice.UserInterface.X_HW_WebSslInfo.Enable",
+    "InternetGatewayDevice.UserInterface.X_HW_WebSslInfo.CertPassword",
+]
+
+REMOTE_MGMT_PARAMS = [
+    "InternetGatewayDevice.X_HW_AppRemoteManage.MgtURL",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.Port",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.Heartbeat",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.Ability",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocatePort",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalUserName",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalUserPassword",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalUserPassMode",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalAdminName",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalAdminPassword",
+    "InternetGatewayDevice.X_HW_AppRemoteManage.LocalAdminPassMode",
+]
+
+USER_INFO_PARAMS = [
+    "InternetGatewayDevice.X_HW_UserInfo.UserName",
+    "InternetGatewayDevice.X_HW_UserInfo.UserId",
+    "InternetGatewayDevice.X_HW_UserInfo.Status",
+    "InternetGatewayDevice.X_HW_UserInfo.Limit",
+    "InternetGatewayDevice.X_HW_UserInfo.Times",
+    "InternetGatewayDevice.X_HW_UserInfo.Result",
 ]
 
 TELNET_SSH_PARAMS = [
@@ -149,12 +322,82 @@ TELNET_SSH_PARAMS = [
     "InternetGatewayDevice.X_HW_DEBUG.SSHEnable",
 ]
 
+# Extended WLAN params from actual router config
 WIFI_PARAMS = [
     "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID",
     "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey",
     "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase",
     "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSID",
     "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey",
+]
+
+WIFI_FULL_PARAMS = [
+    # 2.4GHz (instance 1)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.BSSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.Channel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.AutoChannelEnable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.Standard",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_Standard",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.TransmitPower",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.BeaconType",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.IEEE11iEncryptionModes",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.IEEE11iAuthenticationMode",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSIDAdvertisementEnabled",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WMMEnable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.MACAddressControlEnabled",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.KeyPassphrase",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_RFBand",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_Channel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_Band",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_Powerlevel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_PowerValue",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_AssociateNum",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_GuardInterval",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_RadiuServer",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_RadiusPort",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_RadiusKey",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_GroupRekey",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.RegulatoryDomain",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_OriginalSSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.X_HW_OriginalPassword",
+    # WPS (instance 1)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WPS.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WPS.DevicePassword",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WPS.UUID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WPS.ConfigMethodsSupported",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WPS.X_HW_ConfigMethod",
+    # WEP keys (instance 1)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WEPKeyIndex",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.WEPEncryptionLevel",
+    # 5GHz (instance 5 — Huawei convention)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.BSSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.Channel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.AutoChannelEnable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.Standard",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.TransmitPower",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.BeaconType",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.IEEE11iEncryptionModes",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.SSIDAdvertisementEnabled",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.KeyPassphrase",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_RFBand",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_Channel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_Band",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_Powerlevel",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_OriginalSSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.X_HW_OriginalPassword",
+    # Guest networks (instances 2, 3, 4 on 2.4GHz)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.2.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.2.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.3.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.3.SSID",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.4.Enable",
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.4.SSID",
 ]
 
 GPON_PARAMS = [
@@ -195,6 +438,26 @@ CERT_PARAMS = [
     "InternetGatewayDevice.X_HW_Security.Certificate.1.",
     "InternetGatewayDevice.ManagementServer.X_HW_Certificate",
     "InternetGatewayDevice.ManagementServer.X_HW_PrivateKey",
+    "InternetGatewayDevice.ManagementServer.X_HW_CertPassword",
+    "InternetGatewayDevice.UserInterface.X_HW_WebSslInfo.CertPassword",
+]
+
+SERVICE_PARAMS = [
+    "InternetGatewayDevice.X_HW_ServiceManage.FtpEnable",
+    "InternetGatewayDevice.X_HW_ServiceManage.FtpPort",
+    "InternetGatewayDevice.X_HW_ServiceManage.FtpRoorDir",
+]
+
+SYSLOG_PARAMS = [
+    "InternetGatewayDevice.DeviceInfo.X_HW_Syslog.Enable",
+    "InternetGatewayDevice.DeviceInfo.X_HW_Syslog.Level",
+    "InternetGatewayDevice.DeviceInfo.X_HW_SyslogConfig.LogServerEnable",
+    "InternetGatewayDevice.DeviceInfo.X_HW_SyslogConfig.ServerAddress",
+    "InternetGatewayDevice.DeviceInfo.X_HW_SyslogConfig.ServerPort",
+]
+
+POWER_MGMT_PARAMS = [
+    "InternetGatewayDevice.X_HW_APMPolicy.EnablePowerSavingMode",
 ]
 
 CREDENTIAL_PARAMS = (
@@ -203,12 +466,17 @@ CREDENTIAL_PARAMS = (
     + WAN_PARAMS
     + VOIP_PARAMS
     + GPON_PARAMS
+    + REMOTE_MGMT_PARAMS
+    + USER_INFO_PARAMS
 )
 
 ALL_KNOWN_PARAMS = list(OrderedDict.fromkeys(
     DEVICE_INFO_PARAMS
+    + PRODUCT_INFO_PARAMS
     + MGMT_SERVER_PARAMS
     + WEB_USER_PARAMS
+    + REMOTE_MGMT_PARAMS
+    + USER_INFO_PARAMS
     + TELNET_SSH_PARAMS
     + WIFI_PARAMS
     + GPON_PARAMS
@@ -217,6 +485,13 @@ ALL_KNOWN_PARAMS = list(OrderedDict.fromkeys(
     + SECURITY_PARAMS
     + DNS_PARAMS
     + HOST_PARAMS
+    + SERVICE_PARAMS
+    + SYSLOG_PARAMS
+    + POWER_MGMT_PARAMS
+))
+
+ALL_EXTENDED_PARAMS = list(OrderedDict.fromkeys(
+    ALL_KNOWN_PARAMS + WIFI_FULL_PARAMS + CERT_PARAMS
 ))
 
 
@@ -237,6 +512,7 @@ class DeviceInfo:
     hardware_version: str = ""
     provisioning_code: str = ""
     connection_request_url: str = ""
+    data_model: str = DataModel.TR098
     events: List[str] = field(default_factory=list)
     parameters: Dict[str, str] = field(default_factory=dict)
     raw_xml: str = ""
@@ -643,6 +919,10 @@ class SOAPParser:
                 elif name.endswith(".ConnectionRequestURL"):
                     device.connection_request_url = value
 
+        # Auto-detect data model from parameter names
+        device.data_model = DataModel.detect_from_inform(device.parameters)
+        log.info("Detected data model: %s", device.data_model)
+
         return device
 
     @classmethod
@@ -870,6 +1150,7 @@ class ActionExecutor:
     def __init__(self, listen_host: str, listen_port: int) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
+        self.detected_model: str = DataModel.TR098
 
     def get_acs_url(self) -> str:
         host = self.listen_host
@@ -887,16 +1168,33 @@ class ActionExecutor:
         except OSError:
             return "127.0.0.1"
 
+    def _translate(self, paths: List[str]) -> List[str]:
+        """Translate parameter paths for the detected data model."""
+        return DataModel.translate_paths(paths, self.detected_model)
+
+    def _translate_params(
+        self, params: Dict[str, Tuple[str, str]],
+    ) -> Dict[str, Tuple[str, str]]:
+        """Translate SetParameterValues dict keys for detected data model."""
+        if self.detected_model == DataModel.TR098:
+            return params
+        return {
+            DataModel.to_tr181(k): v for k, v in params.items()
+        }
+
     def build_rpc_queue(self, action: str) -> List[Tuple[str, Any]]:
         """Return a list of (method_tag, build_args) tuples for the action."""
         handlers = {
             "dump-config": self._action_dump_config,
+            "dump-all": self._action_dump_all,
             "enable-telnet": self._action_enable_telnet,
             "enable-ssh": self._action_enable_ssh,
             "extract-creds": self._action_extract_creds,
             "extract-certs": self._action_extract_certs,
             "extract-wifi": self._action_extract_wifi,
+            "extract-wifi-full": self._action_extract_wifi_full,
             "extract-gpon": self._action_extract_gpon,
+            "extract-remote-mgmt": self._action_extract_remote_mgmt,
             "change-acs": self._action_change_acs,
             "change-dns": self._action_change_dns,
             "reboot": self._action_reboot,
@@ -912,7 +1210,10 @@ class ActionExecutor:
     # -- individual actions -----------------------------------------------
 
     def _action_dump_config(self) -> List[Tuple[str, Any]]:
-        return [("GetParameterValues", ALL_KNOWN_PARAMS)]
+        return [("GetParameterValues", self._translate(ALL_KNOWN_PARAMS))]
+
+    def _action_dump_all(self) -> List[Tuple[str, Any]]:
+        return [("GetParameterValues", self._translate(ALL_EXTENDED_PARAMS))]
 
     def _action_enable_telnet(self) -> List[Tuple[str, Any]]:
         params = {
@@ -921,7 +1222,7 @@ class ActionExecutor:
             "InternetGatewayDevice.X_HW_CLITelnetAccess.Port": ("23", "xsd:unsignedInt"),
             "InternetGatewayDevice.X_HW_DEBUG.TelnetEnable": ("true", "xsd:boolean"),
         }
-        return [("SetParameterValues", params)]
+        return [("SetParameterValues", self._translate_params(params))]
 
     def _action_enable_ssh(self) -> List[Tuple[str, Any]]:
         params = {
@@ -930,35 +1231,36 @@ class ActionExecutor:
             "InternetGatewayDevice.X_HW_CLISSHAccess.Port": ("22", "xsd:unsignedInt"),
             "InternetGatewayDevice.X_HW_DEBUG.SSHEnable": ("true", "xsd:boolean"),
         }
-        return [("SetParameterValues", params)]
+        return [("SetParameterValues", self._translate_params(params))]
 
     def _action_extract_creds(self) -> List[Tuple[str, Any]]:
-        return [("GetParameterValues", CREDENTIAL_PARAMS)]
+        return [("GetParameterValues", self._translate(CREDENTIAL_PARAMS))]
 
     def _action_extract_certs(self) -> List[Tuple[str, Any]]:
-        return [("GetParameterValues", CERT_PARAMS)]
+        return [("GetParameterValues", self._translate(CERT_PARAMS))]
 
     def _action_extract_wifi(self) -> List[Tuple[str, Any]]:
-        return [("GetParameterValues", WIFI_PARAMS)]
+        return [("GetParameterValues", self._translate(WIFI_PARAMS))]
+
+    def _action_extract_wifi_full(self) -> List[Tuple[str, Any]]:
+        return [("GetParameterValues", self._translate(WIFI_FULL_PARAMS))]
 
     def _action_extract_gpon(self) -> List[Tuple[str, Any]]:
-        return [("GetParameterValues", GPON_PARAMS)]
+        return [("GetParameterValues", self._translate(GPON_PARAMS))]
+
+    def _action_extract_remote_mgmt(self) -> List[Tuple[str, Any]]:
+        return [("GetParameterValues", self._translate(REMOTE_MGMT_PARAMS))]
 
     def _action_change_acs(self) -> List[Tuple[str, Any]]:
         acs_url = self.get_acs_url()
-        params = {
-            "InternetGatewayDevice.ManagementServer.URL": (acs_url, "xsd:string"),
-        }
-        return [("SetParameterValues", params)]
+        acs_path = "InternetGatewayDevice.ManagementServer.URL"
+        params = {acs_path: (acs_url, "xsd:string")}
+        return [("SetParameterValues", self._translate_params(params))]
 
     def _action_change_dns(self) -> List[Tuple[str, Any]]:
-        params = {
-            "InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DNSServers": (
-                "1.1.1.1,8.8.8.8",
-                "xsd:string",
-            ),
-        }
-        return [("SetParameterValues", params)]
+        dns_path = "InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.DNSServers"
+        params = {dns_path: ("1.1.1.1,8.8.8.8", "xsd:string")}
+        return [("SetParameterValues", self._translate_params(params))]
 
     def _action_reboot(self) -> List[Tuple[str, Any]]:
         return [("Reboot", None)]
@@ -975,7 +1277,7 @@ class ActionExecutor:
             "InternetGatewayDevice.X_HW_DEBUG.TelnetEnable": ("true", "xsd:boolean"),
             "InternetGatewayDevice.X_HW_DEBUG.SSHEnable": ("true", "xsd:boolean"),
         }
-        return [("SetParameterValues", params)]
+        return [("SetParameterValues", self._translate_params(params))]
 
 
 # ---------------------------------------------------------------------------
@@ -1100,16 +1402,20 @@ class TR069Handler(http.server.BaseHTTPRequestHandler):
         session.inform_received = True
 
         log.info(
-            "CPE identified: %s %s (SN=%s, SW=%s)",
+            "CPE identified: %s %s (SN=%s, SW=%s, model=%s)",
             device.manufacturer,
             device.model_name or device.product_class,
             device.serial_number,
             device.software_version,
+            device.data_model,
         )
         if device.events:
             log.info("  Events: %s", ", ".join(device.events))
         if device.connection_request_url:
             log.info("  ConnectionRequestURL: %s", device.connection_request_url)
+
+        # Update action executor with detected data model
+        self.action_executor.detected_model = device.data_model
 
         # Queue pending action RPCs into session
         if self.pending_action:
@@ -1531,12 +1837,15 @@ class TR069Server:
 
 VALID_ACTIONS = [
     "dump-config",
+    "dump-all",
     "enable-telnet",
     "enable-ssh",
     "extract-creds",
     "extract-certs",
     "extract-wifi",
+    "extract-wifi-full",
     "extract-gpon",
+    "extract-remote-mgmt",
     "change-acs",
     "change-dns",
     "reboot",
@@ -1557,30 +1866,53 @@ def main() -> None:
               # Start ACS and wait for CPE
               python tools/tr069_server.py --listen 0.0.0.0 --port 7547
 
-              # Dump full config
-              python tools/tr069_server.py --action dump-config --output config.json
+              # Dump full config (all extended params incl. WiFi, WPS, certs)
+              python tools/tr069_server.py --action dump-all --output config.json
 
               # Enable Telnet, trigger CPE connection
               python tools/tr069_server.py --action enable-telnet \\
                   --cpe-url http://192.168.100.1:7547/
 
-              # Extract WiFi credentials
-              python tools/tr069_server.py --action extract-wifi --output wifi.json
+              # Extract WiFi credentials (full: both bands, WPS, guests)
+              python tools/tr069_server.py --action extract-wifi-full --output wifi.json
+
+              # Extract remote management credentials
+              python tools/tr069_server.py --action extract-remote-mgmt
 
             supported actions:
-              dump-config      Dump all known TR-069 parameters to JSON
-              enable-telnet    Enable Telnet on LAN side
-              enable-ssh       Enable SSH on LAN side
-              extract-creds    Extract all stored credentials
-              extract-certs    Extract certificates and private keys
-              extract-wifi     Extract WiFi SSID and PSK
-              extract-gpon     Extract GPON/ONT parameters
-              change-acs       Redirect ACS URL to this server
-              change-dns       Change DNS servers to 1.1.1.1, 8.8.8.8
-              reboot           Reboot the device
-              factory-reset    Factory reset the device
-              open-wan-mgmt    Enable WAN-side management (HTTP/Telnet/SSH)
-        """),
+              dump-config          Dump standard TR-069 parameters to JSON
+              dump-all             Dump ALL known parameters (extended WiFi, certs, etc.)
+              enable-telnet        Enable Telnet on LAN side
+              enable-ssh           Enable SSH on LAN side
+              extract-creds        Extract all stored credentials
+              extract-certs        Extract certificates, private keys, cert passwords
+              extract-wifi         Extract WiFi SSID and PSK (basic)
+              extract-wifi-full    Extract full WiFi config (both bands, WPS, guests)
+              extract-gpon         Extract GPON/ONT parameters
+              extract-remote-mgmt  Extract X_HW_AppRemoteManage credentials
+              change-acs           Redirect ACS URL to this server
+              change-dns           Change DNS servers to 1.1.1.1, 8.8.8.8
+              reboot               Reboot the device
+              factory-reset        Factory reset the device
+              open-wan-mgmt        Enable WAN-side management (HTTP/Telnet/SSH)
+
+            data model support:
+              The server auto-detects whether the CPE uses TR-098
+              (InternetGatewayDevice.) or TR-181 (Device.) parameter paths
+              from the Inform message.  Parameter paths are translated
+              automatically.
+
+            MEGACABLE ISP info (from router config):
+              ACS URL:   %(acs_url)s
+              Username:  %(acs_user)s
+              ConnReq:   %(conn_user)s
+              Firmware:  %(firmware)s
+        """ % {
+            "acs_url": MEGACABLE_ISP_CONFIG["acs_url"],
+            "acs_user": MEGACABLE_ISP_CONFIG["acs_username"],
+            "conn_user": MEGACABLE_ISP_CONFIG["conn_req_username"],
+            "firmware": MEGACABLE_ISP_CONFIG["firmware_original"],
+        }),
     )
     parser.add_argument(
         "--listen",
