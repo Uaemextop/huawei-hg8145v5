@@ -5,6 +5,9 @@ A Python web crawler designed to extract and backup the complete web interface o
 ## Features
 
 - **Automatic Authentication**: Handles router login with CSRF token management
+- **Session Keep-Alive**: Uses persistent HTTP connections with keep-alive headers
+- **Auto Re-authentication**: Automatically detects session expiry and re-logs in
+- **Smart File Skip**: Skips downloading files that already exist (resume capability)
 - **Deep Recursive Crawling**: Continues crawling until no new URLs are discovered
 - **Comprehensive URL Discovery**:
   - Extracts links from HTML tags (a, link, script, img, iframe, form, etc.)
@@ -12,6 +15,7 @@ A Python web crawler designed to extract and backup the complete web interface o
   - Parses ASP content for server-side includes and redirects
   - Discovers menu structures and navigation elements
   - Extracts URLs from onclick handlers and inline scripts
+  - Reads existing ASP/HTML files to extract references without re-downloading
 - **Structure Preservation**: Maintains original website directory structure
 - **Advanced Content Analysis**:
   - JavaScript route extraction (AJAX calls, fetch, window.location, etc.)
@@ -125,8 +129,21 @@ The crawler generates a `crawler.log` file in the current directory, containing:
    - Encodes password in Base64
    - Submits login credentials to `/login.cgi`
    - Maintains session cookies automatically
+   - Sets up keep-alive connection with the router
 
-2. **Discovery**:
+2. **Session Management**:
+   - Validates session every 30 seconds before making requests
+   - Automatically detects session expiry (401/403 responses or login redirects)
+   - Re-authenticates automatically when session expires
+   - Maintains persistent HTTP connections for efficiency
+
+3. **Smart Downloading**:
+   - Checks if files already exist before downloading
+   - Skips download if file exists with non-zero size
+   - Still extracts URLs from existing files for complete crawling
+   - Enables resume capability if crawl is interrupted
+
+4. **Discovery**:
    - Starts with common router pages (index.asp, frame.asp, status.asp, etc.)
    - Parses HTML to extract all links and resource references
    - Analyzes JavaScript files for dynamic routes and AJAX endpoints
@@ -134,7 +151,7 @@ The crawler generates a `crawler.log` file in the current directory, containing:
    - Discovers navigation menus and onclick handlers
    - Follows discovered links recursively
 
-3. **Deep Content Analysis**:
+5. **Deep Content Analysis**:
    - **JavaScript Analysis**: Extracts routes from:
      - String literals containing paths (e.g., `'/admin/status.asp'`)
      - AJAX calls (`$.ajax()`, `fetch()`, `XMLHttpRequest.open()`)
@@ -146,13 +163,13 @@ The crawler generates a `crawler.log` file in the current directory, containing:
      - Server transfers (`Server.Transfer`)
    - **Menu Discovery**: Locates all navigation elements and menu items
 
-4. **Download**:
+6. **Download**:
    - Downloads each discovered resource
    - Preserves directory structure
    - Handles both text and binary files appropriately
    - Saves JavaScript, CSS, HTML, ASP, images, and all other resources
 
-5. **Recursive Crawling**:
+7. **Recursive Crawling**:
    - Processes URLs in batches (iterations)
    - Continues until no new URLs are discovered
    - Logs progress after each iteration

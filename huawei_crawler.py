@@ -8,6 +8,7 @@ maintaining the original directory structure for offline analysis.
 import os
 import re
 import sys
+import time
 import base64
 import logging
 import argparse
@@ -55,19 +56,29 @@ class HuaweiRouterCrawler:
         self.session = requests.Session()
         self.session.verify = False  # Disable SSL verification for local router
 
+        # Configure keep-alive
+        self.session.headers.update({
+            'Connection': 'keep-alive',
+            'Keep-Alive': 'timeout=300, max=1000'
+        })
+
         # Configure retries
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504]
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
         # Track visited URLs to avoid duplicates
         self.visited_urls = set()
         self.downloaded_files = set()
+
+        # Track authentication status
+        self.is_authenticated = False
+        self.last_auth_check = 0
 
         # Common resource extensions
         self.resource_extensions = {
@@ -126,20 +137,88 @@ class HuaweiRouterCrawler:
                 # Check if we're redirected to a logged-in page or if there's session cookie
                 if 'sessionid' in self.session.cookies or 'SessionID' in self.session.cookies:
                     logger.info("Login successful!")
+                    self.is_authenticated = True
+                    self.last_auth_check = time.time()
                     return True
                 elif 'frame.asp' in response.url or 'main.asp' in response.url:
                     logger.info("Login successful! Redirected to main page")
+                    self.is_authenticated = True
+                    self.last_auth_check = time.time()
                     return True
                 else:
                     logger.warning("Login may have succeeded but confirmation unclear")
+                    self.is_authenticated = True
+                    self.last_auth_check = time.time()
                     return True
             else:
                 logger.error(f"Login failed with status code: {response.status_code}")
+                self.is_authenticated = False
                 return False
 
         except Exception as e:
             logger.error(f"Login error: {e}")
+            self.is_authenticated = False
             return False
+
+    def is_session_valid(self):
+        """
+        Check if the current session is still valid.
+
+        Returns:
+            bool: True if session is valid, False otherwise
+        """
+        # Check every 30 seconds to avoid too many validation requests
+        current_time = time.time()
+        if current_time - self.last_auth_check < 30:
+            return self.is_authenticated
+
+        try:
+            # Try to access a protected page to validate session
+            test_url = f"{self.base_url}/asp/GetRandCount.asp"
+            response = self.session.get(test_url, timeout=5)
+
+            # If we get redirected to login page or get 401/403, session is invalid
+            if response.status_code in [401, 403] or 'login.asp' in response.url.lower():
+                logger.warning("Session is no longer valid")
+                self.is_authenticated = False
+                return False
+
+            self.last_auth_check = current_time
+            self.is_authenticated = True
+            return True
+
+        except Exception as e:
+            logger.warning(f"Session validation error: {e}")
+            return self.is_authenticated
+
+    def ensure_authenticated(self):
+        """
+        Ensure we have a valid authenticated session.
+        Re-authenticates if session has expired.
+
+        Returns:
+            bool: True if authenticated, False otherwise
+        """
+        if not self.is_session_valid():
+            logger.info("Session expired or invalid, re-authenticating...")
+            return self.login()
+        return True
+
+    def file_already_downloaded(self, url):
+        """
+        Check if a file has already been downloaded.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            bool: True if file exists, False otherwise
+        """
+        file_path = self.get_file_path(url)
+        exists = file_path.exists() and file_path.stat().st_size > 0
+        if exists:
+            logger.debug(f"File already downloaded: {file_path}")
+        return exists
 
     def normalize_url(self, url):
         """
@@ -481,6 +560,7 @@ class HuaweiRouterCrawler:
         """
         Crawl a single page and extract resources.
         Enhanced to deeply analyze content and extract all possible routes.
+        Includes file skip check and auto re-authentication.
 
         Args:
             url: URL to crawl
@@ -495,8 +575,57 @@ class HuaweiRouterCrawler:
         new_urls = set()
 
         try:
+            # Check if file already exists (skip download)
+            if self.file_already_downloaded(url):
+                logger.info(f"Skipping already downloaded: {url}")
+
+                # Still need to extract links from the existing file
+                file_path = self.get_file_path(url)
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+
+                    # Extract links based on content type
+                    if url.endswith('.js'):
+                        new_urls = self.extract_js_routes(content, url)
+                    elif url.endswith('.css'):
+                        css_pattern = r'url\([\'"]?([^\'")\s]+)[\'"]?\)'
+                        for match in re.finditer(css_pattern, content):
+                            resource_url = match.group(1)
+                            if not resource_url.startswith('data:'):
+                                absolute_url = urljoin(url, resource_url)
+                                if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                                    new_urls.add(absolute_url)
+                    else:
+                        # HTML/ASP/other text - full extraction
+                        new_urls = self.extract_links(content, url)
+                        js_urls = self.extract_js_routes(content, url)
+                        new_urls.update(js_urls)
+                        asp_urls = self.extract_asp_routes(content, url)
+                        new_urls.update(asp_urls)
+
+                    logger.info(f"Extracted {len(new_urls)} URLs from cached file: {url}")
+                except Exception as e:
+                    logger.warning(f"Could not read cached file {file_path}: {e}")
+
+                return new_urls
+
+            # Ensure we're authenticated before making request
+            if not self.ensure_authenticated():
+                logger.error(f"Failed to authenticate, skipping {url}")
+                return new_urls
+
             logger.info(f"Crawling: {url}")
             response = self.session.get(url, timeout=15)
+
+            # Check for authentication issues and retry once
+            if response.status_code in [401, 403] or 'login.asp' in response.url.lower():
+                logger.warning(f"Authentication required for {url}, attempting re-login...")
+                if self.login():
+                    # Retry the request after successful login
+                    response = self.session.get(url, timeout=15)
+                else:
+                    logger.error(f"Re-authentication failed for {url}")
+                    return new_urls
 
             if response.status_code == 200:
                 # Save the page
