@@ -326,10 +326,16 @@ class RouterCrawler:
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
         })
         # visited stores *canonical* URLs (cache-busters stripped) for dedup
         self.visited: Set[str] = set()
         self.queue: Queue = Queue()
+        # Keep-alive: track when the session was last used and re-ping when idle.
+        # Initialise to now so the first crawl iteration never triggers an
+        # unnecessary ping (login() will refresh this timestamp anyway).
+        self._last_activity: float = time.monotonic()
+        self._keepalive_interval: float = 240.0  # seconds (4 min < typical 5 min idle timeout)
 
     # ------------------------------------------------------------------
     # Login
@@ -415,6 +421,7 @@ class RouterCrawler:
             return False
 
         log.info("Login successful.")
+        self._last_activity = time.monotonic()
         return True
 
     # ------------------------------------------------------------------
@@ -469,6 +476,54 @@ class RouterCrawler:
         final_path = urllib.parse.urlparse(resp.url).path.lower()
         return final_path in ("/index.asp", "/login.asp", "/")
 
+    def _local_path_for(self, url: str) -> Path:
+        """
+        Compute the local file path for *url* from the URL alone.
+
+        Used to check whether a file was already saved in a previous run
+        *before* making a network request.  The path follows the same
+        scheme as :meth:`_save` but does not require the response
+        content-type.
+        """
+        parsed = urllib.parse.urlparse(url)
+        rel_path = parsed.path.lstrip("/")
+
+        if not rel_path or rel_path.endswith("/"):
+            rel_path = rel_path.rstrip("/") + "/index.html"
+
+        query = parsed.query
+        if query and not _NUMERIC_QUERY_RE.match(query):
+            base, ext = os.path.splitext(rel_path)
+            safe_q = re.sub(r'[\\/:*?"<>|]', "_", query)
+            rel_path = base + "__" + safe_q + ext
+
+        parts = rel_path.replace("/", os.sep).split(os.sep)
+        return self.output_dir.joinpath(*parts)
+
+    def _keepalive(self) -> None:
+        """
+        Proactively keep the authenticated session alive.
+
+        Sends a lightweight GET to /asp/GetRandCount.asp when the session
+        has been idle for *_keepalive_interval* seconds.  If the response
+        looks like the login page (session expired), re-authenticates
+        automatically.
+        """
+        if time.monotonic() - self._last_activity < self._keepalive_interval:
+            return
+        log.debug("Keepalive ping…")
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/asp/GetRandCount.asp",
+                timeout=self.timeout,
+            )
+            self._last_activity = time.monotonic()
+            if self._is_login_response(resp):
+                log.info("Keepalive: session expired – re-authenticating…")
+                self.login()
+        except requests.RequestException as exc:
+            log.warning("Keepalive ping failed: %s", exc)
+
     def _fetch(self, url: str) -> Optional[requests.Response]:
         """Fetch *url* with the authenticated session.
 
@@ -482,6 +537,7 @@ class RouterCrawler:
                 allow_redirects=True,
                 stream=False,
             )
+            self._last_activity = time.monotonic()
             # Detect session expiry (redirect back to login page for a non-login URL)
             if self._is_login_response(resp) and self._canon_url(url) not in (
                 self._canon_url(f"{self.base_url}/index.asp"),
@@ -496,6 +552,7 @@ class RouterCrawler:
                         allow_redirects=True,
                         stream=False,
                     )
+                    self._last_activity = time.monotonic()
             return resp
         except requests.RequestException as exc:
             log.warning("Failed to fetch %s: %s", url, exc)
@@ -569,6 +626,32 @@ class RouterCrawler:
             if canon in self.visited:
                 continue
             self.visited.add(canon)
+
+            # Proactively keep the session alive before the next request
+            self._keepalive()
+
+            # ------------------------------------------------------------------
+            # Skip if the file was already saved (resume across runs).
+            # Even when skipping the download, scan the cached file for new
+            # links so that a resumed crawl still discovers unvisited pages.
+            # ------------------------------------------------------------------
+            local_path = self._local_path_for(url)
+            if local_path.exists():
+                log.info("  ↷ already saved, skipping download → %s", local_path)
+                if local_path.suffix.lower() in _SCANNABLE_EXTENSIONS:
+                    try:
+                        cached_text = local_path.read_text(encoding="utf-8", errors="replace")
+                        new_links = extract_links(cached_text, url, self.base_url)
+                        added = 0
+                        for link in new_links:
+                            if self._canon_url(link) not in self.visited:
+                                self.queue.put(link)
+                                added += 1
+                        if added:
+                            log.debug("  → queued %d new URL(s) from cached %s", added, local_path.name)
+                    except OSError as exc:
+                        log.warning("Could not read cached file %s: %s", local_path, exc)
+                continue
 
             log.info("Fetching: %s", url)
             resp = self._fetch(url)
