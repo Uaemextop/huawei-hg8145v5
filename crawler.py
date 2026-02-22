@@ -95,10 +95,14 @@ DEFAULT_OUTPUT = "downloaded_site"
 LOGIN_PAGE = "/index.asp"
 LOGIN_CGI = "/login.cgi"
 RAND_COUNT_URL = "/asp/GetRandCount.asp"
+RAND_INFO_URL  = "/asp/GetRandInfo.asp"    # used by DVODACOM2WIFI (PBKDF2 path)
 
 REQUEST_TIMEOUT = 15          # seconds per HTTP request
 DELAY_BETWEEN_REQUESTS = 0.2  # polite crawl delay (seconds)
-MAX_RELOGIN_ATTEMPTS = 2      # how many times to retry after session expiry
+MAX_RELOGIN_ATTEMPTS = 3      # how many times to retry after session expiry
+# POST to /html/ssmp/common/GetRandToken.asp every N successful fetches to
+# keep the authenticated session alive (mimics the browser's heartbeat calls).
+SESSION_HEARTBEAT_EVERY = 20  # requests between heartbeat pings
 
 # Content types whose response body is parsed for further links
 CRAWLABLE_TYPES = {
@@ -117,8 +121,10 @@ _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 # URL path patterns for write-action endpoints that must NEVER be crawled.
 # Fetching these would terminate the session (logout) or make irreversible
 # changes to the router (reboot, factory-reset, firmware upgrade).
+# getajax.cgi is excluded because it is a data API (returns hex-encoded JSON),
+# not an HTML page – crawling it randomly produces 404/empty responses.
 _BLOCKED_PATH_RE = re.compile(
-    r"/(logout|reboot|factory|restore|reset|upgrade\.cgi)\b",
+    r"/(logout|reboot|factory|restore|reset|upgrade\.cgi|getajax\.cgi)\b",
     re.IGNORECASE,
 )
 
@@ -165,8 +171,48 @@ def b64encode_password(password: str) -> str:
     """
     Replicate the router's  base64encode(Password.value)  from util.js.
     Standard RFC 4648 Base64 over the UTF-8 bytes of the password string.
+    Used when CfgMode != 'DVODACOM2WIFI'.
     """
     return base64.b64encode(password.encode("utf-8")).decode("ascii")
+
+
+def pbkdf2_sha256_password(password: str, salt: str, iterations: int) -> str:
+    """
+    Replicate the loginWithSha256() function from index.asp (CfgMode DVODACOM2WIFI):
+
+      1. PBKDF2(password, salt, {keySize:8, hasher:SHA256, iterations:N})
+         → 32 bytes (keySize 8 = 8 × 32-bit words)
+      2. CryptoJS.SHA256(pbkdf2.toString())  where .toString() gives hex
+         → SHA-256 over the UTF-8 bytes of the PBKDF2 hex string
+      3. Base64(sha256_hex.encode('utf-8'))  – CryptoJS Utf8.parse + Base64.stringify
+    """
+    import hashlib as _hashlib
+    dk = _hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+        dklen=32,
+    )
+    pbkdf2_hex = dk.hex()                                     # step 1 → hex string
+    sha256_hex = _hashlib.sha256(pbkdf2_hex.encode("utf-8")).hexdigest()  # step 2
+    return base64.b64encode(sha256_hex.encode("utf-8")).decode("ascii")   # step 3
+
+
+def detect_login_mode(session: requests.Session, host: str) -> str:
+    """
+    Fetch /index.asp and parse the embedded JavaScript to determine which
+    login method the router uses.
+
+    Returns the CfgMode string (e.g. 'MEGACABLE2', 'DVODACOM2WIFI', …).
+    Returns an empty string on failure (safe fallback = base64 path).
+    """
+    try:
+        resp = session.get(base_url(host) + LOGIN_PAGE, timeout=REQUEST_TIMEOUT)
+        cfg_mode = re.search(r"""var\s+CfgMode\s*=\s*['"]([^'"]+)['"]""", resp.text)
+        return cfg_mode.group(1) if cfg_mode else ""
+    except Exception:
+        return ""
 
 
 def get_rand_token(session: requests.Session, host: str) -> str:
@@ -184,52 +230,81 @@ def get_rand_token(session: requests.Session, host: str) -> str:
 
 def login(session: requests.Session, host: str, username: str, password: str) -> str | None:
     """
-    Two-step login for the HG8145V5 admin interface:
-      1. GET /index.asp  → router sets initial session cookies
-      2. POST /asp/GetRandCount.asp  → obtain anti-CSRF token
-      3. POST /login.cgi with UserName, Base64(Password), Language, token
+    Authenticate against the HG8145V5 admin interface.
 
-    The pre-login cookie  Cookie=body:Language:english:id=-1  (path=/)
-    is set to mimic what the login page's JavaScript does before submission.
+    Auto-detects the login method from the login page:
+      • Most configs (e.g. MEGACABLE2):
+          GET /index.asp → POST /asp/GetRandCount.asp for CSRF token
+          POST /login.cgi  UserName / base64(Password) / Language / x.X_HW_Token
+      • CfgMode == 'DVODACOM2WIFI':
+          POST /asp/GetRandInfo.asp  to get [token, salt, iterations]
+          PBKDF2+SHA256(password, salt, iterations) → base64
+          POST /login.cgi  UserName / encoded_password / Language / x.X_HW_Token
 
     Returns the post-login redirect URL (the admin home page) on success,
-    or None on failure.  The caller can use this URL as the starting seed
-    and as the Referer for subsequent authenticated requests.
+    or None on failure.  The URL is used as a seed and as the Referer header.
     """
-    # Step 1 – load login page so the router sets initial session cookies
-    try:
-        session.get(base_url(host) + LOGIN_PAGE, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as exc:
-        log.warning("Could not load login page: %s", exc)
+    # Step 1 – load login page; also detect router config mode
+    cfg_mode = detect_login_mode(session, host)
+    log.debug("Router CfgMode: %r", cfg_mode)
 
-    log.debug(
-        "Cookies after GET /index.asp: %s",
-        dict(session.cookies),
-    )
+    log.debug("Cookies after GET /index.asp: %s", dict(session.cookies))
 
-    # Step 2 – get anti-CSRF token
-    try:
-        token = get_rand_token(session, host)
-    except requests.RequestException as exc:
-        log.error("Failed to get auth token: %s", exc)
-        return None
+    use_sha256 = cfg_mode.upper() == "DVODACOM2WIFI"
 
-    # Step 3 – submit credentials
-    # Replicate:  var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
-    #             document.cookie = cookie2;
-    # In JavaScript document.cookie syntax, ';path=/' is a cookie ATTRIBUTE,
-    # not part of the value.  Pass it as the path= keyword argument here so
-    # the server receives the correct value: 'body:Language:english:id=-1'.
-    session.cookies.set(
-        "Cookie",
-        "body:Language:english:id=-1",
-        domain=host,
-        path="/",
-    )
+    if use_sha256:
+        # ── PBKDF2+SHA256 path (index.asp loginWithSha256) ────────────────
+        # POST /asp/GetRandInfo.asp  →  dealDataWithFun returns [token, salt, iters]
+        try:
+            info_resp = session.post(
+                base_url(host) + RAND_INFO_URL + "?&1=1",
+                data={"Username": username},
+                timeout=REQUEST_TIMEOUT,
+            )
+            info_resp.raise_for_status()
+            # Response is a JS function-call string like:
+            #   function(){return ['TOKEN','SALT','1000'];}
+            # Extract the array elements.
+            m = re.search(r"\[([^\]]+)\]", info_resp.text)
+            if not m:
+                log.error("Could not parse GetRandInfo response: %s", info_resp.text[:120])
+                return None
+            parts = [p.strip().strip("'\"") for p in m.group(1).split(",")]
+            if len(parts) < 3:
+                log.error("Unexpected GetRandInfo parts: %s", parts)
+                return None
+            token, salt, iterations_str = parts[0], parts[1], parts[2]
+            iterations = int(iterations_str)
+            encoded_pw = pbkdf2_sha256_password(password, salt, iterations)
+            log.debug("PBKDF2 login: token=%s salt=%s iters=%d", token, salt, iterations)
+        except (requests.RequestException, ValueError) as exc:
+            log.error("GetRandInfo failed: %s", exc)
+            return None
+    else:
+        # ── Base64 path (standard for MEGACABLE2 and most other configs) ──
+        # Set the pre-login cookie to mimic what the login page JS does:
+        #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
+        #   document.cookie = cookie2;
+        # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
+        # not part of the value.  We specify it via the path= kwarg here so
+        # the router receives the correct value: 'body:Language:english:id=-1'.
+        session.cookies.set(
+            "Cookie",
+            "body:Language:english:id=-1",
+            domain=host,
+            path="/",
+        )
+        try:
+            token = get_rand_token(session, host)
+        except requests.RequestException as exc:
+            log.error("Failed to get auth token: %s", exc)
+            return None
+        encoded_pw = b64encode_password(password)
 
+    # Step 3 – submit credentials (common to both paths)
     payload = {
         "UserName": username,
-        "PassWord": b64encode_password(password),
+        "PassWord": encoded_pw,
         "Language": "english",
         "x.X_HW_Token": token,
     }
@@ -250,13 +325,19 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     if any(marker in resp.text for marker in _LOGIN_MARKERS):
         log.error(
             "Login failed – router returned the login form. "
-            "Check your credentials."
+            "Check your credentials or try --debug for more info."
         )
         return None
 
     post_login_url = resp.url
-    log.info("Login successful (HTTP %s). Post-login URL: %s. Active cookies: %s",
-             resp.status_code, post_login_url, list(session.cookies.keys()))
+    log.info(
+        "Login successful (HTTP %s, method=%s). Post-login URL: %s. "
+        "Active cookies: %s",
+        resp.status_code,
+        "PBKDF2" if use_sha256 else "base64",
+        post_login_url,
+        list(session.cookies.keys()),
+    )
     return post_login_url
 
 
@@ -270,7 +351,16 @@ def is_session_expired(resp: requests.Response) -> bool:
       * Body-based FP: JS files contain login marker strings as DOM element IDs
         (e.g. document.getElementById('txt_Password')), CSS contains .loginbutton.
         → now ignores non-HTML content types and requires ALL markers together.
+
+    Also detects the post-logout state: logout.html resets the session cookie to
+    'Cookie=default' (document.cookie = 'Cookie=default;path=/') which is a clear
+    sign the session has been terminated.
     """
+    # Post-logout cookie: logout.html sets Cookie=default to clear the session.
+    cookie_val = resp.cookies.get("Cookie", "")
+    if cookie_val.lower() == "default":
+        return True
+
     # A redirect to the specific login-page paths is the most reliable signal.
     # We only match the path (not substrings of other paths).
     final_path = urllib.parse.urlparse(resp.url).path.lower()
@@ -583,10 +673,18 @@ SEED_PATHS: list[str] = [
     "/main.html",
     "/frame.asp",
 
-    # ASP helper endpoints
+    # ASP helper endpoints (token/challenge APIs – discovered from index.asp & util.js)
     "/asp/GetRandCount.asp",
-    "/asp/GetRandInfo.asp",
+    "/asp/GetRandInfo.asp",          # PBKDF2 challenge endpoint (DVODACOM2WIFI)
+    "/asp/GetRandInfo.asp?&1=1",     # variant used by loginWithSha256
+
+    # Pre-login token endpoints
     "/asp/CheckPwdNotLogin.asp",
+    "/html/ssmp/common/getRandString.asp",
+
+    # Post-login token / heartbeat endpoints (discovered from util.js)
+    "/html/ssmp/common/GetRandToken.asp",
+    "/html/ssmp/common/StartFileLoad.asp",
 
     # Top-level status / info pages (common on HG8145 series)
     "/html/ssmp/home.asp",
@@ -639,6 +737,7 @@ SEED_PATHS: list[str] = [
     "/html/index.asp",
     "/html/menu.asp",
     "/html/frame.asp",
+    "/html/logout.html",
 
     # Core JavaScript libraries (parsing these reveals more paths)
     "/resource/common/md5.js",
@@ -698,6 +797,8 @@ class Crawler:
         self._queue: deque[str] = deque()
         # Re-login attempt counter – reset to 0 after each successful response
         self._relogin_count = 0
+        # Counts successful fetches between heartbeat pings
+        self._fetch_count = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -829,6 +930,22 @@ class Crawler:
         if key not in self._visited:
             self._queue.append(url)
 
+    def _heartbeat(self) -> None:
+        """
+        POST to /html/ssmp/common/GetRandToken.asp to keep the authenticated
+        session alive.  This mimics the browser's periodic token-refresh calls
+        that prevent the router from timing out the session.
+
+        The response (a raw token string) is silently discarded – we only care
+        about the side-effect of resetting the server-side idle timer.
+        """
+        hb_url = self.base + "/html/ssmp/common/GetRandToken.asp"
+        try:
+            self.session.post(hb_url, timeout=REQUEST_TIMEOUT)
+            log.debug("Session heartbeat sent to %s", hb_url)
+        except requests.RequestException as exc:
+            log.debug("Heartbeat failed (non-fatal): %s", exc)
+
     def _fetch_and_process(self, url: str) -> None:
         key = url_key(url)
         if key in self._visited:
@@ -893,6 +1010,9 @@ class Crawler:
         # Successful response – reset the re-login counter so each new
         # session expiry gets MAX_RELOGIN_ATTEMPTS fresh attempts.
         self._relogin_count = 0
+        self._fetch_count += 1
+        if self._fetch_count % SESSION_HEARTBEAT_EVERY == 0:
+            self._heartbeat()
 
         content_type = resp.headers.get("Content-Type", "application/octet-stream")
         content = resp.content
