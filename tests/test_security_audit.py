@@ -83,6 +83,9 @@ MOCK_INDEX_ASP = """
   Form.setAction('logout.cgi?RequestFile=html/logout.html');
   url += '&SubmitType=' + submitType;
 
+  url : 'FrameModeSwitch.cgi?&RequestFile=/login.asp',
+  data  : 'X_HW_FrameMode=2',
+
   Form.addParameter('PassWord', base64encode(Password.value));
 
   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
@@ -420,6 +423,59 @@ class TestSecurityAuditChecks(unittest.TestCase):
         audit = self._make_audit()
         audit._login_page_text = "<html>no requestfile</html>"
         audit.check_v28_requestfile_injection()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-29: CfgMode switch via FrameModeSwitch ---
+    def test_v29_cfgmode_switch_accessible(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.session.get.return_value = _mock_response(status_code=200, text="OK")
+        audit.check_v29_cfgmode_switch()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "CRITICAL")
+        self.assertIn("MEGACABLE2", audit.results[0].details)
+        self.assertIn("PLDT", audit.results[0].details)
+
+    def test_v29_cfgmode_switch_code_only(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.session.get.return_value = _mock_response(status_code=404, ok=False)
+        audit.check_v29_cfgmode_switch()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "HIGH")
+
+    def test_v29_cfgmode_switch_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no framemode</html>"
+        audit.session.get.return_value = _mock_response(status_code=404, ok=False)
+        audit.check_v29_cfgmode_switch()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-30: randcode leak ---
+    def test_v30_randcode_leak_active(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v30_randcode_leak()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "HIGH")
+        self.assertIn("20260221", audit.results[0].details)
+        self.assertEqual(audit.results[0].data["randcode"], "20260221")
+
+    def test_v30_randcode_leak_disabled(self):
+        page = MOCK_INDEX_ASP.replace(
+            "var useChallengeCode = '1';",
+            "var useChallengeCode = '0';"
+        )
+        audit = self._make_audit()
+        audit._login_page_text = page
+        audit.check_v30_randcode_leak()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertEqual(audit.results[0].severity, "MEDIUM")
+
+    def test_v30_randcode_not_present(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no randcode</html>"
+        audit.check_v30_randcode_leak()
         self.assertEqual(audit.results[0].status, "OK")
 
 

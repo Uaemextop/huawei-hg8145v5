@@ -884,6 +884,94 @@ class SecurityAudit:
                                   "OK", "HIGH",
                                   "No RequestFile injection patterns found"))
 
+    def check_v29_cfgmode_switch(self) -> None:
+        """V-29: Check for CfgMode switch via FrameModeSwitch.cgi."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-29", "CfgMode switch via FrameModeSwitch",
+                                  "SKIP", "CRITICAL",
+                                  "Could not fetch login page"))
+            return
+
+        # Detect current CfgMode
+        m = re.search(r"var\s+CfgMode\s*=\s*'([^']*)'", page)
+        current_mode = m.group(1) if m else "unknown"
+
+        has_framemode_cgi = "FrameModeSwitch.cgi" in page
+        has_framemode_param = "X_HW_FrameMode" in page
+
+        # Probe the endpoint (GET only — read-only)
+        resp = self._get("/FrameModeSwitch.cgi")
+        endpoint_accessible = resp and resp.status_code != 404
+
+        if has_framemode_cgi and endpoint_accessible:
+            self._add(CheckResult(
+                "V-29", "CfgMode switch via FrameModeSwitch", "VULN", "CRITICAL",
+                f"FrameModeSwitch.cgi accessible (HTTP {resp.status_code}); "
+                f"current CfgMode={current_mode}; can switch to "
+                "PLDT/ANTEL/DBAA1 to unlock password oracle, default creds, "
+                "or empty-password admin bypass",
+                data={"current_mode": current_mode,
+                      "endpoint_status": resp.status_code},
+            ))
+        elif has_framemode_cgi:
+            self._add(CheckResult(
+                "V-29", "CfgMode switch via FrameModeSwitch", "VULN", "HIGH",
+                f"FrameModeSwitch.cgi in code (current CfgMode={current_mode}) "
+                "but endpoint not probed or returned 404",
+                data={"current_mode": current_mode},
+            ))
+        else:
+            self._add(CheckResult("V-29", "CfgMode switch via FrameModeSwitch",
+                                  "OK", "CRITICAL",
+                                  "No FrameModeSwitch pattern found"))
+
+    def check_v30_randcode_leak(self) -> None:
+        """V-30: Check for challenge code / randcode leak in HTML."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-30", "Challenge code (randcode) leak",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        m_use = re.search(r"var\s+useChallengeCode\s*=\s*'([^']*)'", page)
+        m_rand = re.search(r"var\s+randcode\s*=\s*'([^']*)'", page)
+        m_login = re.search(r"var\s+LoginTimes\s*=\s*'([^']*)'", page)
+        m_lock = re.search(r"var\s+LockLeftTime\s*=\s*'([^']*)'", page)
+
+        use_challenge = m_use.group(1) if m_use else ""
+        randcode = m_rand.group(1) if m_rand else ""
+        login_times = m_login.group(1) if m_login else ""
+        lock_time = m_lock.group(1) if m_lock else ""
+
+        leaked_items = []
+        if randcode:
+            leaked_items.append(f"randcode={randcode}")
+        if login_times and login_times != "0":
+            leaked_items.append(f"LoginTimes={login_times}")
+        if lock_time and lock_time != "0":
+            leaked_items.append(f"LockLeftTime={lock_time}")
+
+        if randcode and use_challenge == "1":
+            self._add(CheckResult(
+                "V-30", "Challenge code (randcode) leak", "VULN", "HIGH",
+                f"Challenge code exposed in HTML: randcode='{randcode}'; "
+                f"useChallengeCode='1' — bypasses CheckCode verification",
+                data={"randcode": randcode, "useChallengeCode": use_challenge,
+                      "LoginTimes": login_times, "LockLeftTime": lock_time},
+            ))
+        elif randcode:
+            self._add(CheckResult(
+                "V-30", "Challenge code (randcode) leak", "VULN", "MEDIUM",
+                f"randcode='{randcode}' in HTML but useChallengeCode is off",
+                data={"randcode": randcode},
+            ))
+        else:
+            self._add(CheckResult("V-30", "Challenge code (randcode) leak",
+                                  "OK", "HIGH",
+                                  "No randcode variable found in login page"))
+
     def check_endpoint_accessibility(self) -> None:
         """Bonus: Probe all known endpoints for accessibility."""
         for endpoint in PRE_LOGIN_ENDPOINTS:
@@ -935,6 +1023,8 @@ class SecurityAudit:
         self.check_v26_write_endpoints()
         self.check_v27_response_chain_rce()
         self.check_v28_requestfile_injection()
+        self.check_v29_cfgmode_switch()
+        self.check_v30_randcode_leak()
 
         # Auth-required checks (only if credentials provided)
         if self.username and self.password:
