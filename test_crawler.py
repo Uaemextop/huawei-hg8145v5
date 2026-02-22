@@ -419,6 +419,27 @@ class TestSessionKeepAlive(unittest.TestCase):
             crawler._response_is_login_redirect(FakeResp(), "/html/status/info.asp"),
         )
 
+    def test_keepalive_page_detects_redirect(self):
+        """The keep-alive check page (status page) detects login redirect."""
+        crawler = HuaweiCrawler(
+            host="192.168.100.1",
+            username="test",
+            password="test",
+            output_dir=tempfile.mkdtemp(),
+            max_depth=0,
+            delay=0,
+        )
+        # Simulate a response where the status page redirects to login.
+        keepalive_url = "/html/status/deviceinformation/deviceinformation.asp"
+
+        class FakeResp:
+            url = "http://192.168.100.1/login.asp"
+            text = ""
+
+        self.assertTrue(
+            crawler._response_is_login_redirect(FakeResp(), keepalive_url),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

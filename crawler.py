@@ -305,12 +305,15 @@ class HuaweiCrawler:
         Called periodically (every ``_keepalive_interval`` requests) to
         detect and recover from session expiry *before* it causes a
         string of failures.
+
+        Uses a status page (not ``index.asp``) because the login page
+        always contains the login form, which would confuse the
+        redirect/expiry detection.
         """
+        check_url = self.base_url + "/html/status/deviceinformation/deviceinformation.asp"
         try:
-            resp = self.session.get(
-                self.base_url + "/index.asp", timeout=10, verify=False,
-            )
-            if resp.status_code == 200 and not self._response_is_login_redirect(resp, "/index.asp"):
+            resp = self.session.get(check_url, timeout=10, verify=False)
+            if resp.status_code == 200 and not self._response_is_login_redirect(resp, check_url):
                 logger.debug("Keep-alive check OK.")
                 return True
         except requests.RequestException:
@@ -510,7 +513,8 @@ class HuaweiCrawler:
         self._consecutive_failures = 0
         self._log_cookies("after download")
 
-        # local_path and rel_path were already computed above.
+        # ``local_path`` and ``rel_path`` were computed at the top of
+        # this method for the file-exists check and are reused here.
         local_dir = os.path.dirname(local_path)
         os.makedirs(local_dir, exist_ok=True)
 
