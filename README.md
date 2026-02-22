@@ -7,6 +7,10 @@ every reachable admin page and static asset** (HTML/ASP, JavaScript, CSS,
 images, fonts, JSON, XML, …) until no new URLs remain.  Preserves the
 original server directory structure on disk for fully-offline code analysis.
 
+**NEW**: Now available as a modular Python package! See `huawei_crawler/` directory
+for the organized module structure with separate auth, network, parser, and crawler
+components.
+
 ## Features
 
 * **Two-step authenticated login** – replicates the router's anti-CSRF token
@@ -40,22 +44,44 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Command Line
+
 ```bash
-# Prompts for password if not set in environment
-python crawler.py
+# Using the new modular package (recommended)
+python -m huawei_crawler --password your_password
+
+# Or using the legacy script (backward compatible)
+python crawler.py --password your_password
 
 # Password via environment variable (recommended – avoids shell history)
 set ROUTER_PASSWORD=your_password_here   # Windows
 export ROUTER_PASSWORD=your_password_here  # Linux / macOS
-python crawler.py
+python -m huawei_crawler
 
 # All options explicit
-python crawler.py --host 192.168.100.1 --user Mega_gpon \
+python -m huawei_crawler --host 192.168.100.1 --user Mega_gpon \
     --password your_password_here --output downloaded_site
 
 # Verbose debug output (shows every cookie, every new URL enqueued)
-python crawler.py --debug
+python -m huawei_crawler --debug
 ```
+
+### As a Python Package
+
+```python
+from huawei_crawler import Crawler
+from pathlib import Path
+
+crawler = Crawler(
+    host="192.168.100.1",
+    username="Mega_gpon",
+    password="your_password",
+    output_dir=Path("downloaded_site"),
+)
+crawler.run()
+```
+
+See `huawei_crawler/README.md` for more details on the package structure and API.
 
 ### Options
 
