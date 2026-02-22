@@ -122,7 +122,7 @@ def smart_local_path(
                 "text/html":             ".html",
                 "application/xhtml+xml": ".html",
                 "text/css":              ".css",
-                "application/javascript":".js",
+                "application/javascript": ".js",
                 "text/javascript":       ".js",
                 "application/json":      ".json",
                 "text/xml":              ".xml",

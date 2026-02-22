@@ -98,7 +98,7 @@ class Crawler:
         # The root URL "/" typically serves the same content as /index.asp on
         # Huawei routers.  Pre-save it so it is available for link extraction
         # and marked visited, preventing false session-expiry detection.
-        self._save_pre_auth("/")
+        self._save_pre_auth("/")  # prevents infinite re-login loop (root = login page)
 
         post_login_url = login(self.session, self.host, self.username, self.password)
         if not post_login_url:
