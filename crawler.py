@@ -52,6 +52,8 @@ Usage (Windows / Linux / macOS)
 
 import argparse
 import base64
+import hashlib
+import json
 import logging
 import os
 import re
@@ -73,15 +75,48 @@ try:
 except ImportError:
     sys.exit("Missing dependency. Run:  pip install -r requirements.txt")
 
+try:
+    import colorlog
+    _COLORLOG_AVAILABLE = True
+except ImportError:
+    _COLORLOG_AVAILABLE = False
+
+try:
+    from tqdm import tqdm as _tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
-# Logging
+# Logging – coloured output when colorlog is available
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger("hg8145v5-crawler")
+
+
+def _setup_logging(debug: bool = False) -> None:
+    level = logging.DEBUG if debug else logging.INFO
+    log.setLevel(level)
+    log.handlers.clear()
+
+    if _COLORLOG_AVAILABLE:
+        handler = colorlog.StreamHandler()
+        handler.setFormatter(colorlog.ColoredFormatter(
+            "%(log_color)s%(asctime)s [%(levelname)s]%(reset)s %(message)s",
+            datefmt="%H:%M:%S",
+            log_colors={
+                "DEBUG":    "cyan",
+                "INFO":     "green",
+                "WARNING":  "yellow",
+                "ERROR":    "red",
+                "CRITICAL": "bold_red",
+            },
+        ))
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+        ))
+    log.addHandler(handler)
 
 # ---------------------------------------------------------------------------
 # Configuration constants
@@ -92,17 +127,17 @@ DEFAULT_USER = os.environ.get("ROUTER_USER", "Mega_gpon")
 DEFAULT_PASSWORD = os.environ.get("ROUTER_PASSWORD", "")
 DEFAULT_OUTPUT = "downloaded_site"
 
-LOGIN_PAGE = "/index.asp"
-LOGIN_CGI = "/login.cgi"
+LOGIN_PAGE     = "/index.asp"
+LOGIN_CGI      = "/login.cgi"
 RAND_COUNT_URL = "/asp/GetRandCount.asp"
 RAND_INFO_URL  = "/asp/GetRandInfo.asp"    # used by DVODACOM2WIFI (PBKDF2 path)
+TOKEN_URL      = "/html/ssmp/common/GetRandToken.asp"   # authenticated token heartbeat
 
-REQUEST_TIMEOUT = 15          # seconds per HTTP request
-DELAY_BETWEEN_REQUESTS = 0.2  # polite crawl delay (seconds)
-MAX_RELOGIN_ATTEMPTS = 3      # how many times to retry after session expiry
-# POST to /html/ssmp/common/GetRandToken.asp every N successful fetches to
-# keep the authenticated session alive (mimics the browser's heartbeat calls).
-SESSION_HEARTBEAT_EVERY = 20  # requests between heartbeat pings
+REQUEST_TIMEOUT            = 15    # seconds per HTTP request
+DELAY_BETWEEN_REQUESTS     = 0.15  # polite crawl delay (seconds)
+MAX_RELOGIN_ATTEMPTS       = 3     # re-login retries per session expiry event
+SESSION_HEARTBEAT_EVERY    = 20    # POST to TOKEN_URL every N successful fetches
+MAX_403_TOKEN_RETRY        = 1     # how many times to retry a 403 with a fresh token
 
 # Content types whose response body is parsed for further links
 CRAWLABLE_TYPES = {
@@ -111,18 +146,22 @@ CRAWLABLE_TYPES = {
     "application/javascript",
     "text/javascript",
     "text/css",
-    # The router sometimes serves ASP / CGI responses as plain text
     "text/plain",
+    "application/json",        # router data APIs may return JSON with path refs
+    "application/xml",
+    "text/xml",
 }
 
 # Signals that the session has expired – checked only against HTML responses
 _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 
 # URL path patterns for write-action endpoints that must NEVER be crawled.
-# Fetching these would terminate the session (logout) or make irreversible
-# changes to the router (reboot, factory-reset, firmware upgrade).
-# getajax.cgi is excluded because it is a data API (returns hex-encoded JSON),
-# not an HTML page – crawling it randomly produces 404/empty responses.
+# • logout – terminates the session
+# • reboot / factory / restore / reset – make irreversible hardware changes
+# • upgrade.cgi – firmware upgrade (potentially bricking)
+# • getajax.cgi without a meaningful ObjPath – the data API returns
+#   hex-encoded TR-069 objects, not HTML; specific ObjPath URLs discovered
+#   from JS can still be fetched (they are allowed through).
 _BLOCKED_PATH_RE = re.compile(
     r"/(logout|reboot|factory|restore|reset|upgrade\.cgi|getajax\.cgi)\b",
     re.IGNORECASE,
@@ -132,6 +171,13 @@ _BLOCKED_PATH_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Session bootstrap
 # ---------------------------------------------------------------------------
+
+try:
+    import lxml  # noqa: F401 – used as BeautifulSoup parser backend
+    _BS4_PARSER = "lxml"
+except ImportError:
+    _BS4_PARSER = "html.parser"
+
 
 def build_session(verify_ssl: bool = True) -> requests.Session:
     """Return a requests.Session with retry logic and keep-alive pre-configured."""
@@ -192,7 +238,7 @@ def pbkdf2_sha256_password(password: str, salt: str, iterations: int) -> str:
         password.encode("utf-8"),
         salt.encode("utf-8"),
         iterations,
-        dklen=32,
+        dklen=32,   # keySize:8 means 8 * 32-bit words = 32 bytes
     )
     pbkdf2_hex = dk.hex()                                     # step 1 → hex string
     sha256_hex = _hashlib.sha256(pbkdf2_hex.encode("utf-8")).hexdigest()  # step 2
@@ -253,8 +299,8 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     use_sha256 = cfg_mode.upper() == "DVODACOM2WIFI"
 
     if use_sha256:
-        # ── PBKDF2+SHA256 path (index.asp loginWithSha256) ────────────────
-        # POST /asp/GetRandInfo.asp  →  dealDataWithFun returns [token, salt, iters]
+        # --- PBKDF2+SHA256 path (index.asp loginWithSha256) ---
+        # POST /asp/GetRandInfo.asp -> dealDataWithFun returns [token, salt, iters]
         try:
             info_resp = session.post(
                 base_url(host) + RAND_INFO_URL + "?&1=1",
@@ -281,7 +327,7 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
             log.error("GetRandInfo failed: %s", exc)
             return None
     else:
-        # ── Base64 path (standard for MEGACABLE2 and most other configs) ──
+        # --- Base64 path (standard for MEGACABLE2 and most other configs) ---
         # Set the pre-login cookie to mimic what the login page JS does:
         #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
         #   document.cookie = cookie2;
@@ -346,17 +392,16 @@ def is_session_expired(resp: requests.Response) -> bool:
     Return True only when the router has genuinely redirected to the login form.
 
     Avoids two classes of false positives that caused session-expiry loops:
-      * URL-based FP: 'login' in url matches /Cuscss/login.css, safelogin.js, etc.
-        → now checks only the specific login-page paths /index.asp and /login.asp.
-      * Body-based FP: JS files contain login marker strings as DOM element IDs
+      * URL-based false positive: 'login' in url matches /Cuscss/login.css, safelogin.js, etc.
+        -> now checks only the specific login-page paths /index.asp and /login.asp.
+      * Body-based false positive: JS files contain login marker strings as DOM element IDs
         (e.g. document.getElementById('txt_Password')), CSS contains .loginbutton.
-        → now ignores non-HTML content types and requires ALL markers together.
+        -> now ignores non-HTML content types and requires ALL markers together.
 
     Also detects the post-logout state: logout.html resets the session cookie to
     'Cookie=default' (document.cookie = 'Cookie=default;path=/') which is a clear
     sign the session has been terminated.
     """
-    # Post-logout cookie: logout.html sets Cookie=default to clear the session.
     cookie_val = resp.cookies.get("Cookie", "")
     if cookie_val.lower() == "default":
         return True
@@ -468,63 +513,149 @@ def _extract_css_urls(css: str, page_url: str, base: str) -> set[str]:
     return found
 
 
+# ---- JSON ----
+
+def _extract_json_paths(text: str, page_url: str, base: str) -> set[str]:
+    """
+    Parse JSON responses and extract any string values that look like URL paths.
+    Handles both proper JSON and JS-style objects returned by Huawei's getajax.cgi.
+    """
+    found: set[str] = set()
+    try:
+        obj = json.loads(text)
+        queue = [obj]
+        while queue:
+            item = queue.pop()
+            if isinstance(item, dict):
+                queue.extend(item.values())
+            elif isinstance(item, list):
+                queue.extend(item)
+            elif isinstance(item, str) and item.startswith("/"):
+                n = normalise_url(item, page_url, base)
+                if n:
+                    found.add(n)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return found
+
+
 # ---- JavaScript deep extraction ----
 
 # window.location = "..." or window.location.href = "..."
 _WIN_LOC_RE = re.compile(
-    r"""(?:window\.location(?:\.href)?|location\.href)\s*=\s*['"]([^'"]+)['"]""",
+    r"""(?:window\.location(?:\.href)?|location\.href|location\.replace)\s*[=(]\s*['"`]([^'"`\n]+)['"`]""",
     re.I,
 )
 
 # Form.setAction('/some/path.cgi?params')  –  router-specific helper
 _FORM_ACTION_RE = re.compile(
-    r"""\.setAction\s*\(\s*['"]([^'"]+)['"]""",
+    r"""\.setAction\s*\(\s*['"`]([^'"`\n]+)['"`]""",
     re.I,
 )
 
-# $.ajax({ url: '/path', ... }) — both with and without quotes around key
+# $.ajax({ url: '/path', ... }) / fetch('/path') / axios.get('/path')
 _AJAX_URL_RE = re.compile(
-    r"""(?:['"]url['"]\s*:|url\s*:)\s*['"]([^'"]+)['"]""",
+    r"""(?:['"]url['"]\s*:|url\s*:|fetch\s*\(|axios\.(?:get|post)\s*\()\s*['"`]([^'"`\n]+)['"`]""",
     re.I,
 )
 
 # document.write('<tag src="/path/to/file.js">') — extract nested markup
 _DOC_WRITE_RE = re.compile(
-    r"""document\.write\s*\(\s*['"](.+?)['"]""",
+    r"""document\.write\s*\(\s*['"`](.+?)['"`]""",
     re.I | re.DOTALL,
 )
 
-# RequestFile=login.asp embedded in CGI query strings
+# RequestFile=login.asp embedded in CGI query strings (Huawei-specific)
 _REQUEST_FILE_RE = re.compile(
-    r"""RequestFile=([^&'">\s]+)""",
+    r"""RequestFile=([^&'">\s\n]+)""",
     re.I,
 )
 
 # All root-relative quoted path strings: '/anything/here'
 _ABS_QUOTED_PATH_RE = re.compile(
-    r"""['"](/[a-zA-Z0-9_./%?&=+\-#]+)['"]""",
+    r"""['"`](/[a-zA-Z0-9_./%?&=+\-#][^'"`\n]{0,200})['"`]""",
     re.I,
 )
 
-# Relative paths with a known web extension: 'some/page.asp'
+# Relative paths with a known web extension (catches 'wlan.asp', '../images/x.jpg', etc.)
 _REL_EXT_PATH_RE = re.compile(
-    r"""['"]([a-zA-Z0-9_\-./]+\.(?:asp|html|htm|cgi|js|css|png|jpg|jpeg|gif|ico|svg|json|xml|woff2?|ttf|eot|otf|bmp|webp))['"]""",
+    r"""['"`]([.]{0,2}/[a-zA-Z0-9_\-./]+\.(?:asp|html|htm|cgi|js|css|png|jpg|jpeg|gif|ico|svg|json|xml|woff2?|ttf|eot|otf|bmp|webp))['"`]""",
+    re.I,
+)
+
+# Template literals that contain only a simple path: `/html/ssmp/${name}.asp`
+# Extracts the static prefix up to the first interpolation marker.
+_TEMPLATE_PATH_RE = re.compile(
+    r"""`(/[a-zA-Z0-9_/.-]+(?:\$\{[^}]+\}[a-zA-Z0-9_/.-]*)*)` """,
+    re.I,
+)
+
+# JS object / array literal paths:  { url: '/path' }  or  ['/path1', '/path2']
+_OBJ_PROP_PATH_RE = re.compile(
+    r"""[\[,{]\s*['"`](/[a-zA-Z0-9_./%?&=+\-][^'"`\n]{0,150})['"`]\s*[,\]}]""",
+    re.I,
+)
+
+# var/let/const  varName = '/path'  assignments
+_VAR_ASSIGN_RE = re.compile(
+    r"""(?:var|let|const)\s+\w+\s*=\s*['"`](/[a-zA-Z0-9_./%?&=+\-#][^'"`\n]{0,200})['"`]""",
+    re.I,
+)
+
+# Huawei-specific: string concatenation   '/html/ssmp/' + pageName + '.asp'
+# Extracts the static prefix to queue as a candidate
+_CONCAT_PREFIX_RE = re.compile(
+    r"""['"`](/html/[a-zA-Z0-9_/]+/)['"`]\s*\+""",
     re.I,
 )
 
 
 def _extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
-    """Extract every URL/path reference from JavaScript source."""
+    """
+    Exhaustively extract every URL/path reference from JavaScript source.
+
+    Uses many overlapping patterns to maximise discovery:
+      • Explicit navigation (window.location, Form.setAction, fetch, $.ajax)
+      • All root-relative quoted strings
+      • Relative paths with known web extensions
+      • Template literals
+      • Object/array literals containing paths
+      • Variable assignments
+      • Huawei-specific concatenation prefixes
+      • RequestFile= CGI parameter values
+      • document.write() nested markup
+    """
     found: set[str] = set()
 
     def _add(raw: str) -> None:
+        # Skip strings that still contain template-literal interpolation markers
+        # or embedded quote characters – these are not valid URL paths but
+        # fragments of JS expressions captured by the broader regexes.
+        # (Legitimate URL query strings use percent-encoding, not raw quotes.)
+        if "${" in raw or "'" in raw or '"' in raw:
+            return
         n = normalise_url(raw.strip(), page_url, base)
         if n:
             found.add(n)
 
-    for pat in (_WIN_LOC_RE, _FORM_ACTION_RE, _AJAX_URL_RE):
+    # All targeted patterns
+    for pat in (
+        _WIN_LOC_RE,
+        _FORM_ACTION_RE,
+        _AJAX_URL_RE,
+        _ABS_QUOTED_PATH_RE,
+        _REL_EXT_PATH_RE,
+        _OBJ_PROP_PATH_RE,
+        _VAR_ASSIGN_RE,
+        _CONCAT_PREFIX_RE,
+    ):
         for m in pat.finditer(js):
             _add(m.group(1))
+
+    # Template literal – queue the static prefix as a directory hint
+    for m in _TEMPLATE_PATH_RE.finditer(js):
+        raw = re.sub(r"\$\{[^}]+\}", "", m.group(1))  # strip interpolations
+        _add(raw)
 
     # document.write – treat written markup as HTML to extract src/href
     for m in _DOC_WRITE_RE.finditer(js):
@@ -534,26 +665,17 @@ def _extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
     # RequestFile= in any CGI action string
     for m in _REQUEST_FILE_RE.finditer(js):
         val = m.group(1)
-        # May be absolute or just a filename like 'login.asp'
         if not val.startswith("/"):
             val = "/" + val
         _add(val)
-
-    # All root-relative quoted strings
-    for m in _ABS_QUOTED_PATH_RE.finditer(js):
-        _add(m.group(1))
-
-    # Relative paths with known extensions
-    for m in _REL_EXT_PATH_RE.finditer(js):
-        _add(m.group(1))
 
     return found
 
 
 def _extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     """
-    Use BeautifulSoup to extract every resource URL from HTML/ASP content.
-    Also parse inline <style> blocks and <script> blocks.
+    Use BeautifulSoup (with lxml when available) to extract every resource
+    URL from HTML/ASP content.  Also parses inline <style> and <script>.
     """
     found: set[str] = set()
 
@@ -563,7 +685,7 @@ def _extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
             found.add(n)
 
     try:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, _BS4_PARSER)
     except Exception:
         return found
 
@@ -621,7 +743,10 @@ def extract_links(
     Master link-extraction dispatcher.  Returns a set of absolute URLs found
     in *content*, parsed according to *content_type*.
 
-    ASP files are always treated as HTML regardless of the Content-Type header.
+    • ASP files are always treated as HTML regardless of the Content-Type header.
+    • JSON responses are scanned for string values that look like URL paths.
+    • All text responses also run through the JS extractor as a fallback so
+      path literals embedded in any text format are never missed.
     """
     found: set[str] = set()
     ct = content_type.split(";")[0].strip().lower()
@@ -634,22 +759,23 @@ def extract_links(
 
     if ct in ("text/html", "application/xhtml+xml") or is_asp:
         found |= _extract_html_attrs(content, url, base)
-        # Also run JS extractor over the raw text to catch anything BeautifulSoup
-        # might miss (e.g. dynamically constructed strings outside <script> tags)
         found |= _extract_js_paths(content, url, base)
 
-    elif ct in ("application/javascript", "text/javascript", "text/plain"):
+    elif ct in ("application/javascript", "text/javascript"):
         found |= _extract_js_paths(content, url, base)
 
-    elif ct == "text/css":
+    elif ct in ("text/css",):
         found |= _extract_css_urls(content, url, base)
+
+    elif ct in ("application/json", "text/json"):
+        found |= _extract_json_paths(content, url, base)
+        found |= _extract_js_paths(content, url, base)
+
+    elif ct in ("text/plain", "text/xml", "application/xml"):
+        found |= _extract_js_paths(content, url, base)
 
     return found
 
-
-# ---------------------------------------------------------------------------
-# File saver
-# ---------------------------------------------------------------------------
 
 def save_file(local_path: Path, content: bytes) -> None:
     """Write *content* to *local_path*, creating all parent directories."""
@@ -658,120 +784,89 @@ def save_file(local_path: Path, content: bytes) -> None:
     log.debug("Saved → %s (%d bytes)", local_path, len(content))
 
 
-# ---------------------------------------------------------------------------
-# Seed paths – all known HG8145V5 admin page paths
-# ---------------------------------------------------------------------------
-# These are used to prime the BFS queue before the automatic crawler starts.
-# The crawler will discover additional URLs on its own; these seeds ensure that
-# pages which are not linked from other pages are still reached.
-SEED_PATHS: list[str] = [
-    # Entry points (NOT "/" – the root always returns the login form HTML,
-    # even when authenticated; start from the authenticated admin pages instead)
-    "/index.asp",
-    "/login.asp",
-    "/main.asp",
-    "/main.html",
-    "/frame.asp",
+def content_hash(data: bytes) -> str:
+    """Return a short SHA-256 hex digest for deduplication."""
+    return hashlib.sha256(data).hexdigest()[:16]
 
-    # ASP helper endpoints (token/challenge APIs – discovered from index.asp & util.js)
-    "/asp/GetRandCount.asp",
-    "/asp/GetRandInfo.asp",          # PBKDF2 challenge endpoint (DVODACOM2WIFI)
-    "/asp/GetRandInfo.asp?&1=1",     # variant used by loginWithSha256
 
-    # Pre-login token endpoints
-    "/asp/CheckPwdNotLogin.asp",
-    "/html/ssmp/common/getRandString.asp",
+def smart_local_path(
+    url: str,
+    output_dir: Path,
+    content_type: str,
+    content_disposition: str = "",
+) -> Path:
+    """
+    Determine the local save path for a response.
 
-    # Post-login token / heartbeat endpoints (discovered from util.js)
-    "/html/ssmp/common/GetRandToken.asp",
-    "/html/ssmp/common/StartFileLoad.asp",
+    Priority:
+      1. filename= from Content-Disposition header
+      2. filename from URL path
+      3. If URL path has no extension but Content-Type suggests one, append it
+      4. Extensionless URLs become <name>.html when CT is text/html
+    """
+    # Content-Disposition: attachment; filename="foo.bin"
+    if content_disposition:
+        m = re.search(r'filename\s*=\s*["\']?([^\s"\']+)', content_disposition, re.I)
+        if m:
+            fname = m.group(1).strip()
+            parsed = urllib.parse.urlparse(url)
+            dir_part = Path(parsed.path.lstrip("/")).parent
+            return output_dir / dir_part / fname
 
-    # Top-level status / info pages (common on HG8145 series)
-    "/html/ssmp/home.asp",
-    "/html/ssmp/status.asp",
-    "/html/ssmp/internet.asp",
-    "/html/ssmp/wan_info.asp",
-    "/html/ssmp/wlan.asp",
-    "/html/ssmp/wlan_basic.asp",
-    "/html/ssmp/wlan_security.asp",
-    "/html/ssmp/wlan_advanced.asp",
-    "/html/ssmp/wlan_wds.asp",
-    "/html/ssmp/wlan_wps.asp",
-    "/html/ssmp/wlan_station.asp",
-    "/html/ssmp/lan.asp",
-    "/html/ssmp/lan_dhcp.asp",
-    "/html/ssmp/lan_static.asp",
-    "/html/ssmp/dhcp.asp",
-    "/html/ssmp/security.asp",
-    "/html/ssmp/firewall.asp",
-    "/html/ssmp/nat.asp",
-    "/html/ssmp/port_forward.asp",
-    "/html/ssmp/port_trigger.asp",
-    "/html/ssmp/alg.asp",
-    "/html/ssmp/dmz.asp",
-    "/html/ssmp/qos.asp",
-    "/html/ssmp/route.asp",
-    "/html/ssmp/dns.asp",
-    "/html/ssmp/ddns.asp",
-    "/html/ssmp/upnp.asp",
-    "/html/ssmp/vpn.asp",
-    "/html/ssmp/tr069.asp",
-    "/html/ssmp/system.asp",
-    "/html/ssmp/ntp.asp",
-    "/html/ssmp/log.asp",
-    "/html/ssmp/upgrade.asp",
-    "/html/ssmp/backup.asp",
-    "/html/ssmp/reboot.asp",
-    "/html/ssmp/user_info.asp",
-    "/html/ssmp/diagnosis.asp",
-    "/html/ssmp/voice.asp",
-    "/html/ssmp/pon.asp",
-    "/html/ssmp/ipv6.asp",
-    "/html/ssmp/multicast.asp",
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.lstrip("/")
 
-    # Frame / navigation shell pages
-    "/html/top.asp",
-    "/html/left.asp",
-    "/html/right.asp",
-    "/html/bottom.asp",
-    "/html/index.asp",
-    "/html/menu.asp",
-    "/html/frame.asp",
-    "/html/logout.html",
+    if not path:
+        path = "index.html"
+    elif path.endswith("/"):
+        path += "index.html"
+    else:
+        # If no extension, try to derive one from Content-Type
+        stem = Path(path)
+        if not stem.suffix:
+            ct = content_type.split(";")[0].strip().lower()
+            ext_map = {
+                "text/html":             ".html",
+                "application/xhtml+xml": ".html",
+                "text/css":              ".css",
+                "application/javascript":".js",
+                "text/javascript":       ".js",
+                "application/json":      ".json",
+                "text/xml":              ".xml",
+                "application/xml":       ".xml",
+                "image/png":             ".png",
+                "image/jpeg":            ".jpg",
+                "image/gif":             ".gif",
+                "image/svg+xml":         ".svg",
+                "image/x-icon":          ".ico",
+                "image/vnd.microsoft.icon": ".ico",
+            }
+            if ct in ext_map:
+                path += ext_map[ct]
 
-    # Core JavaScript libraries (parsing these reveals more paths)
-    "/resource/common/md5.js",
-    "/resource/common/util.js",
-    "/resource/common/RndSecurityFormat.js",
-    "/resource/common/safelogin.js",
-    "/resource/common/jquery.min.js",
-    "/resource/common/crypto-js.js",
-
-    # Localisation / string resources
-    "/frameaspdes/english/ssmpdes.js",
-
-    # CSS
-    "/Cuscss/login.css",
-    "/Cuscss/english/frame.css",
-
-    # Images / icons
-    "/images/hwlogo.ico",
-    "/images/hwlogo.png",
-    "/images/hwlogo_cyta.jpg",
-]
+    return output_dir / Path(path)
 
 
 # ---------------------------------------------------------------------------
-# Core downloader
+# Core BFS crawler
 # ---------------------------------------------------------------------------
 
 class Crawler:
     """
-    BFS crawler that:
-      • maintains an authenticated session with automatic re-login
-      • de-duplicates URLs by path (ignoring cache-buster query strings)
-      • extracts links exhaustively from HTML/ASP/JS/CSS responses
-      • saves every response to the local output directory tree
+    Fully dynamic BFS crawler that discovers all router pages automatically.
+
+    Key design decisions:
+      • No hardcoded URL list – seeds only from the login page (/index.asp)
+        and the post-login redirect URL.  Every other page is discovered by
+        recursively extracting links from downloaded content.
+      • Authenticated session with automatic re-login on expiry.
+      • X_HW_Token maintained throughout the session; 403 responses are
+        retried once with a fresh token appended as a query parameter.
+      • Content-hash deduplication prevents saving the same bytes twice
+        even if the router serves them under different URLs.
+      • lxml-accelerated HTML parsing when the library is available.
+      • tqdm live progress bar when the library is available.
+      • Colored logging when colorlog is available.
     """
 
     def __init__(
@@ -788,17 +883,16 @@ class Crawler:
         self.password = password
         self.output_dir = output_dir
         self.base = base_url(host)
-        self.force = force  # when True, re-download even if the file exists on disk
+        self.force = force
         self.session = build_session(verify_ssl=verify_ssl)
 
-        # Set of URL keys (path-only) that have already been processed
-        self._visited: set[str] = set()
-        # BFS queue of full absolute URLs (may include query strings)
-        self._queue: deque[str] = deque()
-        # Re-login attempt counter – reset to 0 after each successful response
-        self._relogin_count = 0
-        # Counts successful fetches between heartbeat pings
-        self._fetch_count = 0
+        self._visited:   set[str]   = set()   # URL keys already processed
+        self._queue:     deque[str] = deque() # BFS queue (absolute URLs)
+        self._hashes:    set[str]   = set()   # content hashes seen (dedup)
+        self._relogin_count   = 0
+        self._fetch_count     = 0
+        self._current_token:  str | None = None   # latest X_HW_Token
+        self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0}
 
     # ------------------------------------------------------------------
     # Public API
@@ -813,11 +907,12 @@ class Crawler:
         if not post_login_url:
             sys.exit(1)
 
-        # Set Referer to the post-login page so all subsequent requests
-        # appear to come from within the admin interface.  Many Huawei routers
-        # enforce a Referer check on admin ASP pages and return 403 without it.
+        # Set Referer to the admin home page so all subsequent requests
+        # appear to come from within the admin interface.
         self.session.headers["Referer"] = post_login_url
-        log.debug("Referer set to: %s", post_login_url)
+
+        # Fetch a fresh X_HW_Token right after login.
+        self._refresh_token()
 
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
@@ -826,54 +921,92 @@ class Crawler:
             if n:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
-        # Seed the queue: start with the authenticated home page, then all
-        # known admin page paths.
-        self._enqueue(post_login_url)
-        for path in SEED_PATHS:
-            self._enqueue(self.base + path)
-
-        # Exhaust the queue
-        while self._queue:
-            url = self._queue.popleft()
-            self._fetch_and_process(url)
+        # --- Dynamic seeding: only the login page + post-login URL ---
+        # Everything else is discovered by following links in the content.
+        # The login page (/index.asp) references ALL JS/CSS resources, which
+        # in turn reference every admin page path used by the interface.
+        self._enqueue(self.base + "/index.asp")
+        if post_login_url != self.base + "/index.asp":
+            self._enqueue(post_login_url)
 
         log.info(
-            "Crawl complete. %d unique URLs visited.", len(self._visited)
+            "Seeding from %s + post-login URL. Dynamic discovery begins.",
+            "/index.asp",
+        )
+
+        # Exhaust the queue with optional tqdm progress bar
+        if _TQDM_AVAILABLE:
+            self._run_with_progress()
+        else:
+            while self._queue:
+                url = self._queue.popleft()
+                self._fetch_and_process(url)
+
+        log.info(
+            "Crawl complete. visited=%d  ok=%d  skip=%d  dup=%d  err=%d",
+            len(self._visited),
+            self._stats["ok"],
+            self._stats["skip"],
+            self._stats["dup"],
+            self._stats["err"],
         )
         log.info("Files saved in: %s", self.output_dir.resolve())
+
+    def _run_with_progress(self) -> None:
+        """BFS loop with a tqdm progress bar that tracks discovered vs visited."""
+        bar = _tqdm(
+            desc="Crawling",
+            unit="URL",
+            dynamic_ncols=True,
+            bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}] {postfix}",
+        )
+        total_seen = len(self._queue) + len(self._visited)
+        bar.total = total_seen
+
+        while self._queue:
+            url = self._queue.popleft()
+            prev_q = len(self._queue)
+            self._fetch_and_process(url)
+            new_items = len(self._queue) - prev_q
+            if new_items > 0:
+                bar.total += new_items
+                total_seen += new_items
+            bar.update(1)
+            bar.set_postfix(
+                queued=len(self._queue),
+                ok=self._stats["ok"],
+                err=self._stats["err"],
+            )
+
+        bar.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    # Content-type to use when parsing a file loaded from disk.
-    # Defined once here and shared by _resume_from_disk and _parse_local_file.
     _DISK_CT: dict[str, str] = {
         ".asp":  "text/html",
         ".html": "text/html",
         ".htm":  "text/html",
         ".js":   "application/javascript",
         ".css":  "text/css",
+        ".json": "application/json",
+        ".xml":  "application/xml",
     }
 
     def _parse_local_file(self, local_path: Path, url: str) -> int:
         """
-        Read *local_path* from disk, extract links, and enqueue any that have
-        not been visited yet.  Returns the number of new URLs enqueued.
-        Only files with an extension in *_DISK_CT* are parsed; binary/unknown
-        file types are silently skipped.
+        Read *local_path* from disk, extract links, and enqueue new ones.
+        Returns the number of newly enqueued URLs.
         """
         ct = self._DISK_CT.get(local_path.suffix.lower())
         if ct is None:
             return 0
-
         try:
             content = local_path.read_bytes()
         except OSError as exc:
-            log.debug("Could not read local file %s for link extraction: %s",
-                      local_path, exc)
+            log.debug("Could not read %s for link extraction: %s", local_path, exc)
             return 0
-
         added = 0
         for link in extract_links(content, ct, url, self.base):
             k = url_key(link)
@@ -884,44 +1017,29 @@ class Crawler:
 
     def _resume_from_disk(self) -> int:
         """
-        Scan *output_dir* for previously downloaded files.
-
-        For each file found:
-          - its URL key is added to *_visited* so it won't be re-downloaded.
-          - if it is an HTML/ASP/JS/CSS file, its content is parsed and any
-            newly discovered links are added to the crawl queue.
-
-        Returns the number of local files found.
+        Scan *output_dir* for previously downloaded files, mark them visited,
+        and extract any un-followed links from their content.
         """
         if not self.output_dir.exists():
             return 0
-
         count = 0
         for local_path in sorted(self.output_dir.rglob("*")):
             if not local_path.is_file():
                 continue
-
-            # Reconstruct the server URL from the relative path on disk
             rel = local_path.relative_to(self.output_dir)
             path_str = "/" + str(rel).replace("\\", "/")
-
-            # Reverse the "directory → index.html" mapping applied when saving
             if path_str == "/index.html":
                 path_str = "/"
             elif path_str.endswith("/index.html"):
-                path_str = path_str[: -len("index.html")]
-
+                path_str = path_str[:-len("index.html")]
             url = self.base + path_str
             key = url_key(url)
-
             if key in self._visited:
                 continue
             self._visited.add(key)
             count += 1
-            log.debug("Resume: existing file %s → %s", local_path.name, url)
-
+            log.debug("Resume: %s → %s", local_path.name, url)
             self._parse_local_file(local_path, url)
-
         return count
 
     def _enqueue(self, url: str) -> None:
@@ -932,19 +1050,51 @@ class Crawler:
 
     def _heartbeat(self) -> None:
         """
-        POST to /html/ssmp/common/GetRandToken.asp to keep the authenticated
-        session alive.  This mimics the browser's periodic token-refresh calls
-        that prevent the router from timing out the session.
-
-        The response (a raw token string) is silently discarded – we only care
-        about the side-effect of resetting the server-side idle timer.
+        POST to GetRandToken.asp to refresh both the session idle timer and
+        our cached X_HW_Token.
         """
-        hb_url = self.base + "/html/ssmp/common/GetRandToken.asp"
+        self._refresh_token()
+
+    def _refresh_token(self) -> None:
+        """
+        POST to /html/ssmp/common/GetRandToken.asp to get a fresh X_HW_Token.
+        The token is stored in _current_token for use in 403 retries.
+        Falls back silently if the endpoint is unavailable (e.g. not yet logged in).
+        """
         try:
-            self.session.post(hb_url, timeout=REQUEST_TIMEOUT)
-            log.debug("Session heartbeat sent to %s", hb_url)
+            resp = self.session.post(
+                self.base + TOKEN_URL,
+                timeout=REQUEST_TIMEOUT,
+            )
+            token = resp.text.strip()
+            if token and len(token) >= 8:
+                self._current_token = token
+                log.debug("X_HW_Token refreshed: %s…", token[:12])
         except requests.RequestException as exc:
-            log.debug("Heartbeat failed (non-fatal): %s", exc)
+            log.debug("Token refresh failed (non-fatal): %s", exc)
+
+    def _retry_with_token(self, url: str) -> requests.Response | None:
+        """
+        Retry a 403 request by appending a fresh X_HW_Token as a query
+        parameter.  Returns the new response, or None if no token available.
+
+        Some Huawei admin pages check for a valid X_HW_Token even in GET
+        requests when accessed directly rather than through the frameset.
+        """
+        self._refresh_token()
+        if not self._current_token:
+            return None
+        sep = "&" if "?" in url else "?"
+        token_url = f"{url}{sep}x.X_HW_Token={self._current_token}"
+        try:
+            log.debug("403 retry with token: %s", token_url)
+            return self.session.get(
+                token_url,
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            return None
 
     def _fetch_and_process(self, url: str) -> None:
         key = url_key(url)
@@ -952,21 +1102,17 @@ class Crawler:
             return
         self._visited.add(key)
 
-        # Never crawl write-action endpoints (logout terminates the session;
-        # reboot/reset/factory would change the router's state).
+        # Never crawl write-action endpoints
         if _BLOCKED_PATH_RE.search(urllib.parse.urlparse(url).path):
             log.debug("Blocked write-action URL, skipping: %s", url)
             return
 
-        local = url_to_local_path(url, self.output_dir)
+        local = smart_local_path(url, self.output_dir, "")
 
-        # ----------------------------------------------------------------
-        # Skip re-downloading files that already exist on disk.
-        # Still parse the cached copy so we can discover more links.
-        # Use --force to override and re-download everything.
-        # ----------------------------------------------------------------
-        if not self.force and local.exists():
+        # Skip already-downloaded files; parse them for new links
+        if not self.force and local.exists() and local.stat().st_size > 0:
             log.info("[SKIP] Already on disk: %s", url)
+            self._stats["skip"] += 1
             added = self._parse_local_file(local, url)
             if added:
                 log.debug("  +%d new URLs from cached %s", added, local.name)
@@ -980,6 +1126,7 @@ class Crawler:
             )
         except requests.RequestException as exc:
             log.warning("Request failed for %s – %s", url, exc)
+            self._stats["err"] += 1
             return
 
         # --- Session expiry detection & recovery ---
@@ -987,51 +1134,68 @@ class Crawler:
             log.warning("Session expired at %s – attempting re-login", url)
             if self._relogin_count < MAX_RELOGIN_ATTEMPTS:
                 self._relogin_count += 1
-                # Clear old auth cookies before re-logging in
                 self.session.cookies.clear()
                 new_login_url = login(
                     self.session, self.host, self.username, self.password
                 )
                 if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)
-                    # Update Referer to the new post-login page
                     self.session.headers["Referer"] = new_login_url
-                    # Remove from visited so we retry this URL
+                    self._refresh_token()
                     self._visited.discard(key)
                     self._queue.appendleft(url)
                     return
             log.error("Could not recover session after %d attempts", self._relogin_count)
+            self._stats["err"] += 1
             return
+
+        # --- 403 smart retry with X_HW_Token ---
+        if resp.status_code == 403:
+            log.debug("HTTP 403 for %s – retrying with token", url)
+            retry = self._retry_with_token(url)
+            if retry is not None and retry.ok:
+                log.info("Token retry succeeded for %s", url)
+                resp = retry
+            else:
+                log.warning("HTTP 403 for %s – skipping", url)
+                self._stats["err"] += 1
+                return
 
         if not resp.ok:
             log.warning("HTTP %s for %s – skipping", resp.status_code, url)
+            self._stats["err"] += 1
             return
 
-        # Successful response – reset the re-login counter so each new
-        # session expiry gets MAX_RELOGIN_ATTEMPTS fresh attempts.
+        # Successful response – reset the re-login counter
         self._relogin_count = 0
         self._fetch_count += 1
         if self._fetch_count % SESSION_HEARTBEAT_EVERY == 0:
             self._heartbeat()
 
         content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        content_disp  = resp.headers.get("Content-Disposition", "")
         content = resp.content
 
         log.debug(
-            "  ← HTTP %s  Content-Type: %s  %d bytes",
-            resp.status_code,
-            content_type,
-            len(content),
+            "  ← HTTP %s  CT: %s  %d bytes",
+            resp.status_code, content_type, len(content),
         )
-        log.debug("  Active cookies: %s", list(self.session.cookies.keys()))
 
-        # Save to disk
-        save_file(local, content)
+        # Content-hash deduplication: skip saving if we already have this
+        # exact content (e.g. the same image served under two URLs).
+        ch = content_hash(content)
+        if ch in self._hashes:
+            log.debug("  Duplicate content for %s – not saving again", url)
+            self._stats["dup"] += 1
+        else:
+            self._hashes.add(ch)
+            local = smart_local_path(url, self.output_dir, content_type, content_disp)
+            save_file(local, content)
+            self._stats["ok"] += 1
 
-        # Parse for further links
+        # Extract links for further crawling
         ct = content_type.split(";")[0].strip().lower()
         is_asp = urllib.parse.urlparse(url).path.lower().endswith(".asp")
-
         if ct in CRAWLABLE_TYPES or is_asp:
             new_links = extract_links(content, content_type, url, self.base)
             added = 0
@@ -1096,8 +1260,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    _setup_logging(debug=args.debug)
+
     if args.debug:
-        log.setLevel(logging.DEBUG)
         logging.getLogger("urllib3").setLevel(logging.DEBUG)
 
     if not args.verify_ssl:
@@ -1107,6 +1272,11 @@ def main() -> None:
         except Exception:
             pass
         log.warning("TLS certificate verification is DISABLED (--no-verify-ssl)")
+
+    if not _TQDM_AVAILABLE:
+        log.info("Tip: install tqdm for a live progress bar  (pip install tqdm)")
+    if not _COLORLOG_AVAILABLE:
+        log.info("Tip: install colorlog for colored output   (pip install colorlog)")
 
     if not args.password:
         import getpass
