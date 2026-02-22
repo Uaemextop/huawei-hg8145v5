@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from pathlib import Path
 from queue import Queue
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 try:
     import requests
@@ -67,7 +67,7 @@ DEFAULT_OUTPUT = "router_site"
 DEFAULT_TIMEOUT = 15
 DEFAULT_DELAY = 0.3
 
-# File extensions treated as static assets (always saved, never crawled for links)
+# File extensions treated as static assets (saved; also scanned for embedded URLs)
 STATIC_EXTENSIONS = {
     ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg",
     ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp3", ".mp4",
@@ -78,6 +78,51 @@ STATIC_EXTENSIONS = {
 CRAWLABLE_EXTENSIONS = {
     "", ".asp", ".html", ".htm", ".cgi", ".php", ".aspx",
 }
+
+# Extensions whose content should be scanned for embedded URL paths
+_SCANNABLE_EXTENSIONS = {
+    ".asp", ".html", ".htm", ".js", ".css", ".cgi", ".aspx", ".php", "",
+}
+
+# Compiled regex for numeric-only (cache-busting) query strings
+_NUMERIC_QUERY_RE = re.compile(r"^\d+$")
+
+# ---------------------------------------------------------------------------
+# Compiled regexes for deep path extraction
+# ---------------------------------------------------------------------------
+
+# url() references in CSS
+_CSS_URL_RE = re.compile(r"""url\s*\(\s*['"]?([^'"\)\s]+)['"]?\s*\)""", re.IGNORECASE)
+# @import in CSS
+_CSS_IMPORT_RE = re.compile(
+    r"""@import\s+(?:url\s*\(\s*['"]?|['"])([^'"\)\s]+)""", re.IGNORECASE
+)
+# window.location = '...', location.href = '...'
+_LOCATION_RE = re.compile(
+    r"""(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"#\s]+)['"]"""
+)
+# url: '...' or url : '...' in JS objects / $.ajax
+_URL_KEY_RE = re.compile(r"""[Uu]rl\s*:\s*['"]([^'"]+)['"]""")
+# Form.setAction('...'), setAction("...")
+_SET_ACTION_RE = re.compile(r"""[Ss]et[Aa]ction\s*\(\s*['"]([^'"]+)['"]""")
+# src = '...', href = '...' in JS assignments (not preceded by a dot or word char)
+_JS_ASSIGN_RE = re.compile(
+    r"""(?:^|[^.\w])(?:src|href|action)\s*=\s*['"]([^'"#\s]+)['"]""", re.MULTILINE
+)
+# Generic: any quoted absolute path ending in a known extension.
+# Pattern avoids catastrophic backtracking by using a flat structure.
+_QUOTED_ABS_PATH_RE = re.compile(
+    r"""['"](/[A-Za-z0-9_.\-/]+\.(?:asp|aspx|html?|cgi|js|css|png|jpg|jpeg|gif|ico|svg|json|xml|woff2?|ttf|eot|pdf|txt)(?:[?#][^'"<>\s]*)?)['"]"""
+)
+
+# Explicit set of content-types whose content should be scanned for links
+_SCANNABLE_CONTENT_TYPES = frozenset({
+    "text/html", "application/xhtml+xml",
+    "application/javascript", "text/javascript",
+    "text/css",
+    "text/xml", "application/xml",
+    "text/plain",
+})
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,25 +205,68 @@ def guess_extension(content_type: str, url: str) -> str:
     return mapping.get(ct, ".bin")
 
 
+def _extract_paths_from_text(text: str, page_url: str, base_url: str) -> Set[str]:
+    """
+    Deeply scan any text (JS, ASP, CSS, HTML) for embedded URL path strings.
+
+    Uses multiple regex patterns to cover:
+    - CSS ``url()`` and ``@import``
+    - JS ``window.location``, ``location.href`` assignments
+    - JS AJAX ``url:`` properties
+    - ``Form.setAction(...)`` calls
+    - JS src/href/action assignments
+    - Any quoted string with an absolute path ending in a known extension
+    """
+    links: Set[str] = set()
+    parsed_base = urllib.parse.urlparse(base_url)
+
+    def _add(href: Optional[str]) -> None:
+        if not href:
+            return
+        href = href.strip()
+        if href.startswith(("data:", "javascript:", "mailto:", "#")):
+            return
+        absolute = urllib.parse.urljoin(page_url, href)
+        p = urllib.parse.urlparse(absolute)
+        if p.netloc == parsed_base.netloc:
+            clean = urllib.parse.urlunparse(p._replace(fragment=""))
+            links.add(clean)
+
+    for pattern in (
+        _CSS_URL_RE,
+        _CSS_IMPORT_RE,
+        _LOCATION_RE,
+        _URL_KEY_RE,
+        _SET_ACTION_RE,
+        _JS_ASSIGN_RE,
+        _QUOTED_ABS_PATH_RE,
+    ):
+        for m in pattern.finditer(text):
+            _add(m.group(1))
+
+    return links
+
+
 def extract_links(html: str, page_url: str, base_url: str) -> Set[str]:
     """
     Parse *html* and return all absolute URLs that belong to *base_url*.
+
+    Combines:
+    - BeautifulSoup tag-based extraction (href, src, action, …)
+    - Deep text scan for paths embedded in JS, CSS, and ASP source
     """
     soup = BeautifulSoup(html, "html.parser")
     links: Set[str] = set()
+    parsed_base = urllib.parse.urlparse(base_url)
 
     def add(href: Optional[str]) -> None:
         if not href:
             return
-        # Skip data URIs, javascript: and mailto:
         if href.startswith(("data:", "javascript:", "mailto:", "#")):
             return
         absolute = urllib.parse.urljoin(page_url, href)
-        # Only keep URLs on the same host
         parsed_abs = urllib.parse.urlparse(absolute)
-        parsed_base = urllib.parse.urlparse(base_url)
         if parsed_abs.netloc == parsed_base.netloc:
-            # Strip fragment
             clean = urllib.parse.urlunparse(parsed_abs._replace(fragment=""))
             links.add(clean)
 
@@ -206,9 +294,8 @@ def extract_links(html: str, page_url: str, base_url: str) -> Set[str]:
     for tag in soup.find_all(["frame", "iframe"], src=True):
         add(tag["src"])
 
-    # Inline JS: look for quoted paths starting with /
-    for match in re.finditer(r"""['"](\/?[A-Za-z0-9_.~\-/%]+\.(?:asp|html?|cgi|js|css|png|jpg|gif|ico|svg)[^'"?]*(?:\?[^'"]*)?)['"]""", html):
-        add(match.group(1))
+    # Deep scan of the raw text (covers inline JS, CSS, ASP)
+    links |= _extract_paths_from_text(html, page_url, base_url)
 
     return links
 
@@ -240,6 +327,7 @@ class RouterCrawler:
                           "Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         })
+        # visited stores *canonical* URLs (cache-busters stripped) for dedup
         self.visited: Set[str] = set()
         self.queue: Queue = Queue()
 
@@ -251,8 +339,9 @@ class RouterCrawler:
         """
         Retrieve the anti-CSRF token from /asp/GetRandCount.asp.
 
-        The router returns a plain-text integer that must be submitted
-        as the ``x.X_HW_Token`` field.
+        The router's login JS performs a POST to this endpoint, so we
+        mirror that behaviour.  The response is a plain-text integer that
+        must be submitted as the ``x.X_HW_Token`` field.
         """
         url = f"{self.base_url}/asp/GetRandCount.asp"
         try:
@@ -346,10 +435,12 @@ class RouterCrawler:
                 # Add extension based on content-type
                 rel_path += guess_extension(content_type, url)
 
-        # Append query string as part of filename when present
-        if parsed.query:
+        # Append query string as part of filename – but skip pure-numeric
+        # cache-busting timestamps (e.g. ?202406291158020553184798)
+        query = parsed.query
+        if query and not _NUMERIC_QUERY_RE.match(query):
             base, ext = os.path.splitext(rel_path)
-            safe_q = re.sub(r'[\\/:*?"<>|]', "_", parsed.query)
+            safe_q = re.sub(r'[\\/:*?"<>|]', "_", query)
             rel_path = base + "__" + safe_q + ext
 
         # Windows-safe path
@@ -361,8 +452,29 @@ class RouterCrawler:
         log.debug("Saved %s  →  %s", url, local)
         return local
 
+    def _canon_url(self, url: str) -> str:
+        """
+        Return a canonical URL used for deduplication in the visited set.
+
+        Strips pure-numeric cache-busting query strings (e.g. ?202406291158...).
+        """
+        parsed = urllib.parse.urlparse(url)
+        query = parsed.query
+        if _NUMERIC_QUERY_RE.match(query):
+            query = ""
+        return urllib.parse.urlunparse(parsed._replace(query=query, fragment=""))
+
+    def _is_login_response(self, resp: requests.Response) -> bool:
+        """Return True if *resp* is the login page (session may have expired)."""
+        final_path = urllib.parse.urlparse(resp.url).path.lower()
+        return final_path in ("/index.asp", "/login.asp", "/")
+
     def _fetch(self, url: str) -> Optional[requests.Response]:
-        """Fetch *url* with the authenticated session."""
+        """Fetch *url* with the authenticated session.
+
+        If the router redirects to the login page (session expired), re-login
+        once and retry the request.
+        """
         try:
             resp = self.session.get(
                 url,
@@ -370,6 +482,20 @@ class RouterCrawler:
                 allow_redirects=True,
                 stream=False,
             )
+            # Detect session expiry (redirect back to login page for a non-login URL)
+            if self._is_login_response(resp) and self._canon_url(url) not in (
+                self._canon_url(f"{self.base_url}/index.asp"),
+                self._canon_url(f"{self.base_url}/login.asp"),
+                self._canon_url(f"{self.base_url}/"),
+            ):
+                log.info("Session expired while fetching %s – re-authenticating…", url)
+                if self.login():
+                    resp = self.session.get(
+                        url,
+                        timeout=self.timeout,
+                        allow_redirects=True,
+                        stream=False,
+                    )
             return resp
         except requests.RequestException as exc:
             log.warning("Failed to fetch %s: %s", url, exc)
@@ -378,34 +504,71 @@ class RouterCrawler:
     def _should_crawl_links(self, url: str, content_type: str) -> bool:
         """Return True if this response may contain links worth following."""
         ct = content_type.split(";")[0].strip().lower()
-        if "html" in ct or "javascript" in ct or "xml" in ct:
+        if ct in _SCANNABLE_CONTENT_TYPES:
             return True
         _, ext = os.path.splitext(urllib.parse.urlparse(url).path)
-        return ext.lower() in CRAWLABLE_EXTENSIONS
+        return ext.lower() in _SCANNABLE_EXTENSIONS
 
     def crawl(self) -> None:
         """
         BFS crawl starting from the router's root page.
 
         Saves every reachable resource that belongs to the router host.
+        Continues recursively until no more new URLs are discovered.
         """
-        start_urls = [
-            f"{self.base_url}/",
-            f"{self.base_url}/index.asp",
+        # Seed with the root plus known Huawei admin paths so we reach every
+        # section even if the main page doesn't link to it directly.
+        seed_paths: List[str] = [
+            "/",
+            "/index.asp",
+            "/login.asp",
+            # ASP helpers
+            "/asp/GetRandCount.asp",
+            "/asp/GetRandInfo.asp",
+            # Common admin page locations
+            "/html/status.html",
+            "/html/internet.html",
+            "/html/lan.html",
+            "/html/wlan.html",
+            "/html/wlan5g.html",
+            "/html/security.html",
+            "/html/advanced.html",
+            "/html/maintenance.html",
+            "/html/voice.html",
+            "/html/diagnosis.html",
+            "/html/systemtools.html",
+            "/html/firewall.html",
+            "/html/nat.html",
+            "/html/route.html",
+            "/html/ddns.html",
+            "/html/upnp.html",
+            "/html/acl.html",
+            "/html/qos.html",
+            "/html/pon.html",
+            "/html/deviceinfo.html",
+            # Common resource roots
+            "/resource/common/util.js",
+            "/resource/common/md5.js",
+            "/resource/common/jquery.min.js",
+            "/resource/common/RndSecurityFormat.js",
+            "/resource/common/safelogin.js",
+            "/resource/common/crypto-js.js",
+            "/frameaspdes/english/ssmpdes.js",
+            "/Cuscss/login.css",
+            "/Cuscss/english/frame.css",
         ]
-        for u in start_urls:
-            self.queue.put(u)
+        for path in seed_paths:
+            self.queue.put(f"{self.base_url}{path}")
 
         while not self.queue.empty():
             url = self.queue.get()
 
-            # Normalise URL (strip fragments)
-            parsed = urllib.parse.urlparse(url)
-            url = urllib.parse.urlunparse(parsed._replace(fragment=""))
+            # Use canonical URL for deduplication
+            canon = self._canon_url(url)
 
-            if url in self.visited:
+            if canon in self.visited:
                 continue
-            self.visited.add(url)
+            self.visited.add(canon)
 
             log.info("Fetching: %s", url)
             resp = self._fetch(url)
@@ -430,16 +593,20 @@ class RouterCrawler:
             except OSError as exc:
                 log.warning("Could not save %s: %s", url, exc)
 
-            # Extract and enqueue links if this is a crawlable document
+            # Extract and enqueue links from any scannable document
             if self._should_crawl_links(url, content_type):
                 try:
                     text = content.decode("utf-8", errors="replace")
                 except Exception:
                     text = ""
                 new_links = extract_links(text, url, self.base_url)
+                added = 0
                 for link in new_links:
-                    if link not in self.visited:
+                    if self._canon_url(link) not in self.visited:
                         self.queue.put(link)
+                        added += 1
+                if added:
+                    log.debug("  → queued %d new URL(s) from %s", added, url)
 
             time.sleep(self.delay)
 
