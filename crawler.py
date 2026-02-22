@@ -375,15 +375,44 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
         return None
 
-    post_login_url = resp.url
+    # The router's login.cgi always returns HTTP 200 with a *JavaScript*
+    # redirect (e.g. "var pageName = '/'; top.location.replace(pageName);").
+    # requests does NOT execute JavaScript, so resp.url stays at login.cgi
+    # and we would wrongly set Referer = login.cgi for all admin pages
+    # (causing 403 on every admin ASP page).
+    # We must manually follow the JS redirect to get the real admin home URL.
+    redirect_path = "/"
+    m_js = re.search(
+        r"""var\s+pageName\s*=\s*['"]([^'"]+)['"]|top\.location(?:\.replace)?\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+        resp.text,
+        re.I,
+    )
+    if m_js:
+        redirect_path = next(
+            (g for g in (m_js.group(1), m_js.group(2)) if g is not None and g),
+            "/",
+        )
+
+    redirect_url = urllib.parse.urljoin(base_url(host), redirect_path)
+    try:
+        follow_resp = session.get(
+            redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
+        )
+        post_login_url = follow_resp.url
+        log.debug("Followed JS redirect → %s", post_login_url)
+    except requests.RequestException as exc:
+        log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)
+        post_login_url = redirect_url
+
     log.info(
-        "Login successful (HTTP %s, method=%s). Post-login URL: %s. "
+        "Login successful (HTTP %s, method=%s). Admin home: %s. "
         "Active cookies: %s",
         resp.status_code,
         "PBKDF2" if use_sha256 else "base64",
         post_login_url,
         list(session.cookies.keys()),
     )
+    log.debug("Cookie values after login: %s", dict(session.cookies))
     return post_login_url
 
 
@@ -907,11 +936,14 @@ class Crawler:
         if not post_login_url:
             sys.exit(1)
 
-        # Set Referer to the admin home page so all subsequent requests
-        # appear to come from within the admin interface.
-        self.session.headers["Referer"] = post_login_url
+        # Set Referer to the router root ("/") for ALL subsequent requests.
+        # Admin ASP pages are loaded inside the frameset at "/", so the router
+        # expects Referer: http://192.168.100.1/ — not login.cgi.
+        # Using login.cgi as Referer caused HTTP 403 on every admin page.
+        self.session.headers["Referer"] = self.base + "/"
 
         # Fetch a fresh X_HW_Token right after login.
+        # GetRandToken.asp also needs the correct Referer, which is now set.
         self._refresh_token()
 
         # Resume: scan previously downloaded files so we don't re-fetch them
@@ -921,17 +953,19 @@ class Crawler:
             if n:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
-        # --- Dynamic seeding: only the login page + post-login URL ---
-        # Everything else is discovered by following links in the content.
-        # The login page (/index.asp) references ALL JS/CSS resources, which
-        # in turn reference every admin page path used by the interface.
+        # --- Dynamic seeding ---
+        # Seed from:
+        #   1. "/" (admin frameset – contains <frame> refs to all admin pages)
+        #   2. "/index.asp" (login page – contains ALL JS/CSS resource refs)
+        #   3. post_login_url (wherever the router actually redirected after login)
+        # Everything else is discovered by recursively following links.
+        self._enqueue(self.base + "/")
         self._enqueue(self.base + "/index.asp")
-        if post_login_url != self.base + "/index.asp":
+        if post_login_url not in (self.base + "/", self.base + "/index.asp"):
             self._enqueue(post_login_url)
 
         log.info(
-            "Seeding from %s + post-login URL. Dynamic discovery begins.",
-            "/index.asp",
+            "Seeding from / + /index.asp + post-login URL. Dynamic discovery begins.",
         )
 
         # Exhaust the queue with optional tqdm progress bar
