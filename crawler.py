@@ -340,10 +340,11 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
         # not part of the value.  We specify it via the path= kwarg here so
         # the router receives the correct value: 'body:Language:english:id=-1'.
+        # NOTE: We do NOT set domain= to allow the router's Set-Cookie response
+        # to properly update this cookie value after successful authentication.
         session.cookies.set(
             "Cookie",
             "body:Language:english:id=-1",
-            domain=host,
             path="/",
         )
         try:
@@ -371,6 +372,12 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     except requests.RequestException as exc:
         log.error("Login POST failed: %s", exc)
         return None
+
+    # Debug: Log response headers and cookies from login.cgi
+    log.debug("login.cgi response status: %s", resp.status_code)
+    log.debug("login.cgi Set-Cookie headers: %s", resp.headers.get('Set-Cookie'))
+    log.debug("login.cgi response cookies: %s", dict(resp.cookies))
+    log.debug("Session cookies after login.cgi POST: %s", dict(session.cookies))
 
     # A successful login redirects away from the login form.
     # If the response still contains the login form, credentials were wrong.
