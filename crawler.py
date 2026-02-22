@@ -10,8 +10,15 @@ remain.
 Features
 --------
 * Two-step login (anti-CSRF token + Base64-encoded password via /login.cgi)
-* Dynamic cookie management – session cookies are automatically maintained
-  and a fresh re-login is attempted whenever the router signals session expiry
+* Session keep-alive – explicit Connection: keep-alive header so the router
+  reuses the same TCP connection and does not expire auth prematurely
+* Auto re-login – when a session expiry is detected (HTTP 401 or login-form
+  response), cookies are cleared and login is retried; the counter resets to
+  zero after every successful response so each expiry gets fresh attempts
+* Resume / skip already-downloaded files – at startup the output directory is
+  scanned; existing files are marked as visited and their content is parsed
+  for undiscovered links so the crawl can continue from where it left off
+  without re-fetching anything already on disk (override with --force)
 * Deep link extraction from HTML/ASP/JS/CSS:
     - All standard HTML tag attributes (href, src, action, data-src, …)
     - CSS url() and @import
@@ -33,6 +40,9 @@ Usage (Windows / Linux / macOS)
     # Explicit credentials
     python crawler.py --host 192.168.100.1 --user Mega_gpon \\
         --password YOUR_PASSWORD --output downloaded_site
+
+    # Force re-download even if files already exist
+    python crawler.py --force
 
     # Password from environment variable (recommended)
     set ROUTER_PASSWORD=YOUR_PASSWORD   # Windows
@@ -110,7 +120,7 @@ _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 # ---------------------------------------------------------------------------
 
 def build_session(verify_ssl: bool = True) -> requests.Session:
-    """Return a requests.Session with retry logic pre-configured."""
+    """Return a requests.Session with retry logic and keep-alive pre-configured."""
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -121,6 +131,12 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
+    # Explicit keep-alive: reuse the TCP connection across requests so the
+    # router does not see each request as a new visitor and expire auth sooner.
+    session.headers.update({
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=60, max=1000",
+    })
     return session
 
 
@@ -629,19 +645,21 @@ class Crawler:
         password: str,
         output_dir: Path,
         verify_ssl: bool = True,
+        force: bool = False,
     ) -> None:
         self.host = host
         self.username = username
         self.password = password
         self.output_dir = output_dir
         self.base = base_url(host)
+        self.force = force  # when True, re-download even if the file exists on disk
         self.session = build_session(verify_ssl=verify_ssl)
 
         # Set of URL keys (path-only) that have already been processed
         self._visited: set[str] = set()
         # BFS queue of full absolute URLs (may include query strings)
         self._queue: deque[str] = deque()
-        # Re-login attempt counter
+        # Re-login attempt counter – reset to 0 after each successful response
         self._relogin_count = 0
 
     # ------------------------------------------------------------------
@@ -655,6 +673,13 @@ class Crawler:
 
         if not login(self.session, self.host, self.username, self.password):
             sys.exit(1)
+
+        # Resume: scan previously downloaded files so we don't re-fetch them
+        # and so we can discover links that were not followed before.
+        if not self.force:
+            n = self._resume_from_disk()
+            if n:
+                log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # Seed the queue with all known admin paths
         for path in SEED_PATHS:
@@ -674,6 +699,84 @@ class Crawler:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # Content-type to use when parsing a file loaded from disk.
+    # Defined once here and shared by _resume_from_disk and _parse_local_file.
+    _DISK_CT: dict[str, str] = {
+        ".asp":  "text/html",
+        ".html": "text/html",
+        ".htm":  "text/html",
+        ".js":   "application/javascript",
+        ".css":  "text/css",
+    }
+
+    def _parse_local_file(self, local_path: Path, url: str) -> int:
+        """
+        Read *local_path* from disk, extract links, and enqueue any that have
+        not been visited yet.  Returns the number of new URLs enqueued.
+        Only files with an extension in *_DISK_CT* are parsed; binary/unknown
+        file types are silently skipped.
+        """
+        ct = self._DISK_CT.get(local_path.suffix.lower())
+        if ct is None:
+            return 0
+
+        try:
+            content = local_path.read_bytes()
+        except OSError as exc:
+            log.debug("Could not read local file %s for link extraction: %s",
+                      local_path, exc)
+            return 0
+
+        added = 0
+        for link in extract_links(content, ct, url, self.base):
+            k = url_key(link)
+            if k not in self._visited:
+                self._queue.append(link)
+                added += 1
+        return added
+
+    def _resume_from_disk(self) -> int:
+        """
+        Scan *output_dir* for previously downloaded files.
+
+        For each file found:
+          - its URL key is added to *_visited* so it won't be re-downloaded.
+          - if it is an HTML/ASP/JS/CSS file, its content is parsed and any
+            newly discovered links are added to the crawl queue.
+
+        Returns the number of local files found.
+        """
+        if not self.output_dir.exists():
+            return 0
+
+        count = 0
+        for local_path in sorted(self.output_dir.rglob("*")):
+            if not local_path.is_file():
+                continue
+
+            # Reconstruct the server URL from the relative path on disk
+            rel = local_path.relative_to(self.output_dir)
+            path_str = "/" + str(rel).replace("\\", "/")
+
+            # Reverse the "directory → index.html" mapping applied when saving
+            if path_str == "/index.html":
+                path_str = "/"
+            elif path_str.endswith("/index.html"):
+                path_str = path_str[: -len("index.html")]
+
+            url = self.base + path_str
+            key = url_key(url)
+
+            if key in self._visited:
+                continue
+            self._visited.add(key)
+            count += 1
+            log.debug("Resume: existing file %s → %s", local_path.name, url)
+
+            self._parse_local_file(local_path, url)
+
+        return count
+
     def _enqueue(self, url: str) -> None:
         """Add *url* to the queue if it has not been visited yet."""
         key = url_key(url)
@@ -685,6 +788,20 @@ class Crawler:
         if key in self._visited:
             return
         self._visited.add(key)
+
+        local = url_to_local_path(url, self.output_dir)
+
+        # ----------------------------------------------------------------
+        # Skip re-downloading files that already exist on disk.
+        # Still parse the cached copy so we can discover more links.
+        # Use --force to override and re-download everything.
+        # ----------------------------------------------------------------
+        if not self.force and local.exists():
+            log.info("[SKIP] Already on disk: %s", url)
+            added = self._parse_local_file(local, url)
+            if added:
+                log.debug("  +%d new URLs from cached %s", added, local.name)
+            return
 
         log.info("[%d queued] GET %s", len(self._queue), url)
 
@@ -716,6 +833,10 @@ class Crawler:
             log.warning("HTTP %s for %s – skipping", resp.status_code, url)
             return
 
+        # Successful response – reset the re-login counter so each new
+        # session expiry gets MAX_RELOGIN_ATTEMPTS fresh attempts.
+        self._relogin_count = 0
+
         content_type = resp.headers.get("Content-Type", "application/octet-stream")
         content = resp.content
 
@@ -728,7 +849,6 @@ class Crawler:
         log.debug("  Active cookies: %s", list(self.session.cookies.keys()))
 
         # Save to disk
-        local = url_to_local_path(url, self.output_dir)
         save_file(local, content)
 
         # Parse for further links
@@ -785,6 +905,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable TLS certificate verification (use for self-signed certs)",
     )
     parser.add_argument(
+        "--force", action="store_true", default=False,
+        help="Re-download files even if they already exist on disk "
+             "(default: skip existing files and parse them for new links)",
+    )
+    parser.add_argument(
         "--debug", action="store_true",
         help="Enable verbose debug logging",
     )
@@ -819,6 +944,7 @@ def main() -> None:
         password=args.password,
         output_dir=output_dir,
         verify_ssl=args.verify_ssl,
+        force=args.force,
     )
     crawler.run()
 
