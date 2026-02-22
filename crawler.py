@@ -167,6 +167,12 @@ _BLOCKED_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Login-interface pages that ALWAYS return the login form after authentication.
+# Crawling them via a GET causes is_session_expired() to fire a false positive,
+# which triggers an infinite re-login loop.  We save them pre-auth instead and
+# skip HTTP fetches for them during BFS.
+_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp"])
+
 
 # ---------------------------------------------------------------------------
 # Session bootstrap
@@ -485,6 +491,16 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     qs = parsed.query
     if qs and re.fullmatch(r"[0-9a-f]{10,}", qs, re.IGNORECASE):
         qs = ""
+
+    # Reject paths that end with a comma.
+    # These are false extractions from JS regex literals such as:
+    #   replace(/\'/g, "&#39;")
+    # where the broad _ABS_QUOTED_PATH_RE matches the ' before /g and the "
+    # after the comma, capturing '/g, ' as a path.  Note: trailing semicolons
+    # are stripped by urllib.parse (they mark "path parameters"), so the comma
+    # check is what matters in practice.
+    if parsed.path.endswith((",", ";")):
+        return None
 
     canonical = urllib.parse.urlunparse(
         (parsed.scheme, parsed.netloc, parsed.path, "", qs, "")
@@ -932,6 +948,14 @@ class Crawler:
         log.info("Target router    : %s", self.base)
         log.info("Username         : %s", self.username)
 
+        # Pre-download the login page BEFORE authenticating.
+        # /index.asp is publicly accessible (no auth required), contains ALL
+        # JS/CSS/image references that seed the BFS, and must never be fetched
+        # post-auth (it always returns the login form, which would trigger false
+        # session-expiry detection).  Saving it here and marking it visited
+        # ensures it is available for offline analysis without revisiting it.
+        self._save_pre_auth(LOGIN_PAGE)
+
         post_login_url = login(self.session, self.host, self.username, self.password)
         if not post_login_url:
             sys.exit(1)
@@ -954,19 +978,14 @@ class Crawler:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # --- Dynamic seeding ---
-        # Seed from:
-        #   1. "/" (admin frameset – contains <frame> refs to all admin pages)
-        #   2. "/index.asp" (login page – contains ALL JS/CSS resource refs)
-        #   3. post_login_url (wherever the router actually redirected after login)
+        # Seed only from "/" (the authenticated admin frameset).
+        # /index.asp was already handled pre-auth by _save_pre_auth() above.
         # Everything else is discovered by recursively following links.
         self._enqueue(self.base + "/")
-        self._enqueue(self.base + "/index.asp")
-        if post_login_url not in (self.base + "/", self.base + "/index.asp"):
+        if post_login_url not in (self.base + "/",):
             self._enqueue(post_login_url)
 
-        log.info(
-            "Seeding from / + /index.asp + post-login URL. Dynamic discovery begins.",
-        )
+        log.info("Seeding from / + post-login URL. Dynamic discovery begins.")
 
         # Exhaust the queue with optional tqdm progress bar
         if _TQDM_AVAILABLE:
@@ -1082,6 +1101,42 @@ class Crawler:
         if key not in self._visited:
             self._queue.append(url)
 
+
+    def _save_pre_auth(self, path: str) -> None:
+        """
+        Download and save a page that is publicly accessible without authentication.
+
+        Called before login() for the main login page (/index.asp).  Saves the
+        file for offline analysis, marks the URL visited so the BFS never tries to
+        fetch it post-auth (where it returns the login form and triggers false
+        session-expiry detection), and extracts seed links from its content.
+
+        If the file already exists on disk it is parsed for links but not
+        re-downloaded (unless --force is set).
+        """
+        url = self.base + path
+        key = url_key(url)
+        local = url_to_local_path(url, self.output_dir)
+
+        if not self.force and local.exists() and local.stat().st_size > 0:
+            self._visited.add(key)
+            self._parse_local_file(local, url)
+            log.debug("Pre-auth page already on disk: %s", path)
+            return
+
+        try:
+            resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            if resp.ok:
+                ct = resp.headers.get("Content-Type", "text/html")
+                save_file(local, resp.content)
+                self._visited.add(key)
+                self._stats["ok"] += 1
+                log.debug("Pre-auth saved: %s (%d bytes)", path, len(resp.content))
+                for link in extract_links(resp.content, ct, url, self.base):
+                    self._enqueue(link)
+        except requests.RequestException as exc:
+            log.debug("Could not pre-download %s: %s", path, exc)
+
     def _heartbeat(self) -> None:
         """
         POST to GetRandToken.asp to refresh both the session idle timer and
@@ -1141,6 +1196,25 @@ class Crawler:
             log.debug("Blocked write-action URL, skipping: %s", url)
             return
 
+        # Login-interface pages (/index.asp, /login.asp) always return the login
+        # form after authentication, which would trigger is_session_expired() and
+        # start an infinite re-login loop.  They are downloaded pre-auth in run()
+        # via _save_pre_auth().  If a local copy exists, parse it for links; do
+        # NOT make an authenticated HTTP request to them (even with --force).
+        req_path = urllib.parse.urlparse(url).path.lower()
+        if req_path in _AUTH_PAGE_PATHS:
+            local_auth = url_to_local_path(url, self.output_dir)
+            if local_auth.exists() and local_auth.stat().st_size > 0:
+                # File saved pre-auth: count as skip and extract its links.
+                self._stats["skip"] += 1
+                self._parse_local_file(local_auth, url)
+                log.debug("Auth page on disk, links extracted: %s", url)
+            else:
+                # Not on disk (pre-auth download failed or --force run before any
+                # pre-auth save).  Log and skip – we must not fetch post-auth.
+                log.debug("Skipping login-interface page (no post-auth fetch): %s", url)
+            return
+
         local = smart_local_path(url, self.output_dir, "")
 
         # Skip already-downloaded files; parse them for new links
@@ -1174,12 +1248,16 @@ class Crawler:
                 )
                 if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)
-                    self.session.headers["Referer"] = new_login_url
+                    # Always restore root as Referer — admin pages are accessed
+                    # inside the frameset at "/" and need this header to return 200.
+                    self.session.headers["Referer"] = self.base + "/"
                     self._refresh_token()
                     self._visited.discard(key)
                     self._queue.appendleft(url)
                     return
             log.error("Could not recover session after %d attempts", self._relogin_count)
+            # Reset counter so the NEXT URL gets MAX_RELOGIN_ATTEMPTS fresh tries.
+            self._relogin_count = 0
             self._stats["err"] += 1
             return
 
