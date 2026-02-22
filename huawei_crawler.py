@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class HuaweiRouterCrawler:
     """Crawler for Huawei HG8145V5 router web interface."""
 
-    def __init__(self, base_url, username, password, output_dir='router_backup'):
+    def __init__(self, base_url, username, password, output_dir='router_backup', max_iterations=50):
         """
         Initialize the crawler.
 
@@ -42,12 +42,14 @@ class HuaweiRouterCrawler:
             username: Login username
             password: Login password
             output_dir: Directory to save downloaded files
+            max_iterations: Maximum number of crawling iterations (safety limit)
         """
         self.base_url = base_url.rstrip('/')
         self.username = username
         self.password = password
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.max_iterations = max_iterations
 
         # Session management
         self.session = requests.Session()
@@ -77,6 +79,7 @@ class HuaweiRouterCrawler:
 
         logger.info(f"Crawler initialized for {base_url}")
         logger.info(f"Output directory: {self.output_dir.absolute()}")
+        logger.info(f"Max iterations: {max_iterations}")
 
     def login(self):
         """
@@ -633,6 +636,13 @@ class HuaweiRouterCrawler:
         # Crawl pages recursively until no new URLs are found
         while to_visit:
             iteration += 1
+
+            # Safety check: prevent infinite loops
+            if iteration > self.max_iterations:
+                logger.warning(f"Reached maximum iteration limit ({self.max_iterations}). Stopping crawl.")
+                logger.warning(f"There are still {len(to_visit)} URLs in queue that were not visited.")
+                break
+
             current_batch_size = len(to_visit)
 
             logger.info(f"=== Iteration {iteration}: {current_batch_size} URLs in queue, {len(self.visited_urls)} visited ===")
@@ -742,6 +752,12 @@ def main():
         default='router_backup',
         help='Output directory (default: router_backup)'
     )
+    parser.add_argument(
+        '--max-iterations',
+        type=int,
+        default=50,
+        help='Maximum crawling iterations (default: 50)'
+    )
 
     args = parser.parse_args()
 
@@ -754,7 +770,8 @@ def main():
         args.url,
         args.username,
         args.password,
-        args.output
+        args.output,
+        args.max_iterations
     )
 
     # Login

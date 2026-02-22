@@ -70,6 +70,7 @@ python huawei_crawler.py --url http://192.168.100.1 --username Mega_gpon --passw
 - `--username`: Login username (default: Mega_gpon)
 - `--password`: Login password (default: 796cce597901a5cf)
 - `--output`: Output directory for downloaded files (default: router_backup)
+- `--max-iterations`: Maximum number of crawling iterations (default: 50, safety limit)
 
 ### Example
 
