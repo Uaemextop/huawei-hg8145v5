@@ -304,8 +304,27 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
 
     use_sha256 = cfg_mode.upper() == "DVODACOM2WIFI"
 
+    # ---------------------------------------------------------------
+    # FIX: Clear *all* cookies before setting the pre-login cookie.
+    #
+    # The browser's LoginSubmit() (index.asp lines 448-453) expires
+    # any existing cookies before setting the pre-login cookie.
+    # Without this step the requests session accumulates cookies from
+    # detect_login_mode(), _save_pre_auth(), and previous login
+    # attempts.  The server then receives conflicting Cookie headers
+    # and rejects the session immediately after login.cgi returns,
+    # causing the infinite re-login loop seen in the issue.
+    # ---------------------------------------------------------------
+    session.cookies.clear()
+
     if use_sha256:
         # --- PBKDF2+SHA256 path (index.asp loginWithSha256) ---
+        session.cookies.set(
+            "Cookie",
+            "body:Language:english:id=-1",
+            domain=host,
+            path="/",
+        )
         # POST /asp/GetRandInfo.asp -> dealDataWithFun returns [token, salt, iters]
         try:
             info_resp = session.post(
@@ -381,6 +400,14 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
         return None
 
+    # FIX: Deduplicate cookies after login response.
+    # The jar may contain both the manually-set pre-login cookie and the
+    # server-set session cookie under the same name but different internal
+    # domain representations.  Sending both confuses the router.
+    if "Set-Cookie" in resp.headers:
+        log.debug("Server set cookies in login response – cleaning jar")
+        _deduplicate_cookies(session, host)
+
     # The router's login.cgi always returns HTTP 200 with a *JavaScript*
     # redirect (e.g. "var pageName = '/'; top.location.replace(pageName);").
     # requests does NOT execute JavaScript, so resp.url stays at login.cgi
@@ -405,6 +432,20 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
             redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         post_login_url = follow_resp.url
+
+        # FIX: Validate the session by checking the follow-up response.
+        # If the redirect target still shows the login form the session
+        # cookie was not accepted – return None instead of entering a loop.
+        if is_session_expired(follow_resp):
+            log.error(
+                "Session invalid immediately after login – the follow-up "
+                "request to %s returned the login form. "
+                "Cookie jar: %s",
+                redirect_url,
+                list(session.cookies.keys()),
+            )
+            return None
+
         log.debug("Followed JS redirect → %s", post_login_url)
     except requests.RequestException as exc:
         log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)
@@ -420,6 +461,28 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     )
     log.debug("Cookie values after login: %s", dict(session.cookies))
     return post_login_url
+
+
+def _deduplicate_cookies(session: requests.Session, host: str) -> None:
+    """
+    Remove duplicate 'Cookie' entries from the session jar.
+
+    After login.cgi responds, the jar may contain both the manually-set
+    pre-login cookie *and* the server-set session cookie under the same name
+    but different internal domain representations.  Keep only the *last*
+    value (the server-set one).
+    """
+    cookies_named = []
+    for cookie in session.cookies:
+        if cookie.name == "Cookie":
+            cookies_named.append(cookie)
+
+    if len(cookies_named) > 1:
+        log.debug(
+            "Found %d 'Cookie' entries in jar – deduplicating", len(cookies_named)
+        )
+        for c in cookies_named[:-1]:
+            session.cookies.clear(c.domain, c.path, c.name)
 
 
 def is_session_expired(resp: requests.Response) -> bool:
@@ -966,9 +1029,11 @@ class Crawler:
         # Using login.cgi as Referer caused HTTP 403 on every admin page.
         self.session.headers["Referer"] = self.base + "/"
 
-        # Fetch a fresh X_HW_Token right after login.
-        # GetRandToken.asp also needs the correct Referer, which is now set.
-        self._refresh_token()
+        # FIX: Do NOT call _refresh_token() immediately after login.
+        # The token endpoint may not be ready or may reset the session
+        # cookie, causing the infinite re-login loop.  The heartbeat
+        # mechanism will refresh the token after the first batch of
+        # successful fetches instead.
 
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
@@ -1148,19 +1213,35 @@ class Crawler:
         """
         POST to /html/ssmp/common/GetRandToken.asp to get a fresh X_HW_Token.
         The token is stored in _current_token for use in 403 retries.
-        Falls back silently if the endpoint is unavailable (e.g. not yet logged in).
+        Falls back silently if the endpoint is unavailable.
+
+        Session-safety fix: saves and restores cookies if the token endpoint
+        response indicates session expiry.
         """
+        saved_jar = self.session.cookies.copy()
         try:
             resp = self.session.post(
                 self.base + TOKEN_URL,
                 timeout=REQUEST_TIMEOUT,
             )
+            # Check if the token endpoint blew our session
+            if is_session_expired(resp):
+                log.debug("Token refresh triggered session reset – restoring cookies")
+                self.session.cookies.clear()
+                for cookie in saved_jar:
+                    self.session.cookies.set_cookie(cookie)
+                return
             token = resp.text.strip()
-            if token and len(token) >= 8:
+            # Accept only if it looks like a real hex token, not HTML
+            if token and len(token) >= 8 and "<" not in token:
                 self._current_token = token
                 log.debug("X_HW_Token refreshed: %s…", token[:12])
         except requests.RequestException as exc:
             log.debug("Token refresh failed (non-fatal): %s", exc)
+            # Restore cookies in case the failed request corrupted them
+            self.session.cookies.clear()
+            for cookie in saved_jar:
+                self.session.cookies.set_cookie(cookie)
 
     def _retry_with_token(self, url: str) -> requests.Response | None:
         """
@@ -1251,7 +1332,8 @@ class Crawler:
                     # Always restore root as Referer — admin pages are accessed
                     # inside the frameset at "/" and need this header to return 200.
                     self.session.headers["Referer"] = self.base + "/"
-                    self._refresh_token()
+                    # FIX: Do NOT call _refresh_token() here – it can
+                    # invalidate the session right after re-login.
                     self._visited.discard(key)
                     self._queue.appendleft(url)
                     return
