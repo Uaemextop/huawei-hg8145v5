@@ -200,7 +200,7 @@ class TestLinkExtraction(unittest.TestCase):
         )
 
     def test_extracts_document_write_src(self):
-        html = """document.write('<script src="/resource/common/crypto-js.js"><\\/script>');"""
+        html = """document.write('<script src="/resource/common/crypto-js.js"></script>');"""
         source = "http://192.168.100.1/index.asp"
         self.crawler._extract_links(html, source, 0)
         self.assertIn(

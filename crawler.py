@@ -218,7 +218,9 @@ class HuaweiCrawler:
         # Step 3 – submit login form.
         password_b64 = base64.b64encode(self.password.encode("utf-8")).decode("ascii")
 
-        # Set the cookie expected by the router.
+        # The router expects a cookie literally named "Cookie" with a
+        # colon-delimited body containing the language and session id.
+        # This matches the JS: document.cookie = "Cookie=body:Language:…"
         self.session.cookies.set(
             "Cookie", "body:Language:english:id=-1", path="/",
         )
@@ -507,30 +509,33 @@ class HuaweiCrawler:
         for match in re.findall(r'RequestFile=([^\s&"\']+)', text):
             self._enqueue(match, source_url, depth)
 
-        # Generic string literals that look like router paths:
-        #   '/some/path.asp'  or  "/some/path.js"
-        for match in re.findall(
-            r"""(?:['"])(\/[a-zA-Z0-9_\-/.]+\.(?:asp|js|css|html?|cgi|gif|jpg|png|ico))(?:['"])""",
-            text,
-        ):
+        # Generic string literals that look like absolute router paths,
+        # e.g. '/html/status/info.asp' or "/resource/common/util.js".
+        # Matches a quoted string starting with / followed by path chars
+        # and ending with a known file extension.
+        _PATH_LITERAL_RE = (
+            r"""(?:['"])(\/[a-zA-Z0-9_\-/.]+"""
+            r"""\.(?:asp|js|css|html?|cgi|gif|jpg|png|ico))(?:['"])"""
+        )
+        for match in re.findall(_PATH_LITERAL_RE, text):
             self._enqueue(match, source_url, depth)
 
-        # Bare .cgi endpoint references:  'something.cgi' or "something.cgi"
-        for match in re.findall(
-            r"""['\"]([a-zA-Z0-9_\-/]+\.cgi)(?:\?[^'"]*)?['"]""", text,
-        ):
+        # Bare .cgi endpoint references in string literals,
+        # e.g. 'FrameModeSwitch.cgi' or "getCheckCode.cgi?&rand=…".
+        _CGI_LITERAL_RE = r"""['\"]([a-zA-Z0-9_\-/]+\.cgi)(?:\?[^'"]*)?['"]"""
+        for match in re.findall(_CGI_LITERAL_RE, text):
             self._enqueue(match, source_url, depth)
 
-        # Bare .asp page references:  'something.asp' or "something.asp"
-        for match in re.findall(
-            r"""['\"]([a-zA-Z0-9_\-/]+\.asp)(?:\?[^'"]*)?['"]""", text,
-        ):
+        # Bare .asp page references in string literals,
+        # e.g. 'login.asp' or "/asp/GetRandCount.asp".
+        _ASP_LITERAL_RE = r"""['\"]([a-zA-Z0-9_\-/]+\.asp)(?:\?[^'"]*)?['"]"""
+        for match in re.findall(_ASP_LITERAL_RE, text):
             self._enqueue(match, source_url, depth)
 
-        # document.write patterns with src or href.
-        for match in re.findall(
-            r"document\.write\(['\"].*?(?:src|href)=['\\\"]([^'\\\"]+)", text,
-        ):
+        # document.write() patterns that inject tags with src or href,
+        # e.g. document.write('<script src="/resource/common/crypto-js.js">').
+        _DOC_WRITE_RE = r"""document\.write\(['"].*?(?:src|href)=['"]([^'"]+)"""
+        for match in re.findall(_DOC_WRITE_RE, text):
             self._enqueue(match, source_url, depth)
 
         # Image source assignments: .src = '…'
