@@ -972,6 +972,75 @@ class SecurityAudit:
                                   "OK", "HIGH",
                                   "No randcode variable found in login page"))
 
+    def check_v31_onttoken_dom_exposure(self) -> None:
+        """V-31: Check for onttoken CSRF token exposed in DOM."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-31", "onttoken DOM token exposure",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        has_onttoken = "onttoken" in page
+        has_getvalue_token = "getValue('onttoken')" in page
+        has_token_param = "x.X_HW_Token" in page
+
+        if has_onttoken or has_getvalue_token:
+            self._add(CheckResult(
+                "V-31", "onttoken DOM token exposure", "VULN", "HIGH",
+                "CSRF token stored in DOM element 'onttoken' — "
+                "any XSS can read it via document.getElementById('onttoken').value "
+                "and perform authenticated actions",
+                data={"has_onttoken": has_onttoken,
+                      "has_getvalue_token": has_getvalue_token},
+            ))
+        elif has_token_param:
+            self._add(CheckResult(
+                "V-31", "onttoken DOM token exposure", "VULN", "MEDIUM",
+                "X_HW_Token parameter used but onttoken element not found "
+                "in login page (may be in admin pages only)",
+            ))
+        else:
+            self._add(CheckResult("V-31", "onttoken DOM token exposure",
+                                  "OK", "HIGH",
+                                  "No onttoken or X_HW_Token patterns found"))
+
+    def check_v32_no_input_sanitization(self) -> None:
+        """V-32: Check for form submission chain without input sanitization."""
+        page = self._fetch_login_page()
+        if not page:
+            self._add(CheckResult("V-32", "Form chain without sanitization",
+                                  "SKIP", "HIGH",
+                                  "Could not fetch login page"))
+            return
+
+        has_getvalue = "getValue(" in page
+        has_addparam = "addParameter(" in page
+        has_submit = ".submit()" in page or "Form.submit()" in page
+        # Check for unsanitized cookie construction
+        has_cookie_concat = "Language:" + " + " in page or \
+                            '"Cookie=body:"' in page
+
+        issues = []
+        if has_getvalue:
+            issues.append("getValue() returns raw element.value")
+        if has_addparam:
+            issues.append("addParameter() stores raw values")
+        if has_cookie_concat:
+            issues.append("Cookie built by string concatenation")
+
+        if issues:
+            self._add(CheckResult(
+                "V-32", "Form chain without sanitization", "VULN", "HIGH",
+                f"No input sanitization in form submission: "
+                f"{'; '.join(issues)}",
+                data={"issues": issues},
+            ))
+        else:
+            self._add(CheckResult("V-32", "Form chain without sanitization",
+                                  "OK", "HIGH",
+                                  "No unsanitized form patterns detected"))
+
     def check_endpoint_accessibility(self) -> None:
         """Bonus: Probe all known endpoints for accessibility."""
         for endpoint in PRE_LOGIN_ENDPOINTS:
@@ -1025,6 +1094,8 @@ class SecurityAudit:
         self.check_v28_requestfile_injection()
         self.check_v29_cfgmode_switch()
         self.check_v30_randcode_leak()
+        self.check_v31_onttoken_dom_exposure()
+        self.check_v32_no_input_sanitization()
 
         # Auth-required checks (only if credentials provided)
         if self.username and self.password:

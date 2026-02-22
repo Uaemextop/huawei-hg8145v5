@@ -86,9 +86,11 @@ MOCK_INDEX_ASP = """
   url : 'FrameModeSwitch.cgi?&RequestFile=/login.asp',
   data  : 'X_HW_FrameMode=2',
 
+  Form.addParameter('x.X_HW_Token', getValue('onttoken'));
   Form.addParameter('PassWord', base64encode(Password.value));
+  Form.submit();
 
-  var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
+  var cookie2 = "Cookie=body:" + "Language:" + Language + ":" + "id=-1;path=/";
   document.cookie = cookie2;
 </script>
 <input id="txt_Username" />
@@ -476,6 +478,36 @@ class TestSecurityAuditChecks(unittest.TestCase):
         audit = self._make_audit()
         audit._login_page_text = "<html>no randcode</html>"
         audit.check_v30_randcode_leak()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-31: onttoken DOM exposure ---
+    def test_v31_onttoken_exposed(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v31_onttoken_dom_exposure()
+        self.assertEqual(audit.results[0].status, "VULN")
+        self.assertIn("onttoken", audit.results[0].details)
+
+    def test_v31_onttoken_not_found(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>no token element</html>"
+        audit.check_v31_onttoken_dom_exposure()
+        self.assertEqual(audit.results[0].status, "OK")
+
+    # --- V-32: Form chain without sanitization ---
+    def test_v32_no_sanitization_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = MOCK_INDEX_ASP
+        audit.check_v32_no_input_sanitization()
+        self.assertEqual(audit.results[0].status, "VULN")
+        issues = audit.results[0].data["issues"]
+        self.assertIn("getValue() returns raw element.value", issues)
+        self.assertIn("addParameter() stores raw values", issues)
+
+    def test_v32_no_sanitization_not_detected(self):
+        audit = self._make_audit()
+        audit._login_page_text = "<html>safe forms</html>"
+        audit.check_v32_no_input_sanitization()
         self.assertEqual(audit.results[0].status, "OK")
 
 

