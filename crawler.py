@@ -171,7 +171,7 @@ _BLOCKED_PATH_RE = re.compile(
 # Crawling them via a GET causes is_session_expired() to fire a false positive,
 # which triggers an infinite re-login loop.  We save them pre-auth instead and
 # skip HTTP fetches for them during BFS.
-_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp"])
+_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp", "/"])
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +955,10 @@ class Crawler:
         # session-expiry detection).  Saving it here and marking it visited
         # ensures it is available for offline analysis without revisiting it.
         self._save_pre_auth(LOGIN_PAGE)
+        # The root URL "/" typically serves the same content as /index.asp on
+        # Huawei routers.  Pre-save it so it is available for link extraction
+        # and marked visited, preventing false session-expiry detection.
+        self._save_pre_auth("/")
 
         post_login_url = login(self.session, self.host, self.username, self.password)
         if not post_login_url:
@@ -978,14 +982,16 @@ class Crawler:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # --- Dynamic seeding ---
-        # Seed only from "/" (the authenticated admin frameset).
-        # /index.asp was already handled pre-auth by _save_pre_auth() above.
-        # Everything else is discovered by recursively following links.
-        self._enqueue(self.base + "/")
-        if post_login_url not in (self.base + "/",):
+        # Do not seed URLs that are in _AUTH_PAGE_PATHS (/, /index.asp,
+        # /login.asp) because they always return the login form and would
+        # trigger false session-expiry detection.  Links discovered from
+        # _save_pre_auth() already seed all JS/CSS/image resources.
+        # Only seed the post-login URL if it resolves to a genuine admin page.
+        post_path = urllib.parse.urlparse(post_login_url or "").path.lower()
+        if post_login_url and post_path not in _AUTH_PAGE_PATHS:
             self._enqueue(post_login_url)
 
-        log.info("Seeding from / + post-login URL. Dynamic discovery begins.")
+        log.info("Seeding from pre-auth pages + post-login URL. Dynamic discovery begins.")
 
         # Exhaust the queue with optional tqdm progress bar
         if _TQDM_AVAILABLE:
