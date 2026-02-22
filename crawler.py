@@ -1149,12 +1149,29 @@ class Crawler:
         POST to /html/ssmp/common/GetRandToken.asp to get a fresh X_HW_Token.
         The token is stored in _current_token for use in 403 retries.
         Falls back silently if the endpoint is unavailable (e.g. not yet logged in).
+
+        Session-safety: saves the ``Cookie`` value before the POST and restores
+        it if the token endpoint resets it to ``default`` (the logged-out state).
+        This prevents the token-refresh call from silently invalidating an
+        authenticated session when the endpoint does not exist on the firmware.
         """
+        saved_cookie = self.session.cookies.get("Cookie")
         try:
             resp = self.session.post(
                 self.base + TOKEN_URL,
                 timeout=REQUEST_TIMEOUT,
             )
+            # Restore the session cookie if the endpoint reset it to default.
+            after_cookie = self.session.cookies.get("Cookie", "")
+            if (
+                saved_cookie
+                and saved_cookie.lower() != "default"
+                and after_cookie.lower() == "default"
+            ):
+                self.session.cookies.set(
+                    "Cookie", saved_cookie, domain=self.host, path="/"
+                )
+                log.debug("Session cookie restored after token refresh (endpoint reset it)")
             token = resp.text.strip()
             if token and len(token) >= 8:
                 self._current_token = token
