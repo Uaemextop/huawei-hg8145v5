@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from huawei_crawler.config import (
     CRAWLABLE_TYPES,
+    DEFAULT_HOST,
     _AUTH_PAGE_PATHS,
     _BLOCKED_PATH_RE,
     _LOGIN_MARKERS,
@@ -26,7 +27,7 @@ from huawei_crawler.utils.files import save_file, content_hash
 from huawei_crawler.crawler import Crawler
 from huawei_crawler.session import build_session, base_url
 
-BASE = "http://192.168.100.1"
+BASE = f"http://{DEFAULT_HOST}"
 
 
 # ---------------------------------------------------------------
@@ -44,7 +45,7 @@ class TestSessionLoopFix(unittest.TestCase):
     def test_auth_page_paths_includes_login_asp(self):
         self.assertIn("/login.asp", _AUTH_PAGE_PATHS)
 
-    @patch("huawei_crawler.crawler.login", return_value="http://192.168.100.1/html/ssmp/default/main.asp")
+    @patch("huawei_crawler.crawler.login", return_value=f"{BASE}/html/ssmp/default/main.asp")
     @patch("huawei_crawler.crawler.build_session")
     def test_crawler_run_does_not_seed_root_url(self, mock_build, mock_login):
         """After run(), '/' must not appear in the BFS queue."""
@@ -79,34 +80,28 @@ class TestSessionLoopFix(unittest.TestCase):
 
     def test_fetch_and_process_skips_auth_pages(self):
         """_fetch_and_process must NOT make HTTP requests for auth page URLs."""
+        from collections import deque
+
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir)
-            c = Crawler.__new__(Crawler)
-            c.host = "192.168.100.1"
-            c.base = BASE
-            c.output_dir = outdir
-            c.force = False
-            c.session = MagicMock()
-            c._visited = set()
-            c._queue = MagicMock(wraps=[])
-            c._hashes = set()
-            c._relogin_count = 0
-            c._fetch_count = 0
-            c._current_token = None
-            c._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0}
+            with patch("huawei_crawler.crawler.build_session") as mock_build:
+                mock_session = MagicMock()
+                mock_build.return_value = mock_session
+                c = Crawler(DEFAULT_HOST, "user", "pass", outdir)
+                c.session = mock_session
 
-            # Create a local file so the auth-page branch parses it
-            index_file = outdir / "index.html"
-            index_file.write_text("<html><head></head><body>test</body></html>")
+                # Create a local file so the auth-page branch parses it
+                index_file = outdir / "index.html"
+                index_file.write_text("<html><head></head><body>test</body></html>")
 
-            c._fetch_and_process(f"{BASE}/")
-            c.session.get.assert_not_called()
+                c._fetch_and_process(f"{BASE}/")
+                c.session.get.assert_not_called()
 
-            # Also check /index.asp
-            index_asp = outdir / "index.asp"
-            index_asp.write_text("<html>test</html>")
-            c._fetch_and_process(f"{BASE}/index.asp")
-            c.session.get.assert_not_called()
+                # Also check /index.asp
+                index_asp = outdir / "index.asp"
+                index_asp.write_text("<html>test</html>")
+                c._fetch_and_process(f"{BASE}/index.asp")
+                c.session.get.assert_not_called()
 
     def test_is_session_expired_root_url_not_false_positive(self):
         """A response from '/' that contains login markers IS expired.
