@@ -240,9 +240,163 @@ class HuaweiRouterCrawler:
             logger.error(f"Error downloading {url}: {e}")
             return False
 
+    def extract_js_routes(self, content, base_url):
+        """
+        Extract routes and URLs from JavaScript content.
+
+        Args:
+            content: JavaScript or HTML content
+            base_url: Base URL for resolving relative paths
+
+        Returns:
+            set: Set of discovered URLs
+        """
+        urls = set()
+
+        try:
+            # Pattern 1: String literals that look like paths/URLs
+            # Matches: '/path/file.asp', 'path/file.cgi', '/folder/page.html'
+            path_patterns = [
+                r'["\']([/.]?[a-zA-Z0-9_\-./]+\.(?:asp|cgi|html?|js|css|json|xml))["\']',
+                r'["\']([/][a-zA-Z0-9_\-/]+(?:\.[a-zA-Z0-9]+)?)["\']',
+            ]
+
+            for pattern in path_patterns:
+                for match in re.finditer(pattern, content):
+                    path = match.group(1)
+                    # Skip very short paths or common false positives
+                    if len(path) > 2 and not path.startswith('data:'):
+                        absolute_url = urljoin(base_url, path)
+                        if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                            urls.add(absolute_url)
+
+            # Pattern 2: AJAX/fetch URLs
+            # Matches: url: '/path', url:'/path', url="/path"
+            ajax_patterns = [
+                r'url\s*:\s*["\']([^"\']+)["\']',
+                r'\.open\s*\([^,]+,\s*["\']([^"\']+)["\']',
+                r'fetch\s*\(\s*["\']([^"\']+)["\']',
+                r'\.ajax\s*\(\s*["\']([^"\']+)["\']',
+            ]
+
+            for pattern in ajax_patterns:
+                for match in re.finditer(pattern, content):
+                    path = match.group(1)
+                    if not path.startswith('http') and not path.startswith('data:'):
+                        absolute_url = urljoin(base_url, path)
+                        if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                            urls.add(absolute_url)
+
+            # Pattern 3: window.location, document.location
+            location_patterns = [
+                r'(?:window|document)\.location(?:\.\w+)?\s*=\s*["\']([^"\']+)["\']',
+                r'location\.href\s*=\s*["\']([^"\']+)["\']',
+            ]
+
+            for pattern in location_patterns:
+                for match in re.finditer(pattern, content):
+                    path = match.group(1)
+                    if not path.startswith('http') and not path.startswith('#'):
+                        absolute_url = urljoin(base_url, path)
+                        if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                            urls.add(absolute_url)
+
+            # Pattern 4: Form actions
+            form_pattern = r'\.setAction\s*\(\s*["\']([^"\']+)["\']'
+            for match in re.finditer(form_pattern, content):
+                path = match.group(1)
+                absolute_url = urljoin(base_url, path)
+                if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                    urls.add(absolute_url)
+
+        except Exception as e:
+            logger.error(f"Error extracting JS routes: {e}")
+
+        return urls
+
+    def extract_asp_routes(self, content, base_url):
+        """
+        Extract routes and endpoints from ASP content.
+
+        Args:
+            content: ASP or HTML content
+            base_url: Base URL for resolving relative paths
+
+        Returns:
+            set: Set of discovered URLs
+        """
+        urls = set()
+
+        try:
+            # ASP includes and references
+            asp_patterns = [
+                r'<!--\s*#include\s+(?:virtual|file)\s*=\s*["\']([^"\']+)["\']',
+                r'Response\.Redirect\s*["\']([^"\']+)["\']',
+                r'Server\.Transfer\s*["\']([^"\']+)["\']',
+            ]
+
+            for pattern in asp_patterns:
+                for match in re.finditer(pattern, content, re.IGNORECASE):
+                    path = match.group(1)
+                    absolute_url = urljoin(base_url, path)
+                    if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                        urls.add(absolute_url)
+
+        except Exception as e:
+            logger.error(f"Error extracting ASP routes: {e}")
+
+        return urls
+
+    def extract_menu_links(self, soup, base_url):
+        """
+        Extract links from navigation menus and common menu structures.
+
+        Args:
+            soup: BeautifulSoup object
+            base_url: Base URL for resolving relative links
+
+        Returns:
+            set: Set of URLs from menus
+        """
+        urls = set()
+
+        try:
+            # Find common menu containers
+            menu_selectors = [
+                'nav', 'menu', '[class*="menu"]', '[id*="menu"]',
+                '[class*="nav"]', '[id*="nav"]', 'ul', 'ol'
+            ]
+
+            for selector in menu_selectors:
+                menu_items = soup.select(selector)
+                for item in menu_items:
+                    # Find all links within menu items
+                    for link in item.find_all('a', href=True):
+                        url = link['href']
+                        if url and not url.startswith('#') and not url.startswith('javascript:'):
+                            absolute_url = urljoin(base_url, url)
+                            if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                                urls.add(absolute_url)
+
+            # Also check for onclick handlers that might contain URLs
+            for element in soup.find_all(onclick=True):
+                onclick = element['onclick']
+                # Extract URLs from onclick handlers
+                onclick_urls = re.findall(r'["\']([^"\']*\.(?:asp|cgi|html?)[^"\']*)["\']', onclick)
+                for url in onclick_urls:
+                    absolute_url = urljoin(base_url, url)
+                    if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                        urls.add(absolute_url)
+
+        except Exception as e:
+            logger.error(f"Error extracting menu links: {e}")
+
+        return urls
+
     def extract_links(self, html, base_url):
         """
         Extract all links and resources from HTML content.
+        Enhanced to deeply analyze JavaScript, ASP, and all content.
 
         Args:
             html: HTML content
@@ -257,7 +411,7 @@ class HuaweiRouterCrawler:
             soup = BeautifulSoup(html, 'html.parser')
 
             # Extract links from various tags
-            for tag in soup.find_all(['a', 'link', 'script', 'img', 'iframe', 'source']):
+            for tag in soup.find_all(['a', 'link', 'script', 'img', 'iframe', 'source', 'form']):
                 url = None
 
                 if tag.name == 'a':
@@ -272,22 +426,48 @@ class HuaweiRouterCrawler:
                     url = tag.get('src')
                 elif tag.name == 'source':
                     url = tag.get('src')
+                elif tag.name == 'form':
+                    url = tag.get('action')
 
-                if url:
-                    # Resolve relative URLs
-                    absolute_url = urljoin(base_url, url)
+                if url and url.strip():
+                    # Skip javascript: and # links
+                    if not url.startswith('javascript:') and not url.startswith('#'):
+                        # Resolve relative URLs
+                        absolute_url = urljoin(base_url, url)
 
-                    # Only include URLs from the same host
-                    if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
-                        urls.add(absolute_url)
+                        # Only include URLs from the same host
+                        if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                            urls.add(absolute_url)
 
             # Extract URLs from CSS url() references
             css_pattern = r'url\([\'"]?([^\'")\s]+)[\'"]?\)'
             for match in re.finditer(css_pattern, html):
                 url = match.group(1)
-                absolute_url = urljoin(base_url, url)
-                if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
-                    urls.add(absolute_url)
+                if not url.startswith('data:'):
+                    absolute_url = urljoin(base_url, url)
+                    if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                        urls.add(absolute_url)
+
+            # Extract JavaScript routes
+            js_urls = self.extract_js_routes(html, base_url)
+            urls.update(js_urls)
+            logger.debug(f"Found {len(js_urls)} URLs from JavaScript analysis")
+
+            # Extract ASP routes
+            asp_urls = self.extract_asp_routes(html, base_url)
+            urls.update(asp_urls)
+            logger.debug(f"Found {len(asp_urls)} URLs from ASP analysis")
+
+            # Extract menu links
+            menu_urls = self.extract_menu_links(soup, base_url)
+            urls.update(menu_urls)
+            logger.debug(f"Found {len(menu_urls)} URLs from menu analysis")
+
+            # Extract inline script content
+            for script_tag in soup.find_all('script'):
+                if script_tag.string:
+                    script_urls = self.extract_js_routes(script_tag.string, base_url)
+                    urls.update(script_urls)
 
         except Exception as e:
             logger.error(f"Error extracting links: {e}")
@@ -297,6 +477,7 @@ class HuaweiRouterCrawler:
     def crawl_page(self, url):
         """
         Crawl a single page and extract resources.
+        Enhanced to deeply analyze content and extract all possible routes.
 
         Args:
             url: URL to crawl
@@ -319,17 +500,56 @@ class HuaweiRouterCrawler:
                 file_path = self.get_file_path(url)
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # Save content
-                if 'text' in response.headers.get('Content-Type', ''):
+                content_type = response.headers.get('Content-Type', '')
+
+                # Determine if this is text content
+                is_text = ('text' in content_type or
+                          any(url.endswith(ext) for ext in ['.js', '.css', '.html', '.htm', '.asp', '.cgi', '.xml', '.json']))
+
+                if is_text:
                     content = response.text
                     file_path.write_text(content, encoding='utf-8')
 
-                    # Extract links from HTML
-                    new_urls = self.extract_links(content, url)
+                    # Extract links based on content type
+                    if url.endswith('.js'):
+                        # JavaScript file - extract routes from JS
+                        logger.info(f"Analyzing JavaScript file: {url}")
+                        new_urls = self.extract_js_routes(content, url)
+                    elif url.endswith('.css'):
+                        # CSS file - extract url() references
+                        css_pattern = r'url\([\'"]?([^\'")\s]+)[\'"]?\)'
+                        for match in re.finditer(css_pattern, content):
+                            resource_url = match.group(1)
+                            if not resource_url.startswith('data:'):
+                                absolute_url = urljoin(url, resource_url)
+                                if urlparse(absolute_url).netloc == urlparse(self.base_url).netloc:
+                                    new_urls.add(absolute_url)
+                    else:
+                        # HTML/ASP/other text - full extraction
+                        new_urls = self.extract_links(content, url)
+
+                        # Also extract JS routes from inline scripts
+                        js_urls = self.extract_js_routes(content, url)
+                        new_urls.update(js_urls)
+
+                        # Extract ASP routes
+                        asp_urls = self.extract_asp_routes(content, url)
+                        new_urls.update(asp_urls)
+
+                    logger.info(f"Extracted {len(new_urls)} URLs from {url}")
                 else:
+                    # Binary file
                     file_path.write_bytes(response.content)
+                    logger.info(f"Saved binary file: {file_path}")
 
                 logger.info(f"Saved: {file_path}")
+
+            elif response.status_code == 404:
+                logger.debug(f"Not found (404): {url}")
+            elif response.status_code == 403:
+                logger.warning(f"Forbidden (403): {url}")
+            else:
+                logger.warning(f"Status {response.status_code}: {url}")
 
         except Exception as e:
             logger.error(f"Error crawling {url}: {e}")
@@ -339,15 +559,21 @@ class HuaweiRouterCrawler:
     def crawl(self, start_urls=None):
         """
         Start the crawling process.
+        Enhanced with recursive and comprehensive URL discovery.
 
         Args:
             start_urls: List of URLs to start crawling from
         """
         if start_urls is None:
             start_urls = [
+                f"{self.base_url}/",
                 f"{self.base_url}/index.asp",
+                f"{self.base_url}/index.html",
                 f"{self.base_url}/frame.asp",
-                f"{self.base_url}/main.asp"
+                f"{self.base_url}/main.asp",
+                f"{self.base_url}/menu.asp",
+                f"{self.base_url}/top.asp",
+                f"{self.base_url}/left.asp",
             ]
 
         # Queue of URLs to visit
@@ -355,38 +581,105 @@ class HuaweiRouterCrawler:
 
         logger.info(f"Starting crawl with {len(to_visit)} initial URLs")
 
-        # Common admin pages to try
+        # Extended list of common router admin pages and endpoints
         common_pages = [
-            '/status.asp', '/info.asp', '/config.asp',
+            # Main pages
+            '/status.asp', '/info.asp', '/config.asp', '/home.asp',
             '/network.asp', '/wan.asp', '/lan.asp',
-            '/wifi.asp', '/wireless.asp', '/wlan.asp',
-            '/security.asp', '/firewall.asp',
+
+            # WiFi/Wireless
+            '/wifi.asp', '/wireless.asp', '/wlan.asp', '/ssid.asp',
+            '/wificonfig.asp', '/wirelessconfig.asp',
+
+            # Security
+            '/security.asp', '/firewall.asp', '/filter.asp',
+            '/port.asp', '/portforward.asp', '/dmz.asp',
+
+            # System/Admin
             '/system.asp', '/admin.asp', '/management.asp',
-            '/diagnostic.asp', '/tools.asp',
-            '/backup.asp', '/update.asp', '/firmware.asp'
+            '/diagnostic.asp', '/tools.asp', '/ping.asp',
+            '/backup.asp', '/update.asp', '/firmware.asp',
+            '/restore.asp', '/reboot.asp', '/upgrade.asp',
+
+            # Advanced
+            '/advanced.asp', '/nat.asp', '/routing.asp',
+            '/dhcp.asp', '/dns.asp', '/qos.asp',
+            '/upnp.asp', '/ddns.asp', '/vpn.asp',
+
+            # CGI endpoints
+            '/login.cgi', '/logout.cgi', '/apply.cgi',
+            '/get.cgi', '/set.cgi', '/status.cgi',
+
+            # ASP endpoints from common patterns
+            '/asp/GetRandCount.asp', '/asp/GetRandInfo.asp',
+            '/asp/status.asp', '/asp/info.asp',
+
+            # Frame pages
+            '/htm/main.htm', '/html/main.html',
+            '/frame.html', '/frameset.html',
+
+            # Resource directories (will try to list)
+            '/resource/', '/images/', '/js/', '/css/',
+            '/Cuscss/', '/frameaspdes/',
         ]
 
         for page in common_pages:
             to_visit.add(f"{self.base_url}{page}")
 
-        # Crawl pages
+        # Counter for tracking progress
+        previous_visited_count = 0
+        iteration = 0
+
+        # Crawl pages recursively until no new URLs are found
         while to_visit:
-            url = to_visit.pop()
+            iteration += 1
+            current_batch_size = len(to_visit)
 
-            # Skip if already visited
-            if url in self.visited_urls:
-                continue
+            logger.info(f"=== Iteration {iteration}: {current_batch_size} URLs in queue, {len(self.visited_urls)} visited ===")
 
-            # Crawl page and get new URLs
-            new_urls = self.crawl_page(url)
+            # Process current batch
+            current_batch = list(to_visit)
+            to_visit.clear()
 
-            # Add new URLs to visit queue
-            for new_url in new_urls:
-                if new_url not in self.visited_urls:
-                    to_visit.add(new_url)
+            for url in current_batch:
+                # Skip if already visited
+                if url in self.visited_urls:
+                    continue
 
-        logger.info(f"Crawling complete. Visited {len(self.visited_urls)} URLs")
-        logger.info(f"Downloaded {len(self.downloaded_files)} files")
+                # Crawl page and get new URLs
+                new_urls = self.crawl_page(url)
+
+                # Add new URLs to visit queue
+                for new_url in new_urls:
+                    if new_url not in self.visited_urls:
+                        to_visit.add(new_url)
+
+            # Check if we discovered any new URLs this iteration
+            current_visited_count = len(self.visited_urls)
+            new_discoveries = current_visited_count - previous_visited_count
+            logger.info(f"Iteration {iteration} complete: {new_discoveries} new URLs discovered")
+
+            previous_visited_count = current_visited_count
+
+            # Safety check: if no new URLs discovered in this iteration, we're done
+            if not to_visit:
+                logger.info("No more URLs to crawl - exhaustive crawl complete!")
+                break
+
+        logger.info(f"=== Crawling complete ===")
+        logger.info(f"Total iterations: {iteration}")
+        logger.info(f"Total URLs visited: {len(self.visited_urls)}")
+        logger.info(f"Total files downloaded: {len(self.downloaded_files)}")
+
+        # Print some statistics
+        file_types = {}
+        for url in self.visited_urls:
+            ext = Path(urlparse(url).path).suffix or 'no_extension'
+            file_types[ext] = file_types.get(ext, 0) + 1
+
+        logger.info("File types discovered:")
+        for ext, count in sorted(file_types.items(), key=lambda x: x[1], reverse=True):
+            logger.info(f"  {ext}: {count}")
 
     def create_index(self):
         """Create an index.html file listing all downloaded content."""

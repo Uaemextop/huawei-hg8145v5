@@ -5,11 +5,22 @@ A Python web crawler designed to extract and backup the complete web interface o
 ## Features
 
 - **Automatic Authentication**: Handles router login with CSRF token management
-- **Comprehensive Crawling**: Discovers and downloads all accessible pages and resources
+- **Deep Recursive Crawling**: Continues crawling until no new URLs are discovered
+- **Comprehensive URL Discovery**:
+  - Extracts links from HTML tags (a, link, script, img, iframe, form, etc.)
+  - Analyzes JavaScript files for dynamic routes and AJAX endpoints
+  - Parses ASP content for server-side includes and redirects
+  - Discovers menu structures and navigation elements
+  - Extracts URLs from onclick handlers and inline scripts
 - **Structure Preservation**: Maintains original website directory structure
-- **Resource Discovery**: Extracts links from HTML, CSS, and JavaScript files
+- **Advanced Content Analysis**:
+  - JavaScript route extraction (AJAX calls, fetch, window.location, etc.)
+  - ASP route discovery (includes, redirects, transfers)
+  - Form action extraction
+  - CSS url() reference extraction
+- **Cookie & Session Management**: Automatic cookie handling via requests.Session()
 - **Error Handling**: Includes retry logic and comprehensive error logging
-- **Progress Tracking**: Logs all activities to both console and log file
+- **Progress Tracking**: Detailed iteration logs showing discovery progress
 
 ## Requirements
 
@@ -112,21 +123,39 @@ The crawler generates a `crawler.log` file in the current directory, containing:
    - Requests CSRF token from `/asp/GetRandCount.asp`
    - Encodes password in Base64
    - Submits login credentials to `/login.cgi`
+   - Maintains session cookies automatically
 
 2. **Discovery**:
    - Starts with common router pages (index.asp, frame.asp, status.asp, etc.)
    - Parses HTML to extract all links and resource references
-   - Follows links to discover additional pages
+   - Analyzes JavaScript files for dynamic routes and AJAX endpoints
+   - Extracts ASP includes, redirects, and server-side routes
+   - Discovers navigation menus and onclick handlers
+   - Follows discovered links recursively
 
-3. **Download**:
+3. **Deep Content Analysis**:
+   - **JavaScript Analysis**: Extracts routes from:
+     - String literals containing paths (e.g., `'/admin/status.asp'`)
+     - AJAX calls (`$.ajax()`, `fetch()`, `XMLHttpRequest.open()`)
+     - Location changes (`window.location`, `location.href`)
+     - Form actions (`Form.setAction()`)
+   - **ASP Analysis**: Finds routes from:
+     - Server-side includes (`<!-- #include -->`)
+     - Response redirects (`Response.Redirect`)
+     - Server transfers (`Server.Transfer`)
+   - **Menu Discovery**: Locates all navigation elements and menu items
+
+4. **Download**:
    - Downloads each discovered resource
    - Preserves directory structure
    - Handles both text and binary files appropriately
+   - Saves JavaScript, CSS, HTML, ASP, images, and all other resources
 
-4. **Resource Extraction**:
-   - Extracts URLs from HTML tags (a, link, script, img, iframe)
-   - Parses CSS for url() references
-   - Resolves relative URLs to absolute URLs
+5. **Recursive Crawling**:
+   - Processes URLs in batches (iterations)
+   - Continues until no new URLs are discovered
+   - Logs progress after each iteration
+   - Provides statistics on file types discovered
 
 ## Troubleshooting
 
