@@ -86,6 +86,10 @@ class Crawler:
         log.info("Username         : %s", self.username)
 
         # Pre-download the login page before authentication.
+        # "/" and /index.asp serve the same login form; both must be saved
+        # pre-auth and never fetched post-auth (they always return the
+        # login form, triggering false session-expiry detection).
+        self._save_pre_auth("/")
         self._save_pre_auth(LOGIN_PAGE)
 
         post_login_url = login(self.session, self.host, self.username, self.password)
@@ -114,12 +118,13 @@ class Crawler:
             if n:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
-        # Dynamic seeding
-        self._enqueue(self.base + "/")
-        if post_login_url not in (self.base + "/",):
+        # Dynamic seeding: only enqueue non-auth-page URLs.
+        # "/" and /index.asp are already saved pre-auth above.
+        post_login_path = urllib.parse.urlparse(post_login_url).path.lower()
+        if post_login_path not in AUTH_PAGE_PATHS:
             self._enqueue(post_login_url)
 
-        log.info("Seeding from / + post-login URL. Dynamic discovery begins.")
+        log.info("Seeding from post-login URL. Dynamic discovery begins.")
 
         if _TQDM_AVAILABLE:
             self._run_with_progress()

@@ -145,7 +145,12 @@ class TestLoginCookieCleanup(unittest.TestCase):
         follow_response.headers = {"Content-Type": "text/html"}
         follow_response.cookies = requests.cookies.RequestsCookieJar()
 
-        with patch.object(session, "post", return_value=login_response):
+        def mock_post(url, **kwargs):
+            # Simulate the server updating the Cookie via Set-Cookie
+            session.cookies.set("Cookie", "body:Language:english:id=12345")
+            return login_response
+
+        with patch.object(session, "post", side_effect=mock_post):
             with patch.object(session, "get", return_value=follow_response):
                 result = login(session, "192.168.100.1", "Mega_gpon", "test_password")
 
@@ -153,6 +158,9 @@ class TestLoginCookieCleanup(unittest.TestCase):
         # Verify the old stale cookies are gone
         other_cookies = [c for c in session.cookies if c.name == "OtherCookie"]
         self.assertEqual(len(other_cookies), 0)
+        # Verify the cookie value was updated from pre-login
+        cookie_val = session.cookies.get("Cookie", "")
+        self.assertNotEqual(cookie_val, "body:Language:english:id=-1")
 
 
 if __name__ == "__main__":

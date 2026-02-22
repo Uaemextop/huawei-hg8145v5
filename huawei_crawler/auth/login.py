@@ -29,11 +29,12 @@ from huawei_crawler.config import (
     LOGIN_CGI,
     LOGIN_MARKERS,
     LOGIN_PAGE,
+    PRE_LOGIN_COOKIE_VALUE,
     RAND_COUNT_URL,
     RAND_INFO_URL,
     REQUEST_TIMEOUT,
 )
-from huawei_crawler.auth.session import base_url, is_session_expired
+from huawei_crawler.auth.session import base_url
 from huawei_crawler.utils.log import log
 
 
@@ -141,12 +142,11 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
 
     if use_sha256:
         # --- PBKDF2+SHA256 path (DVODACOM2WIFI) ---
-        session.cookies.set(
-            "Cookie",
-            "body:Language:english:id=-1",
-            domain=host,
-            path="/",
-        )
+        # NOTE: do NOT pass domain= — setting an explicit domain prevents
+        # the server's Set-Cookie from updating this cookie value after
+        # login.cgi responds, leaving the session stuck at the pre-login
+        # value.
+        session.cookies.set("Cookie", PRE_LOGIN_COOKIE_VALUE)
         try:
             info_resp = session.post(
                 base_url(host) + RAND_INFO_URL + "?&1=1",
@@ -174,12 +174,9 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # Set the pre-login cookie exactly as the browser does:
         #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
         #   document.cookie = cookie2;
-        session.cookies.set(
-            "Cookie",
-            "body:Language:english:id=-1",
-            domain=host,
-            path="/",
-        )
+        # NOTE: do NOT pass domain= — an explicit domain prevents the
+        # server's Set-Cookie from updating this cookie after login.cgi.
+        session.cookies.set("Cookie", PRE_LOGIN_COOKIE_VALUE)
         try:
             token = get_rand_token(session, host)
         except requests.RequestException as exc:
@@ -246,29 +243,32 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
 
     redirect_url = urllib.parse.urljoin(base_url(host), redirect_path)
+
+    # ---------------------------------------------------------------
+    # Validate login by checking the cookie value.
+    #
+    # The root URL "/" on this router always serves the login page
+    # content (same as /index.asp), even when authenticated.  So we
+    # MUST NOT use is_session_expired() on the follow-up response —
+    # it would always fire a false positive.  Instead we verify that
+    # the server's Set-Cookie updated the pre-login cookie value
+    # from 'body:Language:english:id=-1' to a real session token.
+    # ---------------------------------------------------------------
+    cookie_val = session.cookies.get("Cookie", "")
+    if cookie_val == PRE_LOGIN_COOKIE_VALUE:
+        log.error(
+            "Login failed – cookie was not updated by the server. "
+            "The session is still at the pre-login value. "
+            "Cookie jar: %s",
+            dict(session.cookies),
+        )
+        return None
+
     try:
         follow_resp = session.get(
             redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         post_login_url = follow_resp.url
-
-        # ---------------------------------------------------------------
-        # FIX: Validate the session by checking the follow-up response.
-        #
-        # If the redirect target still shows the login form the session
-        # cookie was not accepted.  Return None so the caller knows
-        # login truly failed rather than entering a re-login loop.
-        # ---------------------------------------------------------------
-        if is_session_expired(follow_resp):
-            log.error(
-                "Session invalid immediately after login – the follow-up "
-                "request to %s returned the login form. "
-                "Cookie jar: %s",
-                redirect_url,
-                list(session.cookies.keys()),
-            )
-            return None
-
         log.debug("Followed JS redirect → %s", post_login_url)
     except requests.RequestException as exc:
         log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)

@@ -51,6 +51,11 @@ CRAWLABLE_TYPES = {
 # ---------------------------------------------------------------------------
 LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 
+# The pre-login cookie value set by the browser's LoginSubmit() JS before
+# POSTing to /login.cgi.  After a successful login the server's Set-Cookie
+# replaces this value with a real session token.
+PRE_LOGIN_COOKIE_VALUE = "body:Language:english:id=-1"
+
 # ---------------------------------------------------------------------------
 # Blocked URL patterns (write-action endpoints)
 # ---------------------------------------------------------------------------
@@ -64,4 +69,4 @@ BLOCKED_PATH_RE = re.compile(
 # Fetching them triggers false session-expiry detection; they are saved
 # pre-auth instead and skipped during the BFS crawl.
 # ---------------------------------------------------------------------------
-AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp"])
+AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/", "/login.asp", "/index.asp"])

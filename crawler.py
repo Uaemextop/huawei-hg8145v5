@@ -155,6 +155,9 @@ CRAWLABLE_TYPES = {
 # Signals that the session has expired – checked only against HTML responses
 _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 
+# Pre-login cookie value set by the browser's LoginSubmit() JS.
+_PRE_LOGIN_COOKIE_VALUE = "body:Language:english:id=-1"
+
 # URL path patterns for write-action endpoints that must NEVER be crawled.
 # • logout – terminates the session
 # • reboot / factory / restore / reset – make irreversible hardware changes
@@ -171,7 +174,7 @@ _BLOCKED_PATH_RE = re.compile(
 # Crawling them via a GET causes is_session_expired() to fire a false positive,
 # which triggers an infinite re-login loop.  We save them pre-auth instead and
 # skip HTTP fetches for them during BFS.
-_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp"])
+_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/", "/login.asp", "/index.asp"])
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +322,9 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
 
     if use_sha256:
         # --- PBKDF2+SHA256 path (index.asp loginWithSha256) ---
-        session.cookies.set(
-            "Cookie",
-            "body:Language:english:id=-1",
-            domain=host,
-            path="/",
-        )
+        # NOTE: do NOT pass domain= — an explicit domain prevents the
+        # server's Set-Cookie from updating this cookie after login.cgi.
+        session.cookies.set("Cookie", _PRE_LOGIN_COOKIE_VALUE)
         # POST /asp/GetRandInfo.asp -> dealDataWithFun returns [token, salt, iters]
         try:
             info_resp = session.post(
@@ -356,15 +356,9 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # Set the pre-login cookie to mimic what the login page JS does:
         #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
         #   document.cookie = cookie2;
-        # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
-        # not part of the value.  We specify it via the path= kwarg here so
-        # the router receives the correct value: 'body:Language:english:id=-1'.
-        session.cookies.set(
-            "Cookie",
-            "body:Language:english:id=-1",
-            domain=host,
-            path="/",
-        )
+        # NOTE: do NOT pass domain= — an explicit domain prevents the
+        # server's Set-Cookie from updating this cookie after login.cgi.
+        session.cookies.set("Cookie", _PRE_LOGIN_COOKIE_VALUE)
         try:
             token = get_rand_token(session, host)
         except requests.RequestException as exc:
@@ -427,25 +421,27 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
 
     redirect_url = urllib.parse.urljoin(base_url(host), redirect_path)
+
+    # Validate login by checking the cookie value.
+    # The root URL "/" on this router always serves the login page content
+    # (same as /index.asp), even when authenticated.  So we MUST NOT use
+    # is_session_expired() on the follow-up response.  Instead we verify
+    # the server's Set-Cookie updated the pre-login cookie value.
+    cookie_val = session.cookies.get("Cookie", "")
+    if cookie_val == _PRE_LOGIN_COOKIE_VALUE:
+        log.error(
+            "Login failed – cookie was not updated by the server. "
+            "The session is still at the pre-login value. "
+            "Cookie jar: %s",
+            dict(session.cookies),
+        )
+        return None
+
     try:
         follow_resp = session.get(
             redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         post_login_url = follow_resp.url
-
-        # FIX: Validate the session by checking the follow-up response.
-        # If the redirect target still shows the login form the session
-        # cookie was not accepted – return None instead of entering a loop.
-        if is_session_expired(follow_resp):
-            log.error(
-                "Session invalid immediately after login – the follow-up "
-                "request to %s returned the login form. "
-                "Cookie jar: %s",
-                redirect_url,
-                list(session.cookies.keys()),
-            )
-            return None
-
         log.debug("Followed JS redirect → %s", post_login_url)
     except requests.RequestException as exc:
         log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)
@@ -1012,11 +1008,10 @@ class Crawler:
         log.info("Username         : %s", self.username)
 
         # Pre-download the login page BEFORE authenticating.
-        # /index.asp is publicly accessible (no auth required), contains ALL
-        # JS/CSS/image references that seed the BFS, and must never be fetched
-        # post-auth (it always returns the login form, which would trigger false
-        # session-expiry detection).  Saving it here and marking it visited
-        # ensures it is available for offline analysis without revisiting it.
+        # "/" and /index.asp serve the same login form content; both must
+        # be saved pre-auth and never fetched post-auth (they always return
+        # the login form, triggering false session-expiry detection).
+        self._save_pre_auth("/")
         self._save_pre_auth(LOGIN_PAGE)
 
         post_login_url = login(self.session, self.host, self.username, self.password)
@@ -1043,14 +1038,13 @@ class Crawler:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # --- Dynamic seeding ---
-        # Seed only from "/" (the authenticated admin frameset).
-        # /index.asp was already handled pre-auth by _save_pre_auth() above.
-        # Everything else is discovered by recursively following links.
-        self._enqueue(self.base + "/")
-        if post_login_url not in (self.base + "/",):
+        # Only enqueue non-auth-page URLs.
+        # "/" and /index.asp are already saved pre-auth above.
+        post_login_path = urllib.parse.urlparse(post_login_url).path.lower()
+        if post_login_path not in _AUTH_PAGE_PATHS:
             self._enqueue(post_login_url)
 
-        log.info("Seeding from / + post-login URL. Dynamic discovery begins.")
+        log.info("Seeding from post-login URL. Dynamic discovery begins.")
 
         # Exhaust the queue with optional tqdm progress bar
         if _TQDM_AVAILABLE:
