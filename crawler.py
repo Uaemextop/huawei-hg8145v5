@@ -340,10 +340,14 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
         # not part of the value.  We specify it via the path= kwarg here so
         # the router receives the correct value: 'body:Language:english:id=-1'.
+        # NOTE: We do NOT set domain= to allow the router's Set-Cookie response
+        # to properly update this cookie value after successful authentication.
+        # IMPORTANT: Clear existing cookies first to prevent duplicate Cookie entries
+        # that cause CookieConflictError when the router sets the authenticated cookie.
+        session.cookies.clear()
         session.cookies.set(
             "Cookie",
             "body:Language:english:id=-1",
-            domain=host,
             path="/",
         )
         try:
@@ -371,6 +375,26 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     except requests.RequestException as exc:
         log.error("Login POST failed: %s", exc)
         return None
+
+    # Debug: Log response headers and cookies from login.cgi
+    log.debug("login.cgi response status: %s", resp.status_code)
+    log.debug("login.cgi Set-Cookie headers: %s", resp.headers.get('Set-Cookie'))
+    log.debug("login.cgi response cookies: %s", dict(resp.cookies))
+
+    # Deduplicate cookies to prevent CookieConflictError
+    # If the router sets a cookie with domain while we have one without domain,
+    # we can end up with duplicates. Keep only the most recent (authenticated) cookie.
+    cookie_list = list(session.cookies)
+    if len(cookie_list) > 1:
+        # Find all cookies named "Cookie"
+        cookie_entries = [c for c in cookie_list if c.name == "Cookie"]
+        if len(cookie_entries) > 1:
+            log.debug("Found %d duplicate 'Cookie' entries, keeping only the last one", len(cookie_entries))
+            # Remove all but the last one (most recent, which should be the authenticated one)
+            for cookie_to_remove in cookie_entries[:-1]:
+                session.cookies.clear(cookie_to_remove.domain, cookie_to_remove.path, cookie_to_remove.name)
+
+    log.debug("Session cookies after login.cgi POST: %s", dict(session.cookies))
 
     # A successful login redirects away from the login form.
     # If the response still contains the login form, credentials were wrong.
@@ -400,12 +424,28 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         )
 
     redirect_url = urllib.parse.urljoin(base_url(host), redirect_path)
+
+    # Log cookies after login.cgi POST to debug session state
+    log.debug("Cookies immediately after login.cgi POST: %s", dict(session.cookies))
+
     try:
         follow_resp = session.get(
             redirect_url, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         post_login_url = follow_resp.url
         log.debug("Followed JS redirect → %s", post_login_url)
+        log.debug("Cookies after following redirect: %s", dict(session.cookies))
+
+        # Verify the redirect didn't send us back to the login page
+        if is_session_expired(follow_resp):
+            log.error(
+                "The redirect to %s returned the login page. "
+                "Session may not have been established. "
+                "Cookie after redirect: %s",
+                redirect_url,
+                dict(session.cookies)
+            )
+            return None
     except requests.RequestException as exc:
         log.debug("Could not follow post-login redirect to %s: %s", redirect_url, exc)
         post_login_url = redirect_url
@@ -441,12 +481,6 @@ def is_session_expired(resp: requests.Response) -> bool:
     if cookie_val.lower() == "default":
         return True
 
-    # A redirect to the specific login-page paths is the most reliable signal.
-    # We only match the path (not substrings of other paths).
-    final_path = urllib.parse.urlparse(resp.url).path.lower()
-    if final_path in ("/index.asp", "/login.asp"):
-        return True
-
     # Non-HTML responses (JS, CSS, images) can legitimately contain login-related
     # identifier strings – skip the body check for them entirely.
     ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -455,7 +489,14 @@ def is_session_expired(resp: requests.Response) -> bool:
 
     # A genuine login form has ALL three markers present at the same time.
     # Using all() prevents a single marker in an HTML snippet from firing.
-    return all(marker in resp.text for marker in _LOGIN_MARKERS)
+    # We check for markers FIRST before checking URL, because the router may serve
+    # the authenticated admin interface at /index.asp after login (not just the login form).
+    has_login_markers = all(marker in resp.text for marker in _LOGIN_MARKERS)
+
+    # Only return True if we actually see the login form.
+    # A redirect to /index.asp or /login.asp with login markers is a genuine expiry.
+    # But a redirect without markers means we're seeing the authenticated admin interface.
+    return has_login_markers
 
 
 # ---------------------------------------------------------------------------
