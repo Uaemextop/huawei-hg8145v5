@@ -4,55 +4,50 @@ Tests for the link extraction module.
 
 import unittest
 
-from huawei_crawler.extraction.links import extract_links
-from huawei_crawler.extraction.css import extract_css_urls
-from huawei_crawler.extraction.javascript import extract_js_paths
-from huawei_crawler.extraction.json_extract import extract_json_paths
+from web_crawler.extraction.links import extract_links
+from web_crawler.extraction.css import extract_css_urls
+from web_crawler.extraction.javascript import extract_js_paths
+from web_crawler.extraction.json_extract import extract_json_paths
 
 
-BASE = "http://192.168.100.1"
-PAGE = "http://192.168.100.1/index.asp"
+BASE = "https://example.com"
+PAGE = "https://example.com/index.html"
 
 
 class TestCssExtraction(unittest.TestCase):
     def test_url_function(self):
         css = "background: url('/images/bg.png');"
         result = extract_css_urls(css, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/images/bg.png", result)
+        self.assertIn("https://example.com/images/bg.png", result)
 
     def test_import(self):
-        css = '@import "/Cuscss/english/frame.css";'
+        css = '@import "/css/reset.css";'
         result = extract_css_urls(css, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/Cuscss/english/frame.css", result)
+        self.assertIn("https://example.com/css/reset.css", result)
 
 
 class TestJsExtraction(unittest.TestCase):
     def test_window_location(self):
-        js = "window.location.href = '/html/ssmp/wlan.asp';"
+        js = "window.location.href = '/about.html';"
         result = extract_js_paths(js, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/html/ssmp/wlan.asp", result)
+        self.assertIn("https://example.com/about.html", result)
 
-    def test_set_action(self):
-        js = "Form.setAction('/login.cgi');"
+    def test_fetch_url(self):
+        js = "fetch('/api/data.json');"
         result = extract_js_paths(js, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/login.cgi", result)
+        self.assertIn("https://example.com/api/data.json", result)
 
     def test_ajax_url(self):
-        js = "$.ajax({ url: '/asp/GetRandCount.asp', type: 'POST' });"
+        js = "$.ajax({ url: '/api/users', type: 'GET' });"
         result = extract_js_paths(js, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/asp/GetRandCount.asp", result)
-
-    def test_request_file(self):
-        js = "Form.setAction('logout.cgi?RequestFile=html/logout.html');"
-        result = extract_js_paths(js, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/html/logout.html", result)
+        self.assertIn("https://example.com/api/users", result)
 
 
 class TestJsonExtraction(unittest.TestCase):
     def test_json_path_value(self):
-        data = '{"page": "/html/ssmp/home.asp"}'
+        data = '{"page": "/blog/post.html"}'
         result = extract_json_paths(data, PAGE, BASE)
-        self.assertIn("http://192.168.100.1/html/ssmp/home.asp", result)
+        self.assertIn("https://example.com/blog/post.html", result)
 
     def test_invalid_json(self):
         result = extract_json_paths("not json", PAGE, BASE)
@@ -61,28 +56,38 @@ class TestJsonExtraction(unittest.TestCase):
 
 class TestExtractLinks(unittest.TestCase):
     def test_html_extraction(self):
-        html = '<a href="/html/ssmp/wlan.asp">WLAN</a>'
+        html = '<a href="/about.html">About</a>'
         result = extract_links(html, "text/html", PAGE, BASE)
-        self.assertIn("http://192.168.100.1/html/ssmp/wlan.asp", result)
+        self.assertIn("https://example.com/about.html", result)
 
     def test_css_extraction(self):
         css = "body { background: url('/images/bg.png'); }"
         result = extract_links(css, "text/css", PAGE, BASE)
-        self.assertIn("http://192.168.100.1/images/bg.png", result)
+        self.assertIn("https://example.com/images/bg.png", result)
 
     def test_js_extraction(self):
-        js = "var page = '/html/ssmp/home.asp';"
+        js = "var page = '/blog/index.html';"
         result = extract_links(js, "application/javascript", PAGE, BASE)
-        self.assertIn("http://192.168.100.1/html/ssmp/home.asp", result)
+        self.assertIn("https://example.com/blog/index.html", result)
 
-    def test_asp_treated_as_html(self):
-        """ASP responses should be treated as HTML regardless of Content-Type."""
-        asp_content = '<script>window.location = "/admin.asp";</script>'
-        result = extract_links(
-            asp_content, "text/html",
-            "http://192.168.100.1/page.asp", BASE
-        )
-        self.assertIn("http://192.168.100.1/admin.asp", result)
+    def test_html_with_multiple_links(self):
+        html = """
+        <html>
+        <head>
+            <link href="/css/style.css" rel="stylesheet">
+            <script src="/js/main.js"></script>
+        </head>
+        <body>
+            <a href="/about.html">About</a>
+            <img src="/images/logo.png">
+        </body>
+        </html>
+        """
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/css/style.css", result)
+        self.assertIn("https://example.com/js/main.js", result)
+        self.assertIn("https://example.com/about.html", result)
+        self.assertIn("https://example.com/images/logo.png", result)
 
 
 if __name__ == "__main__":

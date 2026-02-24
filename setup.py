@@ -1,11 +1,11 @@
-"""Package setup for huawei_crawler."""
+"""Package setup for web_crawler."""
 
 from setuptools import setup, find_packages
 
 setup(
-    name="huawei-crawler",
-    version="1.0.0",
-    description="Web crawler for the Huawei HG8145V5 router admin interface",
+    name="web-crawler",
+    version="2.0.0",
+    description="Generic web crawler that downloads all reachable pages and assets from a website",
     packages=find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.10",
     install_requires=[
@@ -22,7 +22,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "huawei-crawler=huawei_crawler.cli:main",
+            "web-crawler=web_crawler.cli:main",
         ],
     },
 )

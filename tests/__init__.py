@@ -1,1 +1,1 @@
-"""Tests for the huawei_crawler package."""
+"""Tests for the web_crawler package."""
