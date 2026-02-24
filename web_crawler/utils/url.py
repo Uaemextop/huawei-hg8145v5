@@ -9,10 +9,10 @@ from pathlib import Path
 
 def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     """
-    Convert *raw* to an absolute URL on the same router host.
+    Convert *raw* to an absolute URL on the same host.
 
     Strips cache-buster query strings (pure numeric / hex tokens) but keeps
-    meaningful query strings so CGI endpoints are not broken.
+    meaningful query strings so dynamic endpoints are not broken.
 
     Returns ``None`` for external, ``data:``, ``javascript:``, ``mailto:`` URLs.
     """
