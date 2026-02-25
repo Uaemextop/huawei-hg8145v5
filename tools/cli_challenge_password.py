@@ -3,6 +3,8 @@
 Huawei HG8145V5 — CLI/Telnet Challenge Password Generator
 ===========================================================
 
+Standalone tool — no dependencies on other project scripts.
+
 Generates all possible passwords for the Telnet/SSH root login
 and the CLI ``su`` (superuser) challenge.
 
@@ -20,40 +22,44 @@ This script generates the correct password to enter.
 Algorithms (reverse-engineered from firmware V500R022C00SPC340B019)
 -------------------------------------------------------------------
 
-**Feature flags** control which algorithm is used (from
-``etc/wap/ft/smart/base_smart_ft.cfg``):
+1. **FT_SSMP_PWD_CHALLENGE = 1** — ``SHA-256(YYYYMMDD)[:16]``
+2. **HW_SSMP_FEATURE_PASSWDMODE_MD5 = 1** — ``MD5(YYYYMMDD)``
+3. **Both disabled** — static password (admin, adminHW, SN, or empty)
+4. **FT_SSMP_CLI_SU_CHALLENGE = 1** — AES-CBC challenge (disabled by
+   default; requires key from XML DB parameter 0x0B)
 
-1. **FT_SSMP_PWD_CHALLENGE = 1** (MEGACABLE and others)
+Firmware findings
+-----------------
 
-   Password = ``SHA-256(YYYYMMDD)`` truncated to 16 hex chars.
+* AES-128-CBC key for ``$2`` password encryption::
 
-   Source: ``libhw_smp_web_base.so!HW_WEB_GetSHAByTime`` at 0x12c44.
-   The function converts the date to a string, computes SHA-256,
-   and returns the first 64 hex characters.  The verification
-   function (``WEB_CHALLENGE_CheckVerifyCodeResult``) compares 17
-   bytes (16 hex chars + null terminator).
+    Df7!ui%s9(lmV1L8
 
-2. **FT_SSMP_CLI_SU_CHALLENGE = 1** (disabled by default)
+  Source: ``/etc/wap/spec/spec_default.cfg`` →
+  ``SPEC_OS_AES_CBC_APP_STR``
 
-   The ``su`` command shows ``Challenge:ENCRYPTED_HEX``.
-   This is AES-CBC encrypted with a key stored in the router's
-   XML config database (parameter 0x0B).  If you have the key
-   (e.g., extracted via TR-069), this script can decrypt it.
+* ``$2`` encoding (``HW_AES_AscVisible``/``HW_AES_AscUnvisible``)::
 
-   Source: ``bin/clid!CLI_AES_GetAuthInfo``, ``CLI_AES_Encrypt``
+    encode: byte + 0x21; if result == '?' (0x3F) → '~' (0x7E)
+    decode: if char == '~' → 0x1E; else → char - 0x21
 
-3. **Both disabled** (factory default for many ISPs)
+* PassMode=3 → PBKDF2-SHA256 with per-user salt (web login)
+* EncryptMode=2 → ``$2`` AES-CBC (config file at rest)
 
-   The password is the standard root password stored in the database:
-   ``admin``, ``adminHW``, the device serial number (SN), or empty.
+Users discovered in config backup
+----------------------------------
 
-   Source: ``bin/clid!HW_CLI_VerifySuPassword`` → ``HW_OS_StrCmp``
+* **Mega_gpon** (admin, UserLevel=0) — password: ``admintelecom``
+* **user** (UserLevel=1)
+* **Meg4_root** (CLI root, EncryptMode=2)
+* **AdminGPON** (TR-069 ACS username)
+* **ONTconnect** (TR-069 connection request)
 
 Usage::
 
     python cli_challenge_password.py
     python cli_challenge_password.py --date 19810101
-    python cli_challenge_password.py --date 19810101 --sn HWTC12345678
+    python cli_challenge_password.py --date 19810101 --sn HWTC47020CB1
 """
 
 from __future__ import annotations
@@ -63,6 +69,22 @@ import hmac
 import sys
 from datetime import date, datetime
 
+# ── Firmware constants ─────────────────────────────────────────────────
+
+# AES-128-CBC key for $2 password encryption in hw_ctree.xml
+# Source: /etc/wap/spec/spec_default.cfg -> SPEC_OS_AES_CBC_APP_STR
+AES_KEY = "Df7!ui%s9(lmV1L8"
+
+# User's default SN
+DEFAULT_SN = "4857544347020CB1"          # hex form
+DEFAULT_SN_ASCII = "HWTC47020CB1"        # printable form
+
+# MEGACABLE admin credentials (plaintext)
+MEGACABLE_ADMIN_USER = "Mega_gpon"
+MEGACABLE_ADMIN_PASSWORD = "admintelecom"
+
+# CLI root user
+CLI_ROOT_USER = "Meg4_root"
 
 # Known factory/default dates the router shows when RTC has no NTP sync
 FACTORY_DATES = [
@@ -74,6 +96,7 @@ FACTORY_DATES = [
 
 # Known default root passwords (from firmware strings in bin/clid)
 DEFAULT_PASSWORDS = [
+    (MEGACABLE_ADMIN_PASSWORD, "MEGACABLE admin (Mega_gpon)"),
     ("admin",    "Default for most ISP modes"),
     ("adminHW",  "Huawei engineering mode"),
     ("root",     "Some customizations"),
@@ -82,43 +105,35 @@ DEFAULT_PASSWORDS = [
 ]
 
 
+# ── Challenge algorithms ───────────────────────────────────────────────
+
 def sha256_password(date_str: str, length: int = 16) -> str:
     """SHA-256 challenge password.
 
-    From HW_WEB_GetSHAByTime in libhw_smp_web_base.so:
+    From ``HW_WEB_GetSHAByTime`` in ``libhw_smp_web_base.so``:
       SHA256(YYYYMMDD) → first ``length`` hex characters
     """
     return hashlib.sha256(date_str.encode("ascii")).hexdigest()[:length]
 
 
 def md5_password(date_str: str) -> str:
-    """MD5 challenge password (HW_SSMP_FEATURE_PASSWDMODE_MD5)."""
+    """MD5 challenge password (``HW_SSMP_FEATURE_PASSWDMODE_MD5``)."""
     return hashlib.md5(date_str.encode("ascii")).hexdigest()
 
 
 def sha256_with_sn(date_str: str, serial_number: str) -> str:
-    """SHA-256 of date + serial number.
-
-    Some firmware variants derive the challenge from the combination
-    of the displayed date and the device serial number.
-    """
+    """SHA-256 of date + serial number (ISP customization)."""
     combined = date_str + serial_number
     return hashlib.sha256(combined.encode("ascii")).hexdigest()[:16]
 
 
 def sha256_sn_only(serial_number: str) -> str:
-    """SHA-256 of the serial number alone.
-
-    On some ISP builds the root password is derived purely from the SN.
-    """
+    """SHA-256 of the serial number alone."""
     return hashlib.sha256(serial_number.encode("ascii")).hexdigest()[:16]
 
 
 def hmac_sha256_password(date_str: str, key: str) -> str:
-    """HMAC-SHA-256 (when HW_SSMP_FEATURE_CLI_SHA256 is enabled).
-
-    Used with a device-specific key stored in the config DB.
-    """
+    """HMAC-SHA-256 (``HW_SSMP_FEATURE_CLI_SHA256``)."""
     return hmac.new(
         key.encode("ascii"),
         date_str.encode("ascii"),
@@ -137,6 +152,44 @@ def validate_date(date_str: str) -> bool:
         return False
 
 
+# ── $2 password decoder ───────────────────────────────────────────────
+
+def asc_unvisible(encoded: str) -> bytes:
+    """Decode Huawei ``HW_AES_AscUnvisible`` printable encoding.
+
+    From ``libhw_ssp_basic.so`` at 0x92084::
+
+        if char == '~' (0x7E) → byte = 0x1E
+        else                  → byte = char - 0x21
+    """
+    result = bytearray()
+    for ch in encoded:
+        if ch == "~":
+            result.append(0x1E)
+        else:
+            result.append(ord(ch) - 0x21)
+    return bytes(result)
+
+
+def asc_visible(raw: bytes) -> str:
+    """Encode binary to Huawei ``HW_AES_AscVisible`` printable format.
+
+    From ``libhw_ssp_basic.so`` at 0x92170::
+
+        encoded = (byte + 0x21) & 0xFF
+        if encoded == '?' (0x3F) → '~' (0x7E)
+    """
+    result = []
+    for b in raw:
+        ch = (b + 0x21) & 0xFF
+        if ch == 0x3F:  # '?'
+            ch = 0x7E   # '~'
+        result.append(chr(ch))
+    return "".join(result)
+
+
+# ── Password generation ───────────────────────────────────────────────
+
 def generate_all_passwords(date_str: str,
                            serial_number: str | None = None,
                            aes_key: str | None = None) -> list[dict]:
@@ -144,7 +197,6 @@ def generate_all_passwords(date_str: str,
     results = []
 
     # --- SHA-256 based (FT_SSMP_PWD_CHALLENGE) ---
-
     sha_full = hashlib.sha256(date_str.encode("ascii")).hexdigest()
     results.append({
         "password": sha_full[:16],
@@ -160,7 +212,6 @@ def generate_all_passwords(date_str: str,
     })
 
     # --- MD5 based ---
-
     md5_full = hashlib.md5(date_str.encode("ascii")).hexdigest()
     results.append({
         "password": md5_full[:16],
@@ -176,7 +227,6 @@ def generate_all_passwords(date_str: str,
     })
 
     # --- Default static passwords ---
-
     for pwd, desc in DEFAULT_PASSWORDS:
         results.append({
             "password": pwd if pwd else "(empty — just press Enter)",
@@ -186,7 +236,6 @@ def generate_all_passwords(date_str: str,
         })
 
     # --- Serial number based ---
-
     if serial_number:
         results.append({
             "password": serial_number,
@@ -206,7 +255,6 @@ def generate_all_passwords(date_str: str,
             "feature": "ISP customization",
             "priority": 8,
         })
-        # SN last 8 characters (common on some Huawei models)
         if len(serial_number) >= 8:
             results.append({
                 "password": serial_number[-8:],
@@ -216,7 +264,6 @@ def generate_all_passwords(date_str: str,
             })
 
     # --- HMAC (if AES key provided) ---
-
     if aes_key:
         results.append({
             "password": hmac_sha256_password(date_str, aes_key),
@@ -226,7 +273,6 @@ def generate_all_passwords(date_str: str,
         })
 
     # --- SHA-256 with known suffixes ---
-
     for suffix in ("HuaweiHomeGateway", "HGW", "root", "admin"):
         combined = date_str + suffix
         h = hashlib.sha256(combined.encode("ascii")).hexdigest()[:16]
@@ -240,8 +286,10 @@ def generate_all_passwords(date_str: str,
     return results
 
 
+# ── Display modes ──────────────────────────────────────────────────────
+
 def interactive_mode():
-    """Run the script in interactive mode with user prompts."""
+    """Interactive mode with user prompts."""
     print()
     print("=" * 65)
     print("  Huawei HG8145V5 — CLI/Telnet Root Password Generator")
@@ -255,38 +303,48 @@ def interactive_mode():
     print()
     print("  This tool generates all possible passwords to try.")
     print()
+    print(f"  AES key (firmware)   : {AES_KEY}")
+    print(f"  Admin user           : {MEGACABLE_ADMIN_USER}")
+    print(f"  Admin password       : {MEGACABLE_ADMIN_PASSWORD}")
+    print()
 
-    # Step 1: Ask for the date shown by the router
+    # Step 1: Date
     print("-" * 65)
     date_str = input("  Enter the date shown by the router (YYYYMMDD)\n"
                      "  [press Enter for '19810101']: ").strip()
 
     if not date_str:
         date_str = "19810101"
-        print(f"  → Using factory default: {date_str}")
+        print(f"  -> Using factory default: {date_str}")
 
     if not validate_date(date_str):
         print(f"\n  [!] Invalid date: '{date_str}'")
         print("  [!] Expected format: YYYYMMDD (e.g., 19810101)")
         sys.exit(1)
 
-    # Step 2: Ask for serial number (optional)
+    # Step 2: Serial number
     print()
     print("-" * 65)
-    serial_number = input("  Enter the device serial number (SN) if known\n"
-                          "  [press Enter to skip]: ").strip() or None
+    serial_number = input(
+        f"  Enter the device serial number (SN)\n"
+        f"  [press Enter for '{DEFAULT_SN_ASCII}']: "
+    ).strip()
 
-    if serial_number:
-        print(f"  → SN: {serial_number}")
+    if not serial_number:
+        serial_number = DEFAULT_SN_ASCII
+    print(f"  -> SN: {serial_number}")
 
-    # Step 3: Ask for AES key (optional — for advanced users)
+    # Step 3: AES key (optional)
     print()
     print("-" * 65)
-    aes_key = input("  Enter the AES challenge key if known\n"
-                    "  [press Enter to skip — most users skip this]: ").strip() or None
+    aes_key = input(
+        f"  Enter the AES challenge key\n"
+        f"  [press Enter for firmware default '{AES_KEY}']: "
+    ).strip()
 
-    if aes_key:
-        print(f"  → AES key provided")
+    if not aes_key:
+        aes_key = AES_KEY
+    print(f"  -> AES key: {aes_key}")
 
     # Generate all passwords
     print()
@@ -297,23 +355,22 @@ def interactive_mode():
 
     passwords = generate_all_passwords(date_str, serial_number, aes_key)
 
-    # Group by priority
     current_priority = None
     for i, p in enumerate(passwords, 1):
         if p["priority"] != current_priority:
             current_priority = p["priority"]
             if current_priority <= 2:
-                print("  ── SHA-256 Challenge (most likely for MEGACABLE) ──")
+                print("  -- SHA-256 Challenge (most likely for MEGACABLE) --")
             elif current_priority <= 4:
-                print("  ── MD5 Challenge (older firmwares) ──")
+                print("  -- MD5 Challenge (older firmwares) --")
             elif current_priority <= 5:
-                print("  ── Default Passwords (no challenge mode) ──")
+                print("  -- Default Passwords (no challenge mode) --")
             elif current_priority <= 9:
-                print("  ── Serial Number Based ──")
+                print("  -- Serial Number Based --")
             elif current_priority <= 10:
-                print("  ── HMAC (with AES key) ──")
+                print("  -- HMAC (with AES key) --")
             else:
-                print("  ── ISP Customization Variants ──")
+                print("  -- ISP Customization Variants --")
             print()
 
         pwd_display = p["password"]
@@ -325,7 +382,7 @@ def interactive_mode():
         print(f"      When:   {p['feature']}")
         print()
 
-    # Print quick-copy summary
+    # Quick-copy summary
     print("=" * 65)
     print("  QUICK TRY — Copy & paste these passwords (most likely first):")
     print("=" * 65)
@@ -342,10 +399,12 @@ def interactive_mode():
     print()
 
 
-def cli_mode(date_str: str, serial_number: str | None, aes_key: str | None):
+def cli_mode(date_str: str, serial_number: str | None,
+             aes_key: str | None):
     """Non-interactive mode — output passwords directly."""
     if not validate_date(date_str):
-        print(f"Error: '{date_str}' is not a valid YYYYMMDD date.", file=sys.stderr)
+        print(f"Error: '{date_str}' is not a valid YYYYMMDD date.",
+              file=sys.stderr)
         sys.exit(1)
 
     passwords = generate_all_passwords(date_str, serial_number, aes_key)
@@ -375,17 +434,19 @@ def main():
     )
     parser.add_argument(
         "--sn", "-s",
-        help="Device serial number (optional — used for SN-based passwords)",
+        help=f"Device serial number (default: {DEFAULT_SN_ASCII})",
     )
     parser.add_argument(
         "--key", "-k",
-        help="AES challenge key (optional — for FT_SSMP_CLI_SU_CHALLENGE)",
+        help=f"AES challenge key (default: {AES_KEY})",
     )
 
     args = parser.parse_args()
 
     if args.date:
-        cli_mode(args.date, args.sn, args.key)
+        cli_mode(args.date,
+                 args.sn or DEFAULT_SN_ASCII,
+                 args.key or AES_KEY)
     else:
         interactive_mode()
 

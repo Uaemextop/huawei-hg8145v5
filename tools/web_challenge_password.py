@@ -3,6 +3,8 @@
 Huawei HG8145V5 — Web Challenge Password Generator
 ====================================================
 
+Standalone tool — no dependencies on other project scripts.
+
 Generates the verification code required for web login when the router
 has ``FT_SSMP_PWD_CHALLENGE`` enabled (MEGACABLE2 and other ISP modes).
 
@@ -22,14 +24,16 @@ Source: ``libhw_smp_web_base.so!HW_WEB_GetSHAByTime`` at offset 0x12c44
 
   **verification_code = SHA256(YYYYMMDD)[:16]**
 
-How to use
-----------
+Firmware findings
+-----------------
 
-1. Open the router login page (http://192.168.100.1)
-2. View the page source or look at the displayed challenge code
-3. Find the ``randcode`` value (e.g., ``20260221``)
-4. Run this script and enter that date
-5. Enter the generated verification code in the login form
+* AES-128-CBC key for $2 password encryption (from
+  ``/etc/wap/spec/spec_default.cfg`` parameter
+  ``SPEC_OS_AES_CBC_APP_STR``): ``Df7!ui%s9(lmV1L8``
+* Password storage uses PassMode=3 (PBKDF2-SHA256 with per-user salt)
+* The admin login password for MEGACABLE (Mega_gpon) is entered in
+  the web form, base64-encoded, and sent to the router.  The
+  verification code is a **separate** field.
 
 Usage::
 
@@ -45,33 +49,55 @@ import re
 import sys
 from datetime import date, datetime
 
+# ── Firmware constants ─────────────────────────────────────────────────
+# Discovered via reverse-engineering of V500R022C00SPC340B019 squashfs
 
-def sha256_web_challenge(date_str: str) -> str:
-    """Compute the web challenge verification code.
+# AES-128-CBC key used for $2 password encryption in hw_ctree.xml
+# Source: /etc/wap/spec/spec_default.cfg -> SPEC_OS_AES_CBC_APP_STR
+AES_KEY = "Df7!ui%s9(lmV1L8"
 
-    This is the primary algorithm from HW_WEB_GetSHAByTime:
-      SHA256(YYYYMMDD) → first 16 hex characters
+# Default serial number (user-provided)
+DEFAULT_SN = "4857544347020CB1"  # HWTC47020CB1
+
+# MEGACABLE ISP profile
+MEGACABLE_ADMIN_USER = "Mega_gpon"
+MEGACABLE_ADMIN_PASSWORD = "admintelecom"
+
+# Feature flags from /etc/wap/ft/smart/base_smart_ft.cfg
+# FT_SSMP_PWD_CHALLENGE = 0 (default off; ISP modes enable it)
+# FT_SSMP_CLI_SU_CHALLENGE = 0 (default off)
+
+# Known factory dates (router shows these when RTC has no NTP sync)
+FACTORY_DATES = [
+    ("19810101", "Factory default — no NTP sync (most common)"),
+    ("19700101", "Unix epoch — some board variants"),
+    ("20000101", "Y2K default — older firmwares"),
+    ("20240101", "Firmware build year — V500R022"),
+]
+
+
+# ── Challenge algorithms ───────────────────────────────────────────────
+
+def sha256_challenge(date_str: str) -> str:
+    """Primary web challenge: SHA-256(YYYYMMDD) first 16 hex chars.
+
+    From ``HW_WEB_GetSHAByTime`` in ``libhw_smp_web_base.so``.
     """
     return hashlib.sha256(date_str.encode("ascii")).hexdigest()[:16]
 
 
 def sha256_full(date_str: str) -> str:
-    """Full SHA-256 digest (64 hex chars) — fallback if 16-char truncation
-    is not accepted by some firmware versions."""
+    """Full SHA-256 digest — fallback if 16-char truncation is rejected."""
     return hashlib.sha256(date_str.encode("ascii")).hexdigest()
 
 
-def md5_web_challenge(date_str: str) -> str:
-    """MD5 variant — used when HW_SSMP_FEATURE_PASSWDMODE_MD5 is enabled.
-
-    Some older firmware versions or ISP customizations use MD5 instead
-    of SHA-256.
-    """
+def md5_challenge(date_str: str) -> str:
+    """MD5 variant — ``HW_SSMP_FEATURE_PASSWDMODE_MD5`` path."""
     return hashlib.md5(date_str.encode("ascii")).hexdigest()
 
 
 def validate_date(date_str: str) -> bool:
-    """Validate that the input is a valid YYYYMMDD date string."""
+    """Validate YYYYMMDD format."""
     if not date_str.isdigit() or len(date_str) != 8:
         return False
     try:
@@ -81,11 +107,10 @@ def validate_date(date_str: str) -> bool:
         return False
 
 
-def fetch_randcode_from_router(ip: str) -> dict:
-    """Fetch the randcode and challenge settings from a live router.
+# ── Router interaction (optional) ──────────────────────────────────────
 
-    Returns a dict with: randcode, useChallengeCode, CfgMode
-    """
+def fetch_randcode_from_router(ip: str) -> dict:
+    """Fetch randcode and challenge settings from a live router."""
     result = {"randcode": None, "useChallengeCode": None, "CfgMode": None}
     try:
         import urllib3
@@ -101,17 +126,12 @@ def fetch_randcode_from_router(ip: str) -> dict:
         print(f"[*] Connecting to {url} ...")
         resp = requests.get(url, timeout=10, verify=False)
 
-        m = re.search(r"var\s+randcode\s*=\s*'([^']*)'", resp.text)
-        if m:
-            result["randcode"] = m.group(1)
-
-        m = re.search(r"var\s+useChallengeCode\s*=\s*'([^']*)'", resp.text)
-        if m:
-            result["useChallengeCode"] = m.group(1)
-
-        m = re.search(r"var\s+CfgMode\s*=\s*'([^']*)'", resp.text)
-        if m:
-            result["CfgMode"] = m.group(1)
+        for var, key in [("randcode", "randcode"),
+                         ("useChallengeCode", "useChallengeCode"),
+                         ("CfgMode", "CfgMode")]:
+            m = re.search(rf"var\s+{var}\s*=\s*'([^']*)'", resp.text)
+            if m:
+                result[key] = m.group(1)
 
     except Exception as e:
         print(f"[!] Connection failed: {e}")
@@ -119,62 +139,88 @@ def fetch_randcode_from_router(ip: str) -> dict:
     return result
 
 
+# ── Output modes ───────────────────────────────────────────────────────
+
+def generate_all_codes(date_str: str) -> list[dict]:
+    """Generate all possible verification codes for a date."""
+    sha = sha256_full(date_str)
+    md5 = md5_challenge(date_str)
+
+    return [
+        {"code": sha[:16], "method": "SHA-256(date)[:16]",
+         "note": "Primary — HW_WEB_GetSHAByTime", "priority": 1},
+        {"code": sha, "method": "SHA-256(date) full",
+         "note": "Some firmware versions accept full digest", "priority": 2},
+        {"code": md5[:16], "method": "MD5(date)[:16]",
+         "note": "HW_SSMP_FEATURE_PASSWDMODE_MD5", "priority": 3},
+        {"code": md5, "method": "MD5(date) full",
+         "note": "Older firmwares", "priority": 4},
+    ]
+
+
 def interactive_mode():
-    """Run the script in interactive mode, prompting the user for input."""
+    """Interactive mode — prompts for input."""
+    print()
     print("=" * 65)
     print("  Huawei HG8145V5 — Web Challenge Password Generator")
-    print("  Algorithm: SHA-256(YYYYMMDD) — from firmware RE")
+    print("  Firmware: V500R022 (reverse-engineered)")
     print("=" * 65)
     print()
-    print("  The router login page shows a 'randcode' (date in YYYYMMDD")
-    print("  format). This script generates the verification code needed")
-    print("  to complete the login.")
+    print("  The router login page shows a 'randcode' (date YYYYMMDD).")
+    print("  This script generates the verification code needed to log in.")
+    print()
+    print(f"  AES key (from firmware): {AES_KEY}")
+    print(f"  Default SN            : {DEFAULT_SN}")
+    print(f"  Admin user            : {MEGACABLE_ADMIN_USER}")
+    print(f"  Admin password        : {MEGACABLE_ADMIN_PASSWORD}")
     print()
 
     while True:
         print("-" * 65)
-        date_str = input("  Enter the randcode/date (YYYYMMDD) [or 'q' to quit]: ").strip()
+        date_str = input(
+            "  Enter the randcode/date (YYYYMMDD) [or 'q' to quit]: "
+        ).strip()
 
         if date_str.lower() in ("q", "quit", "exit"):
             print("  Bye!")
             break
 
         if not date_str:
-            # Use today's date as default
             date_str = date.today().strftime("%Y%m%d")
             print(f"  (Using today's date: {date_str})")
 
         if not validate_date(date_str):
             print(f"  [!] Invalid date format: '{date_str}'")
-            print("  [!] Expected format: YYYYMMDD (e.g., 20260221, 19810101)")
+            print("  [!] Expected YYYYMMDD (e.g., 20260221, 19810101)")
             continue
 
-        # Generate all challenge codes
-        sha256_16 = sha256_web_challenge(date_str)
-        sha256_64 = sha256_full(date_str)
-        md5_32 = md5_web_challenge(date_str)
+        codes = generate_all_codes(date_str)
 
         print()
         print(f"  Date (randcode):  {date_str}")
         print()
         print("  ┌─────────────────────────────────────────────────────────┐")
-        print(f"  │  VERIFICATION CODE:  {sha256_16}                  │")
+        print(f"  │  VERIFICATION CODE:  {codes[0]['code']}                  │")
         print("  └─────────────────────────────────────────────────────────┘")
         print()
         print("  Copy the code above and paste it into the router's")
         print("  verification code field on the login page.")
         print()
-        print("  Alternative codes (if the primary one is not accepted):")
-        print(f"    SHA-256 full : {sha256_64}")
-        print(f"    MD5          : {md5_32}")
-        print(f"    SHA-256 8chr : {sha256_16[:8]}")
+
+        print("  Alternative codes (if primary is not accepted):")
+        for c in codes[1:]:
+            label = c["method"]
+            val = c["code"]
+            if len(val) > 40:
+                val = val[:37] + "..."
+            print(f"    {label:<25} {val}")
         print()
 
 
 def auto_mode(ip: str):
-    """Automatically fetch the randcode from the router and generate the code."""
+    """Fetch randcode from router and generate verification code."""
     print("=" * 65)
-    print("  Huawei HG8145V5 — Web Challenge Password Generator (Auto)")
+    print("  Huawei HG8145V5 — Web Challenge (Auto)")
     print("=" * 65)
     print()
 
@@ -186,7 +232,7 @@ def auto_mode(ip: str):
         enabled = info["useChallengeCode"] == "1"
         print(f"  [*] Challenge enabled : {'Yes' if enabled else 'No'}")
         if not enabled:
-            print("  [!] Challenge code is NOT enabled on this router.")
+            print("  [!] Challenge code is NOT enabled.")
             print("  [!] You can log in with just username + password.")
             return
 
@@ -201,37 +247,29 @@ def auto_mode(ip: str):
 
     if not validate_date(randcode):
         print(f"  [!] randcode '{randcode}' is not a valid date.")
-        print("  [!] The router may not have FT_SSMP_PWD_CHALLENGE enabled.")
         return
 
-    sha256_16 = sha256_web_challenge(randcode)
-    sha256_64 = sha256_full(randcode)
+    codes = generate_all_codes(randcode)
 
     print("  ┌─────────────────────────────────────────────────────────┐")
-    print(f"  │  VERIFICATION CODE:  {sha256_16}                  │")
+    print(f"  │  VERIFICATION CODE:  {codes[0]['code']}                  │")
     print("  └─────────────────────────────────────────────────────────┘")
     print()
-    print("  Copy the code above and paste it into the router's")
-    print("  verification code field on the login page.")
-    print()
-    print(f"  Full SHA-256: {sha256_64}")
+    print(f"  Full SHA-256: {codes[1]['code']}")
     print()
 
 
 def cli_mode(date_str: str):
-    """Generate the code for a date given on the command line."""
+    """Non-interactive — output codes for a date."""
     if not validate_date(date_str):
-        print(f"Error: '{date_str}' is not a valid YYYYMMDD date.", file=sys.stderr)
+        print(f"Error: '{date_str}' is not a valid YYYYMMDD date.",
+              file=sys.stderr)
         sys.exit(1)
 
-    sha256_16 = sha256_web_challenge(date_str)
-    sha256_64 = sha256_full(date_str)
-    md5_32 = md5_web_challenge(date_str)
-
+    codes = generate_all_codes(date_str)
     print(f"Date:               {date_str}")
-    print(f"Verification code:  {sha256_16}")
-    print(f"SHA-256 (full):     {sha256_64}")
-    print(f"MD5:                {md5_32}")
+    for c in codes:
+        print(f"{c['method']:<25} {c['code']}")
 
 
 def main():
@@ -243,11 +281,10 @@ def main():
     )
     parser.add_argument(
         "--date", "-d",
-        help="Date in YYYYMMDD format (shown as randcode on the login page)",
+        help="Date in YYYYMMDD format (randcode from the login page)",
     )
     parser.add_argument(
-        "--auto", "-a",
-        metavar="IP",
+        "--auto", "-a", metavar="IP",
         help="Auto-fetch randcode from a live router (e.g., 192.168.100.1)",
     )
 

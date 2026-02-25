@@ -566,152 +566,6 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Tests for tools/challenge_generator.py
-# ---------------------------------------------------------------------------
-
-def _load_challenge_mod():
-    """Helper to import challenge_generator module."""
-    spec = importlib.util.spec_from_file_location(
-        "challenge_generator",
-        os.path.join(os.path.dirname(__file__), "..", "tools", "challenge_generator.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-class TestChallengeGeneratorImports(unittest.TestCase):
-    """Test that challenge_generator module can be imported."""
-
-    def test_import_module(self):
-        mod = _load_challenge_mod()
-        self.assertTrue(hasattr(mod, "sha256_challenge"))
-        self.assertTrue(hasattr(mod, "md5_challenge"))
-        self.assertTrue(hasattr(mod, "generate_all_challenges"))
-        self.assertTrue(hasattr(mod, "format_date"))
-
-
-class TestSHA256Challenge(unittest.TestCase):
-    """Test the primary SHA-256 challenge algorithm."""
-
-    def _get_mod(self):
-        return _load_challenge_mod()
-
-    def test_sha256_19810101(self):
-        mod = self._get_mod()
-        result = mod.sha256_challenge("19810101")
-        self.assertEqual(
-            result,
-            "364ce967beff355bea79d2f81213ffa5fd1f51760c7d9c7714b1b6066ebfd1e8",
-        )
-
-    def test_sha256_20260221(self):
-        mod = self._get_mod()
-        result = mod.sha256_challenge("20260221")
-        self.assertEqual(
-            result,
-            "96eb2f1c1ff60cc50c5101a48669c76306e5a732ef34fc7aae6616ae424cd534",
-        )
-
-    def test_sha256_truncated_16(self):
-        mod = self._get_mod()
-        result = mod.sha256_challenge("19810101", length=16)
-        self.assertEqual(result, "364ce967beff355b")
-
-    def test_sha256_truncated_8(self):
-        mod = self._get_mod()
-        result = mod.sha256_challenge("19810101", length=8)
-        self.assertEqual(result, "364ce967")
-
-
-class TestMD5Challenge(unittest.TestCase):
-    """Test the MD5 challenge variant."""
-
-    def _get_mod(self):
-        return _load_challenge_mod()
-
-    def test_md5_19810101(self):
-        mod = self._get_mod()
-        result = mod.md5_challenge("19810101")
-        self.assertEqual(result, "794d89deb8f6ff87c4a019ee65b15576")
-
-
-class TestDateUtils(unittest.TestCase):
-    """Test date utility functions."""
-
-    def _get_mod(self):
-        return _load_challenge_mod()
-
-    def test_parse_date_valid(self):
-        mod = self._get_mod()
-        from datetime import date
-        result = mod.parse_date("19810101")
-        self.assertEqual(result, date(1981, 1, 1))
-
-    def test_parse_date_invalid(self):
-        mod = self._get_mod()
-        result = mod.parse_date("invalid")
-        self.assertIsNone(result)
-
-    def test_format_date(self):
-        mod = self._get_mod()
-        from datetime import date
-        result = mod.format_date(date(2026, 2, 21))
-        self.assertEqual(result, "20260221")
-
-    def test_format_date_matches_firmware_format(self):
-        """Verify format matches firmware %4u%02u%02u."""
-        mod = self._get_mod()
-        from datetime import date
-        # Single-digit month and day must be zero-padded
-        result = mod.format_date(date(1981, 1, 1))
-        self.assertEqual(result, "19810101")
-
-    def test_date_range(self):
-        mod = self._get_mod()
-        dates = list(mod.date_range("20260220", "20260222"))
-        self.assertEqual(dates, ["20260220", "20260221", "20260222"])
-
-
-class TestGenerateAllChallenges(unittest.TestCase):
-    """Test the combined challenge generator."""
-
-    def _get_mod(self):
-        return _load_challenge_mod()
-
-    def test_returns_multiple_methods(self):
-        mod = self._get_mod()
-        results = mod.generate_all_challenges("19810101")
-        # At least SHA-256 + MD5 + 4 suffix variants = 6
-        self.assertGreaterEqual(len(results), 6)
-
-    def test_primary_method_is_sha256(self):
-        mod = self._get_mod()
-        results = mod.generate_all_challenges("19810101")
-        self.assertEqual(results[0]["method"], "SHA-256(date)")
-
-    def test_all_results_have_required_keys(self):
-        mod = self._get_mod()
-        results = mod.generate_all_challenges("19810101")
-        for r in results:
-            self.assertIn("method", r)
-            self.assertIn("full_hash", r)
-            self.assertIn("challenge_16", r)
-            self.assertIn("challenge_8", r)
-
-    def test_challenge_16_is_prefix_of_full(self):
-        mod = self._get_mod()
-        results = mod.generate_all_challenges("19810101")
-        for r in results:
-            self.assertTrue(r["full_hash"].startswith(r["challenge_16"]))
-
-    def test_known_dates_constant_exists(self):
-        mod = self._get_mod()
-        self.assertIn("19810101", mod.KNOWN_DATES)
-        self.assertIn("19700101", mod.KNOWN_DATES)
-
-
-# ---------------------------------------------------------------------------
 # Tests for tools/web_challenge_password.py
 # ---------------------------------------------------------------------------
 
@@ -731,13 +585,13 @@ class TestWebChallengePassword(unittest.TestCase):
     def _mod(self):
         return _load_web_challenge_mod()
 
-    def test_sha256_web_challenge_19810101(self):
+    def test_sha256_challenge_19810101(self):
         mod = self._mod()
-        self.assertEqual(mod.sha256_web_challenge("19810101"), "364ce967beff355b")
+        self.assertEqual(mod.sha256_challenge("19810101"), "364ce967beff355b")
 
-    def test_sha256_web_challenge_20260221(self):
+    def test_sha256_challenge_20260221(self):
         mod = self._mod()
-        self.assertEqual(mod.sha256_web_challenge("20260221"), "96eb2f1c1ff60cc5")
+        self.assertEqual(mod.sha256_challenge("20260221"), "96eb2f1c1ff60cc5")
 
     def test_sha256_full_64_chars(self):
         mod = self._mod()
@@ -745,9 +599,9 @@ class TestWebChallengePassword(unittest.TestCase):
         self.assertEqual(len(result), 64)
         self.assertTrue(result.startswith("364ce967beff355b"))
 
-    def test_md5_web_challenge(self):
+    def test_md5_challenge(self):
         mod = self._mod()
-        result = mod.md5_web_challenge("19810101")
+        result = mod.md5_challenge("19810101")
         self.assertEqual(result, "794d89deb8f6ff87c4a019ee65b15576")
 
     def test_validate_date_valid(self):
@@ -763,6 +617,19 @@ class TestWebChallengePassword(unittest.TestCase):
         self.assertFalse(mod.validate_date("202602211"))  # 9 chars
         self.assertFalse(mod.validate_date("20261301"))  # month 13
         self.assertFalse(mod.validate_date("abcdefgh"))
+
+    def test_generate_all_codes(self):
+        mod = self._mod()
+        codes = mod.generate_all_codes("19810101")
+        self.assertGreaterEqual(len(codes), 4)
+        self.assertEqual(codes[0]["code"], "364ce967beff355b")
+
+    def test_firmware_constants(self):
+        mod = self._mod()
+        self.assertEqual(mod.AES_KEY, "Df7!ui%s9(lmV1L8")
+        self.assertEqual(mod.DEFAULT_SN, "4857544347020CB1")
+        self.assertEqual(mod.MEGACABLE_ADMIN_USER, "Mega_gpon")
+        self.assertEqual(mod.MEGACABLE_ADMIN_PASSWORD, "admintelecom")
 
     def test_cli_mode_output(self):
         """Verify cli_mode prints results without error."""
@@ -814,7 +681,6 @@ class TestCliChallengePassword(unittest.TestCase):
         mod = self._mod()
         result = mod.sha256_with_sn("19810101", "HWTC12345678")
         self.assertEqual(len(result), 16)
-        # Deterministic — same inputs always produce same output
         self.assertEqual(result, mod.sha256_with_sn("19810101", "HWTC12345678"))
 
     def test_sha256_sn_only(self):
@@ -835,15 +701,12 @@ class TestCliChallengePassword(unittest.TestCase):
     def test_generate_all_passwords_no_sn(self):
         mod = self._mod()
         passwords = mod.generate_all_passwords("19810101")
-        # Should include SHA-256, MD5, defaults, and suffix variants
         self.assertGreaterEqual(len(passwords), 10)
-        # First result should be SHA-256 primary
         self.assertEqual(passwords[0]["password"], "364ce967beff355b")
 
     def test_generate_all_passwords_with_sn(self):
         mod = self._mod()
         passwords = mod.generate_all_passwords("19810101", serial_number="HWTC12345678")
-        # With SN, should have more results
         methods = [p["method"] for p in passwords]
         self.assertTrue(any("Serial number" in m for m in methods))
         self.assertTrue(any("SN" in m for m in methods))
@@ -869,11 +732,47 @@ class TestCliChallengePassword(unittest.TestCase):
         self.assertIn("19810101", dates)
         self.assertIn("19700101", dates)
 
-    def test_default_passwords_constant(self):
+    def test_default_passwords_includes_admintelecom(self):
         mod = self._mod()
         pwds = [p[0] for p in mod.DEFAULT_PASSWORDS]
+        self.assertIn("admintelecom", pwds)
         self.assertIn("admin", pwds)
         self.assertIn("adminHW", pwds)
+
+    def test_firmware_constants(self):
+        mod = self._mod()
+        self.assertEqual(mod.AES_KEY, "Df7!ui%s9(lmV1L8")
+        self.assertEqual(mod.DEFAULT_SN, "4857544347020CB1")
+        self.assertEqual(mod.DEFAULT_SN_ASCII, "HWTC47020CB1")
+        self.assertEqual(mod.MEGACABLE_ADMIN_USER, "Mega_gpon")
+        self.assertEqual(mod.MEGACABLE_ADMIN_PASSWORD, "admintelecom")
+
+    def test_asc_unvisible(self):
+        mod = self._mod()
+        # '!' (0x21) decodes to 0x00
+        self.assertEqual(mod.asc_unvisible("!"), b"\x00")
+        # '~' (0x7E) decodes to 0x1E
+        self.assertEqual(mod.asc_unvisible("~"), b"\x1e")
+        # '@' (0x40) decodes to 0x1F
+        self.assertEqual(mod.asc_unvisible("@"), b"\x1f")
+
+    def test_asc_visible(self):
+        mod = self._mod()
+        # 0x00 encodes to '!' (0x21)
+        self.assertEqual(mod.asc_visible(b"\x00"), "!")
+        # 0x1E encodes to '~' (because 0x1E+0x21=0x3F='?' -> '~')
+        self.assertEqual(mod.asc_visible(b"\x1e"), "~")
+
+    def test_asc_roundtrip(self):
+        mod = self._mod()
+        # Encode then decode should preserve data (for values 0x00-0x5D except 0x5D)
+        original = bytes(range(0x5D))  # 0 to 92
+        encoded = mod.asc_visible(original)
+        decoded = mod.asc_unvisible(encoded)
+        # Note: 0x1E and 0x5D both encode to '~', decode gives 0x1E
+        expected = bytearray(original)
+        expected[0x5D - 1] = expected[0x5D - 1]  # 0x5C stays 0x5C
+        self.assertEqual(decoded, bytes(expected))
 
     def test_cli_mode_output(self):
         """Verify cli_mode prints results without error."""
