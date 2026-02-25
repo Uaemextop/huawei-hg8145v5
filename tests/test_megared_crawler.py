@@ -856,5 +856,26 @@ class TestRetryOnConnectionReset(unittest.TestCase):
         self.assertIn(headers_seen[0], _ALTERNATE_USER_AGENTS)
 
 
+class TestProbeAcsFirmwareEndpoints(unittest.TestCase):
+    """Test the --probe-acs ACS firmware endpoint probing."""
+
+    def test_import_works(self):
+        """probe_acs_firmware_endpoints should be importable."""
+        from megared_crawler import probe_acs_firmware_endpoints
+        self.assertTrue(callable(probe_acs_firmware_endpoints))
+
+    @patch("megared_crawler.dns_resolves", return_value=False)
+    def test_skips_non_resolving_hosts(self, mock_dns):
+        """Hosts that don't resolve should be skipped."""
+        import tempfile
+        from megared_crawler import probe_acs_firmware_endpoints
+        with tempfile.TemporaryDirectory() as tmpdir:
+            probe_acs_firmware_endpoints(Path(tmpdir))
+            report = Path(tmpdir) / "acs_firmware_probes.json"
+            self.assertTrue(report.exists())
+            data = json.loads(report.read_text())
+            self.assertEqual(data["firmware_files_found"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

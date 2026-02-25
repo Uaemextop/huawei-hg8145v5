@@ -238,3 +238,57 @@ python acsvip_analysis.py --json report.json
 ```bash
 python -m unittest tests.test_acsvip_analysis -v
 ```
+
+---
+
+## Firmware Analysis Tool
+
+`firmware_tools/fw_analysis.py` documents the complete reverse-engineering of
+the EG8145V5 firmware (V500R022C00SPC340B019), including:
+
+- **65 ISP operator profiles** extracted from customization configs
+- **35 ACS endpoints** (TR-069 servers from ISPs worldwide)
+- **6 certificates** and **6 keys** embedded in the firmware
+- **TR-069 Download RPC protocol** reconstructed from Capstone disassembly
+- **5 firmware-extracted User-Agent strings**
+
+### Usage
+
+```bash
+# Print full firmware analysis report
+python firmware_tools/fw_analysis.py
+
+# Save as JSON
+python firmware_tools/fw_analysis.py --json fw_report.json
+```
+
+### Use as library
+
+```python
+from firmware_tools.fw_analysis import (
+    ACS_ENDPOINTS,
+    FIRMWARE_USER_AGENTS,
+    ISP_OPERATORS,
+    get_report,
+)
+
+# Get all ACS endpoints
+for ep in ACS_ENDPOINTS:
+    print(f"{ep['protocol']}://{ep['host']}:{ep['port']}{ep['path']}")
+
+# Get firmware-extracted User-Agents
+print(FIRMWARE_USER_AGENTS["cwmp"])  # "HuaweiHomeGateway"
+```
+
+### Probe ACS endpoints for firmware files
+
+```bash
+# Run the crawler with ACS firmware probing
+python megared_crawler.py --probe-acs
+```
+
+### Tests
+
+```bash
+python -m unittest tests.test_fw_analysis -v
+```

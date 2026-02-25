@@ -1289,6 +1289,108 @@ class MegaredCrawler:
 
 
 # ---------------------------------------------------------------------------
+# ACS endpoint firmware probing (optional --probe-acs)
+# ---------------------------------------------------------------------------
+
+def probe_acs_firmware_endpoints(output_dir: Path) -> None:
+    """Probe firmware-extracted ACS endpoints for downloadable .bin files.
+
+    Uses the ACS endpoints discovered in the EG8145V5 firmware rootfs
+    (see firmware_tools/fw_analysis.py) and attempts HEAD requests with
+    authentic Huawei CWMP User-Agent headers.
+    """
+    try:
+        from firmware_tools.fw_analysis import (
+            ACS_ENDPOINTS,
+            FIRMWARE_FILENAMES,
+            FIRMWARE_DOWNLOAD_PATHS,
+            FIRMWARE_USER_AGENTS,
+        )
+    except ImportError:
+        log.error("firmware_tools package not found — cannot probe ACS endpoints")
+        return
+
+    log.info("=" * 60)
+    log.info("Phase: ACS Firmware Endpoint Probing")
+    log.info(
+        "Probing %d ACS endpoints × %d paths × %d filenames",
+        len(ACS_ENDPOINTS), len(FIRMWARE_DOWNLOAD_PATHS),
+        len(FIRMWARE_FILENAMES),
+    )
+    log.info("=" * 60)
+
+    ua = FIRMWARE_USER_AGENTS.get("cwmp", "HuaweiHomeGateway")
+    results: list[dict] = []
+    found_count = 0
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": ua})
+    session.verify = False
+
+    for ep in ACS_ENDPOINTS:
+        host = ep["host"]
+
+        # Quick DNS check
+        if not dns_resolves(host):
+            log.debug("DNS: %s does not resolve — skipping", host)
+            continue
+
+        port = ep["port"]
+        proto = ep["protocol"]
+        base = f"{proto}://{host}:{port}"
+
+        log.info("Probing ACS: %s [%s]", base, ep.get("isp", "?"))
+
+        for path in FIRMWARE_DOWNLOAD_PATHS:
+            for fname in FIRMWARE_FILENAMES:
+                url = f"{base}{path}{fname}"
+                try:
+                    resp = session.head(url, timeout=5, allow_redirects=True)
+                    cl = resp.headers.get("Content-Length", "")
+                    ct = resp.headers.get("Content-Type", "")
+                    size = int(cl) if cl.isdigit() else 0
+
+                    if resp.status_code < 400 and size > 10000:
+                        found_count += 1
+                        result = {
+                            "url": url,
+                            "status": resp.status_code,
+                            "content_type": ct,
+                            "content_length": size,
+                            "server": resp.headers.get("Server", ""),
+                            "isp": ep.get("isp", ""),
+                        }
+                        results.append(result)
+                        log.info(
+                            "  ✓ FOUND [%d] %s (%d bytes, %s)",
+                            resp.status_code, url, size, ct,
+                        )
+                except requests.exceptions.ConnectionError:
+                    break  # host not reachable, skip remaining paths
+                except Exception:
+                    continue
+
+    # Save results
+    report_path = output_dir / "acs_firmware_probes.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps({
+            "total_endpoints": len(ACS_ENDPOINTS),
+            "firmware_files_found": found_count,
+            "results": results,
+        }, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    log.info("-" * 60)
+    log.info(
+        "ACS probe complete: %d firmware files found across %d endpoints",
+        found_count, len(ACS_ENDPOINTS),
+    )
+    log.info("Report saved to: %s", report_path)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1335,6 +1437,10 @@ def parse_args() -> argparse.Namespace:
         "--debug", action="store_true",
         help="Enable verbose debug logging",
     )
+    parser.add_argument(
+        "--probe-acs", action="store_true", default=False,
+        help="Probe firmware-extracted ACS endpoints for .bin firmware files",
+    )
     return parser.parse_args()
 
 
@@ -1372,6 +1478,9 @@ def main() -> None:
         verify_ssl=args.verify_ssl,
     )
     crawler.run()
+
+    if args.probe_acs:
+        probe_acs_firmware_endpoints(output_dir)
 
 
 if __name__ == "__main__":
