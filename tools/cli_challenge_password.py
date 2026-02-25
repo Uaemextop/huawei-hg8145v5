@@ -19,7 +19,8 @@ When you connect via Telnet or serial console, the router shows::
 
 This script generates the correct password to enter.
 
-Algorithms (reverse-engineered from firmware V500R022C00SPC340B019)
+Algorithms (reverse-engineered from firmware V500R022C00SPC340B019
+and confirmed via Capstone ARM disassembly of V500R020C10SPC212)
 -------------------------------------------------------------------
 
 1. **FT_SSMP_PWD_CHALLENGE = 1** — ``SHA-256(YYYYMMDD)[:16]``
@@ -28,23 +29,54 @@ Algorithms (reverse-engineered from firmware V500R022C00SPC340B019)
 4. **FT_SSMP_CLI_SU_CHALLENGE = 1** — AES-CBC challenge (disabled by
    default; requires key from XML DB parameter 0x0B)
 
-Firmware findings
------------------
+ARM disassembly of ``HW_WEB_GetSHAByTime`` @ ``0x186d4`` (Capstone)::
 
-* AES-128-CBC key for ``$2`` password encryption::
+    memset(sha_buf, 0, 0x11)   ; 17 bytes
+    memset(hex_buf, 0, 0x41)   ; 65 bytes
+    memcpy(sha_buf, input, 17) ; "YYYYMMDD"
+    bl     HW_SHA256_CAL       ; SHA-256
+    memcpy(output, hex, min(output_len, 65)-1)
+
+Firmware findings (verified via Capstone ARM disassembly of 3 firmwares)
+------------------------------------------------------------------------
+
+Analyzed firmware binaries (full SquashFS extraction + Capstone ARM):
+
+* **V500R022C00SPC340B019** — MEGACABLE production (squashfs extracted)
+* **V500R020C10SPC212** — 7004 files, 799 ELF, Linux 4.4.219, Cortex-A9
+* **DESBLOQUEIO R22** — Brazil unlock kit (TELNET.bin + UNLOCK.bin
+  with embedded shell scripts and default config XML)
+
+* AES-128-CBC key for ``hw_ctree.xml`` config file encryption::
 
     Df7!ui%s9(lmV1L8
 
-  Source: ``/etc/wap/spec/spec_default.cfg`` →
-  ``SPEC_OS_AES_CBC_APP_STR``
+  Confirmed at: ``libcfg_api.so:0xb58b``, ``libhw_smp_web_cfg.so:0x1427e``,
+  ``bin/aescrypt2:0x307b``.
+  Source: ``SPEC_OS_AES_CBC_APP_STR`` in ``spec_default.cfg``
+
+  **Note**: This key is for config file encryption only.
+  PEM private keys use chip-derived passphrases via ``CERT_GetInfoKeypass``.
+  aescrypt2 format files use ``HW_CTOOL_GetKeyChipStr`` → ``HW_KMC_CfgGetKey``.
 
 * ``$2`` encoding (``HW_AES_AscVisible``/``HW_AES_AscUnvisible``)::
 
     encode: byte + 0x21; if result == '?' (0x3F) → '~' (0x7E)
     decode: if char == '~' → 0x1E; else → char - 0x21
 
-* PassMode=3 → PBKDF2-SHA256 with per-user salt (web login)
-* EncryptMode=2 → ``$2`` AES-CBC (config file at rest)
+* PassMode=3 → PBKDF2-SHA256 with per-user salt (web/CLI login)
+* EncryptMode=2 → ``$2`` prefix (config file at rest)
+* MEGACABLE feature flags (``megacablepwd_ft.cfg``):
+  ``FT_SSMP_PWD_CHALLENGE=1``, ``FT_WLAN_MEGACABLEPWD=1``
+* WiFi quality report AES key: ``sc189#-_*&1$3cn2``
+  (IV: ``0201611041646174``, from ``base_amp_spec.cfg``)
+* SU public key: RSA-256 bit (trivially factorable) at ``/etc/wap/su_pub_key``
+  - Modulus: ``0xcdb6cda2...`` (93047119368797069533900709356153666374...)
+  - Used by ``HW_CLI_VerifySuPassword`` @ ``0xcc14`` in ``bin/clid``
+* Plugin binaries (kernelapp) contain ``ADAPTER_GetRestSslKeyPassword``,
+  ``CERT_EncryKeyPass`` — PEM passphrase is hardware-derived, not static
+* UNLOCK.bin sets ``hw_boardinfo`` obj 0x00000001 = "1" and
+  obj 0x00000059 = "1" then runs ``restorehwmode.sh``
 
 Users discovered in config backup
 ----------------------------------
@@ -71,9 +103,18 @@ from datetime import date, datetime
 
 # ── Firmware constants ─────────────────────────────────────────────────
 
-# AES-128-CBC key for $2 password encryption in hw_ctree.xml
-# Source: /etc/wap/spec/spec_default.cfg -> SPEC_OS_AES_CBC_APP_STR
+# AES-128-CBC key for hw_ctree.xml config file encryption
+# Found at: libcfg_api.so:0xb58b, libhw_smp_web_cfg.so:0x1427e,
+#           bin/aescrypt2:0x307b
+# Source: SPEC_OS_AES_CBC_APP_STR in spec_default.cfg
+# NOTE: This key is for config file encryption only.
+#       PEM private keys use chip-derived passphrases (CERT_GetInfoKeypass)
+#       aescrypt2 format files use HW_CTOOL_GetKeyChipStr -> HW_KMC_CfgGetKey
 AES_KEY = "Df7!ui%s9(lmV1L8"
+
+# WiFi quality report AES key (from base_amp_spec.cfg)
+WIFI_AES_KEY = "sc189#-_*&1$3cn2"
+WIFI_AES_IV = "0201611041646174"
 
 # User's default SN
 DEFAULT_SN = "4857544347020CB1"          # hex form

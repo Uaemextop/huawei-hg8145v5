@@ -2546,3 +2546,281 @@ The firmware squashfs filesystem contains sensitive system information:
 28. **Do not expose date as `randcode` in HTML** — use a server-generated nonce
 29. **Enable `FT_SSMP_CLI_SU_CHALLENGE` with unique per-device AES keys** —
     the default disabled state falls back to static passwords
+
+---
+
+## V-34: Deep Firmware Binary Analysis (5611\_HG8145V5V500R020C10SPC212)
+
+> **Firmware**: `5611_HG8145V5V500R020C10SPC212.bin`
+> **Format**: HWNP multi-section (11 sections)
+> **Date**: 2026-02-25
+> **Tools**: Capstone ARM disassembler, binwalk, Python3
+
+### Firmware Structure
+
+| Section | Name | Size | Content |
+|---|---|---|---|
+| 0 | `file:/var/UpgradeCheck.xml` | 19 KB | XML with board/chip compatibility checks |
+| 1 | `flash:uboot` | 2.5 MB | U-Boot 2020.01 (V500R020C10 V5-V001) + Linux kernel |
+| 2 | `flash:rootfs` | 37.8 MB | SquashFS v4.0 LZMA (7004 files, 916 dirs) |
+| 3 | `file:/var/setequiptestmodeoff` | 4 KB | Shell script (equipment test mode + area_type init) |
+| 4 | `file:/mnt/jffs2/app/plugin_preload.tar.gz` | 7.5 MB | Plugin packages (eaiapp.ipk + kernelapp.cpk) |
+| 5 | `file:/var/efs` | 68 B | EFS header: `HW MA5600 CHS H801EPBA` |
+
+### U-Boot Analysis
+
+* **Version**: `U-Boot 2020.01 (V500R020C10 V5 - V001)`
+* **Architecture**: ARM (HiSilicon Cortex-A9)
+* **Console**: `ttyAMA1,115200` (UART)
+* **Default env**:
+  ```
+  bootdelay=1
+  baudrate=115200
+  ipaddr=192.168.0.10
+  serverip=192.168.0.1
+  ethaddr=00:0a:0b:0c:0d:0e
+  flashsize=128
+  mtdparts=nand0:0x20000(startcode),0x7FE0000(ubifs),-(reserved)
+  ```
+* **Flash layout**: startcode → bootpara → flash_configA/B → ubifs (kernel+rootfs) → exrootfs → keyfile
+* **Boot encryption**: `encrypt head decrypt`, `section decrypt`, `uboot read decrypt error` — firmware validates encrypted section headers
+* **Key functions**: `hw_uboot_ubi_read`, `hw_uboot_ubi_write`, `export work key`, `get work key`, `save work key`
+
+### Linux Kernel
+
+* **Version**: `Linux 4.4.219`
+* **Compiler**: `gcc 7.3.0 (Compiler CPU V200R006C00B010)` — HiSilicon SDK
+* **Build date**: `Wed Mar 9 20:52:26 CST 2022`
+* **Config**: `SMP ARM` (multi-core Cortex-A9)
+* **Load address**: `0x80e08000`
+* **DTBs**: 14 device tree blobs for different board variants
+* **Boot args template**: `user_debug=0x1f panic=1 skb_priv=224 highres=off`
+* **Features**: JFFS2, UBIFS, SquashFS, NFS, CIFS, NFSv4, IPv6, IPSec, Netfilter
+
+### SquashFS Rootfs (7004 files, ARM 32-bit LE)
+
+#### ELF Binary Census
+
+| Category | Count | Key files |
+|---|---|---|
+| **Total ELF** | 799 | ARM 32-bit LE, DYN/SO and EXEC |
+| **Security-critical** | 47 | aescrypt2, clid, cfgtool, web, httpd, SSL/crypto libs |
+| **Libraries** | 600+ | Shared objects in `/lib/` |
+| **Kernel modules** | 80+ | `.ko` files in `/lib/modules/` |
+
+#### Capstone Disassembly — Security-Critical Binaries
+
+##### `bin/aescrypt2` (17,692 bytes)
+
+* **Purpose**: AES-128-CBC file encryption/decryption with HMAC verification
+* **Usage**: `aescrypt2 <mode> <input> <output>` (0=encrypt, 1=decrypt)
+* **Key**: Hardcoded `Df7!ui%s9(lmV1L8` at offset `0x307b` in `.rodata`
+* **Security functions**:
+  * `HW_CTOOL_GetKeyChipStr` @ `0x152c` — retrieves AES key
+  * Calls `HW_KMC_CfgGetKey`, `HW_SSL_AesSetKeyEnc/Dec`, `HW_OS_AESCBCEncrypt/Decrypt`
+* **HMAC verification**: "HMAC check failed: wrong key, or file corrupted"
+* **Used for**: Encrypting/decrypting `hw_ctree.xml`, SSL certificates (`webprvt.key`, `webpub.crt`, `webroot.crt`), Telmex PEM files
+
+##### `bin/clid` (183,008 bytes, 336 functions)
+
+* **Purpose**: CLI daemon with challenge authentication
+* **45 security functions** including:
+  * `HW_CLI_VerifySuPassword` @ `0xcc14` (732 bytes) — SU password challenge
+  * `HW_CLI_CheckPwd` @ `0xa7ec` (668 bytes) — password verification
+  * `HW_CLI_VerifyUser` @ `0xaddc` (2288 bytes) — user authentication
+  * `CLI_AES_GeKey` @ `0xc3bc` (328 bytes) — AES key retrieval from XML DB param `0x0B`
+  * `CLI_AES_Encrypt` @ `0xc504` (708 bytes)
+  * `CLI_AES_GetRandomStr` @ `0xc90c` (292 bytes) — random string for challenge
+  * `CLI_AES_GetAuthInfo` @ `0xca30` (396 bytes)
+  * `HW_CLI_IfNeedVerifySuPassword` @ `0xcbbc` (88 bytes) — checks `FT_SSMP_CLI_SU_CHALLENGE`
+  * `CLI_DBEncryptInitForEach` / `CLI_DBEncryptNodeForEach` — config encryption
+* **Key strings**: `"Challenge:"`, `"SHA256"`, `"FT_SSMP_CLI_SU_CHALLENGE"`, `"root"`
+
+##### `lib/libhw_smp_web_base.so` (195,516 bytes, 411 functions)
+
+* **Purpose**: Web server authentication and challenge code generation
+* **41 security functions** including:
+  * `HW_WEB_GetSHAByTime` @ `0x186d4` (244 bytes) — **THE** challenge code generator
+  * `HW_WEB_Login` @ `0x23d14` (1924 bytes) — login handler
+  * `HW_WEB_SendLoginPage` @ `0x2167c` (1304 bytes)
+  * `HW_WEB_LoginRequestHandle` @ `0x33dc4` (2140 bytes) — main login request
+  * `HW_WEB_EncryptPwd` @ `0x33348` (452 bytes) — password encryption
+  * `HW_WEB_CheckPwdForBase64` @ `0x378b8` (780 bytes) — Base64 password verification
+  * `HW_WEB_MatchUserInfoByMD5` @ `0x38610` (1696 bytes) — MD5 session matching
+  * `HW_Web_MM_GetSHA256` @ `0x3af14` (192 bytes)
+  * `HTTPAuthor_ServerBuildDigestChallenge` @ `0x26f64` (624 bytes)
+  * `serverBuildBasicChallenge` @ `0x21110` (176 bytes)
+
+* **`HW_WEB_GetSHAByTime` ARM Disassembly** (confirmed algorithm):
+  ```
+  0x186d4: mov    ip, sp          ; prologue
+  0x186dc: push   {r4-r8,fp,ip,lr,pc}
+  0x186e0: mov    r4, r2          ; r2 = output_len
+  0x186f4: add    r2, pc, r2      ; load GOT pointer
+  0x18700: ldr    r3, [r2, r3]    ; stack canary
+  0x18708: mov    r1, #0          ; memset(sha_buf, 0, 0x11)
+  0x1870c: mov    r2, #0x11       ; 17 bytes (16 hex + null)
+  0x18720: bl     memset
+  0x18724: mov    r1, #0          ; memset(hex_buf, 0, 0x41)
+  0x18728: mov    r2, #0x41       ; 65 bytes (64 hex + null)
+  0x18730: bl     memset
+  0x18734: cmp    r4, #1          ; if (output_len <= 1) goto error
+  0x18740: bls    error_path
+  0x18744: mov    r2, #0x11       ; copy 17 bytes from input to sha_buf
+  0x18750: bl     memcpy          ; → HW_OS_MemCpy
+  0x18758: mov    r0, r6          ; sha_buf → HW_SHA256_CAL
+  0x1875c: bl     HW_SHA256_CAL   ; SHA-256(date_string)
+  0x18760: cmp    r4, #0x41       ; min(output_len, 0x41)
+  0x18778: sub    r3, r3, #1      ; len - 1
+  0x1877c: bl     memcpy          ; copy hex digest to output
+  ```
+  **Confirmed**: `SHA-256(YYYYMMDD)[:16]` (17 bytes including null terminator)
+
+##### `lib/libhw_smp_web_cfg.so` (95,636 bytes, 172 functions)
+
+* **16 security functions** including:
+  * `HW_WEB_CheckUserPassword` @ `0x9ccc` (668 bytes) — main password check
+  * `HW_WEB_CheckUserPassword_Ex` @ `0x8fc8` (92 bytes)
+  * `HW_WEB_SetUserPassword` @ `0xbbc4` (620 bytes)
+  * `HW_WEB_MkUserPwdByEncryptMode` @ `0xa064` (536 bytes) — mode-based encryption
+  * `HW_WEB_SplitFWUserPassword` @ `0xa944` (520 bytes)
+  * `HW_WEB_CheckPwdCmplex` @ `0x9940` (664 bytes) — complexity check
+  * `WEB_CheckPwd` @ `0x9bd8` (244 bytes) — direct comparison
+* **Key strings**: `"Df7!ui%s9(lmV1L8"` @ `0x1427e`, `"password complexity does not match!"`, `"userinfo.c"`
+
+##### `lib/libhw_ssp_basic.so` (903,616 bytes, 2334 functions)
+
+* **261 security functions** — largest crypto library
+* Key functions:
+  * `HW_XML_CFGFileSecurityWithAesKey` @ `0x4ea70` — AES config encryption
+  * `HW_XML_GetEncryptedKey` @ `0x4eb64` (344 bytes) — key retrieval
+  * `HW_XML_DBEncryptInitForEach/NodeForEach` — per-node config encryption
+  * `HW_XML_WebUserInfoSecByIns` @ `0x33a34` (1276 bytes) — per-user salt/hash
+  * `HW_XML_CliUserInfoSecByIns` @ `0x3411c` (1384 bytes)
+  * `HW_XML_GetSpecSaltLen` @ `0x339a4` — salt length for PBKDF2
+  * `HW_XML_GetOrSetSaltValue` @ `0x33f30` — salt read/write
+  * `Hashtable_*` functions — hash table operations for config DB
+
+##### `lib/libcfg_api.so` (54,212 bytes)
+
+* **AES key**: `"Df7!ui%s9(lmV1L8"` @ `0xb58b`
+* **SSL operations**: `WebGetSslPrivKey`, `WEB_GetSslPrivKeyDefault`
+* **Certificate paths** (aescrypt2 commands in `.rodata`):
+  ```
+  aescrypt2 1 /var/webprvt.key /var/cert.aes
+  aescrypt2 1 /var/prvt_1_telmex.pem /var/prvt_aes.tmp
+  aescrypt2 1 /var/webpub.crt /var/cert.aes
+  aescrypt2 1 /var/pub_1_telmex.pem /var/pub_aes.tmp
+  aescrypt2 1 /var/webroot.crt /var/cert.aes
+  aescrypt2 1 /var/root_1_telmex.pem /var/root_aes.tmp
+  ```
+
+##### `lib/libhw_web_dll.so` (404,236 bytes, 714 functions)
+
+* **119 security functions** — web authentication framework
+* Key functions:
+  * `HW_WEB_Login` (1924 bytes) — main login
+  * `HW_WEB_UserLogin` (1456 bytes) — user login
+  * `HW_WEB_LoginRequestHandle` (2140 bytes) — HTTP login handler
+  * `HW_WEB_EncryptPwd` (452 bytes) — password encryption dispatch
+  * `HW_WEB_CheckAuth` (68 bytes) — authorization check
+  * `HW_WEB_LoginFailHandle` (328 bytes) — lockout logic
+  * `WEB_SecondLogin` (692 bytes) — second-factor login
+  * `WEB_checkPassword` (616 bytes) — password validation
+
+##### `bin/web` (349,876 bytes, 641 functions)
+
+* **43 security functions** — web server binary
+* Key strings: `"login.cgi"`, `"login.asp"`, `"login.html"`, `"passwordcommon.asp"`, `"CfgMode"`, `"sessionflag"`, `"cookie"`
+
+##### `bin/cfgtool` (13,920 bytes)
+
+* **Purpose**: Config tree manipulation
+* **Usage**: `cfgtool <get|set|add|del|batch|create> <file> <path> [attrs]`
+* **Default path**: `ctree.xml`
+
+### Plugin Packages
+
+#### `eaiapp.ipk` (2.7 MB, Debian package)
+
+* **AI/ML Traffic Classification**: Uses MindSpore Lite neural network
+* Contains: `libai_platform.so`, `libsiteai_lite_nn.so`
+* Models: `tcp_classify.mslite`, `udp_classify.mslite`
+* Config: `eai_appcfg.csv`, `eai_classifylist.csv` (per-region: china/foreign)
+
+#### `kernelapp.cpk` (2.1 MB, gzipped tar)
+
+* **Network kernel module**: MQTT, cURL, civetweb, mbedTLS
+* Libraries: `libappaware.so`, `libdriver_c.so`, `libplugin_agent_api.so`
+* Contains: `plugin_keeplive.sh`, `plugin_monitor.sh`, `plugin_startup_new.sh`
+
+### MEGACABLE Feature Configuration
+
+From `etc/wap/customize/common/megacablepwd_ft.cfg`:
+
+```ini
+# Enabled for MEGACABLE ISP mode
+FT_SSMP_PWD_CHALLENGE = 1              # Web SHA-256 challenge
+FT_WLAN_MEGACABLEPWD = 1               # WiFi password customization
+HW_SSMP_FEATURE_RESET_DEF = 1          # Reset to defaults support
+HW_SSMP_FEATURE_OUI_STATIC = 1         # Static OUI
+HW_SSMP_FEATURE_CWMP_DEF = 1           # TR-069 defaults
+FT_WEB_CUSTOMIZE_FORMC = 1             # Custom web form for MC
+FT_SSMP_KICKOFF_WEB_USER = 0           # Don't kick concurrent sessions
+FT_WEB_HTTPONLY = 1                     # HTTPOnly cookies
+
+# MEGACABLE spec (spec_megacablepwd.cfg)
+SSMP_SPEC_WEB_FRAME = frame_XGPON
+SSMP_SPEC_WEB_MENUXML = MenuMegacablePwd.xml
+SSMP_SPEC_WEB_PWDENCRYPT = 3            # PBKDF2-SHA256 mode
+SSMP_SPEC_CLI_REMOTETELNET = 1          # Remote telnet enabled
+```
+
+### Additional AES Keys Found
+
+| Key | Source | Purpose |
+|---|---|---|
+| `Df7!ui%s9(lmV1L8` | `libcfg_api.so`, `libhw_smp_web_cfg.so`, `bin/aescrypt2` | Password $2 encryption, hw_ctree.xml file encryption, SSL cert encryption |
+| `sc189#-_*&1$3cn2` | `base_amp_spec.cfg` (`SPEC_WIFI_QUALITY_REPORT_AES_PUBKEY`) | WiFi quality report AES key |
+| `0201611041646174` | `base_amp_spec.cfg` (`SPEC_WIFI_QUALITY_REPORT_AES_IV`) | WiFi quality report AES IV |
+
+### EFS Section
+
+```
+HW MA5600 CHS H801EPBA
+```
+OLT equipment identifier — MA5600 chassis, H801EPBA board.
+
+### Password Generation for Date 20260225
+
+Given:
+* **SN**: `4857544347020CB1` (HWTC47020CB1)
+* **Date**: `20260225`
+* **Feature**: `FT_SSMP_PWD_CHALLENGE=1`
+
+| Method | Password |
+|---|---|
+| **SHA-256(date)[:16]** (PRIMARY) | `a66e2f879596f119` |
+| SHA-256(date) full | `a66e2f879596f1192f9e6703525a138632e9f826cbb4a248227b925cd72304c1` |
+| MD5(date)[:16] | `2b75e6408df74df4` |
+| SHA-256(factory 19810101)[:16] | `364ce967beff355b` |
+
+### Escalation Path 20: Full Firmware Extraction Pipeline
+
+1. Download HWNP firmware (e.g., `5611_HG8145V5V500R020C10SPC212.bin`)
+2. Parse HWNP header — extract section offsets from section table at `0x120` (spacing `0x270`)
+3. Extract `flash:rootfs` section — contains `whwh` wrapper + uImage + SquashFS
+4. Unsquash SquashFS (LZMA, 7004 files) → full filesystem
+5. Extract `flash:uboot` — contains kernel (`Linux-4.4.219`) + DTBs
+6. Extract `plugin_preload.tar.gz` → AI classification models and network plugins
+7. Use Capstone to disassemble security-critical ARM binaries
+8. Extract AES key `Df7!ui%s9(lmV1L8` from any of 3 locations
+9. Decrypt `hw_ctree.xml` with `aescrypt2 1` for full config access
+
+### Recommendations
+
+30. **Remove hardcoded AES key from firmware binaries** — use per-device derived keys
+31. **Encrypt rootfs** — current SquashFS is plainly readable after extracting HWNP+whwh wrapper
+32. **Use secure boot chain** — U-Boot verifies cert headers but the actual content is extractable
+33. **Obfuscate security function names** — `HW_WEB_GetSHAByTime`, `CLI_AES_GeKey` etc. are trivially identifiable
+34. **Remove Capstone-friendly `.dynsym`** — strip all symbol tables from production binaries

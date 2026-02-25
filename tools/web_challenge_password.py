@@ -8,10 +8,11 @@ Standalone tool — no dependencies on other project scripts.
 Generates the verification code required for web login when the router
 has ``FT_SSMP_PWD_CHALLENGE`` enabled (MEGACABLE2 and other ISP modes).
 
-Algorithm (reverse-engineered from firmware V500R022C00SPC340B019)
+Algorithm (reverse-engineered from firmware V500R022C00SPC340B019
+and confirmed via Capstone ARM disassembly of V500R020C10SPC212)
 -----------------------------------------------------------------
 
-Source: ``libhw_smp_web_base.so!HW_WEB_GetSHAByTime`` at offset 0x12c44
+Source: ``libhw_smp_web_base.so!HW_WEB_GetSHAByTime`` @ ``0x186d4``
 
   1. Router formats its current date as ``YYYYMMDD``
      (C format: ``sprintf(buf, "%4u%02u%02u", year, month+1, day)``)
@@ -24,16 +25,53 @@ Source: ``libhw_smp_web_base.so!HW_WEB_GetSHAByTime`` at offset 0x12c44
 
   **verification_code = SHA256(YYYYMMDD)[:16]**
 
-Firmware findings
------------------
+ARM disassembly of ``HW_WEB_GetSHAByTime`` (Capstone-verified)::
 
-* AES-128-CBC key for $2 password encryption (from
-  ``/etc/wap/spec/spec_default.cfg`` parameter
-  ``SPEC_OS_AES_CBC_APP_STR``): ``Df7!ui%s9(lmV1L8``
-* Password storage uses PassMode=3 (PBKDF2-SHA256 with per-user salt)
-* The admin login password for MEGACABLE (Mega_gpon) is entered in
-  the web form, base64-encoded, and sent to the router.  The
-  verification code is a **separate** field.
+    memset(sha_buf, 0, 0x11)   ; 17 bytes (16 hex + null)
+    memset(hex_buf, 0, 0x41)   ; 65 bytes (64 hex + null)
+    cmp    r4, #1              ; if output_len <= 1, error
+    memcpy(sha_buf, input, 17) ; copy "YYYYMMDD" date string
+    bl     HW_SHA256_CAL       ; SHA-256(date_string)
+    cmp    r4, #0x41           ; min(output_len, 65)
+    memcpy(output, hex, len-1) ; copy truncated hex digest
+
+Firmware findings (verified via Capstone disassembly of 3 firmwares)
+--------------------------------------------------------------------
+
+Analyzed firmware binaries (full SquashFS extraction + Capstone ARM):
+
+* **V500R022C00SPC340B019** — MEGACABLE production firmware
+* **V500R020C10SPC212** — 7004 files, 799 ELF, Linux 4.4.219, ARM Cortex-A9
+* **DESBLOQUEIO R22** — Brazil unlock kit (TELNET.bin + UNLOCK.bin)
+
+Key findings:
+
+* AES-128-CBC key for ``hw_ctree.xml`` config file encryption::
+
+    Df7!ui%s9(lmV1L8
+
+  Confirmed in: ``libcfg_api.so:0xb58b``, ``libhw_smp_web_cfg.so:0x1427e``,
+  ``bin/aescrypt2:0x307b`` (all three firmware versions).
+  Source: ``SPEC_OS_AES_CBC_APP_STR`` in ``spec_default.cfg``
+
+  **Note**: This key is for config file encryption only.  PEM certificate
+  private keys (``prvt.key``, ``plugprvt.key``, ``server_key_ssl.pem``) use
+  AES-256-CBC with a PEM passphrase derived at runtime by
+  ``CERT_GetInfoKeypass`` → ``ADAPTER_GetRestSslKeyPassword`` from
+  hardware/chip-specific storage (``HW_KMC_CfgGetKey``).
+
+  The ``aescrypt2`` format files (``serverkey.pem``, ``dropbear_rsa_host_key``)
+  also use chip-derived keys via ``HW_CTOOL_GetKeyChipStr``.
+
+* ``aescrypt2`` tool: ``0 = encrypt``, ``1 = decrypt`` (HMAC-SHA256 verified)
+* MEGACABLE feature flags (``megacablepwd_ft.cfg``):
+  ``FT_SSMP_PWD_CHALLENGE=1``, ``FT_WLAN_MEGACABLEPWD=1``
+* Password storage: PassMode=3 (PBKDF2-SHA256 with per-user salt)
+* WiFi quality AES key: ``sc189#-_*&1$3cn2`` (IV: ``0201611041646174``)
+* TelnetEnable file: ``/mnt/jffs2/TelnetEnable`` containing ``\\n``
+* SU public key: RSA-256 bit (trivially factorable) at ``/etc/wap/su_pub_key``
+* Plugin libs: ``ADAPTER_GetRestSslKeyPassword``, ``CERT_EncryKeyPass``
+  in ``libsrv.so`` and ``libbasic.so`` (kernelapp plugin)
 
 Usage::
 
@@ -50,11 +88,20 @@ import sys
 from datetime import date, datetime
 
 # ── Firmware constants ─────────────────────────────────────────────────
-# Discovered via reverse-engineering of V500R022C00SPC340B019 squashfs
+# Verified via Capstone ARM disassembly of V500R020C10SPC212 (7004 files)
 
-# AES-128-CBC key used for $2 password encryption in hw_ctree.xml
-# Source: /etc/wap/spec/spec_default.cfg -> SPEC_OS_AES_CBC_APP_STR
+# AES-128-CBC key for hw_ctree.xml config file encryption
+# Found at: libcfg_api.so:0xb58b, libhw_smp_web_cfg.so:0x1427e,
+#           bin/aescrypt2:0x307b
+# Source: SPEC_OS_AES_CBC_APP_STR in spec_default.cfg
+# NOTE: This key is for config file encryption only.
+#       PEM private keys use chip-derived passphrases (CERT_GetInfoKeypass)
+#       aescrypt2 format files use HW_CTOOL_GetKeyChipStr -> HW_KMC_CfgGetKey
 AES_KEY = "Df7!ui%s9(lmV1L8"
+
+# WiFi quality report AES key (from base_amp_spec.cfg)
+WIFI_AES_KEY = "sc189#-_*&1$3cn2"
+WIFI_AES_IV = "0201611041646174"
 
 # Default serial number (user-provided)
 DEFAULT_SN = "4857544347020CB1"  # HWTC47020CB1
@@ -63,8 +110,9 @@ DEFAULT_SN = "4857544347020CB1"  # HWTC47020CB1
 MEGACABLE_ADMIN_USER = "Mega_gpon"
 MEGACABLE_ADMIN_PASSWORD = "admintelecom"
 
-# Feature flags from /etc/wap/ft/smart/base_smart_ft.cfg
-# FT_SSMP_PWD_CHALLENGE = 0 (default off; ISP modes enable it)
+# Feature flags from /etc/wap/customize/common/megacablepwd_ft.cfg
+# FT_SSMP_PWD_CHALLENGE = 1 (enabled for MEGACABLE)
+# FT_WLAN_MEGACABLEPWD = 1 (enabled for MEGACABLE)
 # FT_SSMP_CLI_SU_CHALLENGE = 0 (default off)
 
 # Known factory dates (router shows these when RTC has no NTP sync)
