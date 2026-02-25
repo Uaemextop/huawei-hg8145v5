@@ -241,9 +241,33 @@ COMMON_PATHS = [
 # Pool of User-Agent strings rotated when connection resets occur.
 # Servers sometimes reset connections based on UA fingerprinting; rotating
 # the UA on each retry increases the chance of a successful reconnection.
-# Includes Huawei router/ONT UAs that the megared.net.mx ACS already trusts
-# (these devices connect to acsvip.megared.net.mx:7547 via TR-069/CWMP).
+#
+# Firmware-extracted UAs (from EG8145V5 V500R022C00SPC340B019 rootfs):
+#   • "HuaweiHomeGateway"      – main CWMP session UA (libhw_smp_cwmp_core.so)
+#   • "HW-FTTH"                – bulk data upload UA   (libhw_cwmp_bulkchina.so)
+#   • "HW_IPMAC_REPORT"        – MAC report UA         (libhw_cwmp_china_pdt.so)
+#   • MSIE 9.0 / 2345Explorer  – web market UA         (libhw_smp_base.so)
+#   • MSIE 8.0 / WOW64         – HTTP client UA        (libhw_smp_httpclient.so)
 _ALTERNATE_USER_AGENTS = [
+    # --- Firmware-extracted UAs (highest priority) ---
+    # Main CWMP session UA (found in libhw_smp_cwmp_core.so at 0xb5fa9)
+    "HuaweiHomeGateway",
+    # Bulk data upload UA (libhw_cwmp_bulkchina.so)
+    "HW-FTTH",
+    # IP/MAC report UA (libhw_cwmp_china_pdt.so)
+    "HW_IPMAC_REPORT",
+    # Web market client UA (libhw_smp_base.so)
+    (
+        "Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; "
+        "Trident/5.0; 2345Explorer)"
+    ),
+    # HTTP client UA (libhw_smp_httpclient.so)
+    (
+        "Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; WOW64; "
+        "Trident/4.0; SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; "
+        ".NET CLR 3.0.30729; Media Center PC 6.0; .NET4.0E; .NET4.0C)"
+    ),
+    # --- Standard browser UAs ---
     # Chrome on Windows
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -255,37 +279,8 @@ _ALTERNATE_USER_AGENTS = [
         "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) "
         "Gecko/20100101 Firefox/121.0"
     ),
-    # Safari on macOS
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-        "Version/17.2 Safari/605.1.15"
-    ),
-    # Edge on Windows
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
-    ),
     # curl-style (minimal)
     "curl/8.4.0",
-    # --- Huawei router / ONT User-Agents ---
-    # HG8145V5 – the primary device this repository analyses
-    "Huawei HG8145V5 V500R022C00SPC368 CWMP/1.0",
-    # HG8145V5 older firmware
-    "Huawei HG8145V5 V500R020C10SPC212 CWMP/1.0",
-    # HG8245C – common Huawei GPON ONT
-    "Huawei HG8245C V500R019C00SPC105 CWMP/1.0",
-    # HG8245H / HG8245H5 – widely deployed Huawei ONTs
-    "Huawei HG8245H V300R018C10SPC120 CWMP/1.0",
-    "Huawei HG8245H5 V500R021C00SPC100 CWMP/1.0",
-    # HG8546M – another MEGACABLE-deployed Huawei ONT
-    "Huawei HG8546M V500R020C10SPC200 CWMP/1.0",
-    # EchoLife series – Huawei residential gateway line
-    "Huawei EchoLife HG8145V5 V500R022C00 CWMP/1.0",
-    "Huawei EchoLife HG8245Q2 V300R019C00 CWMP/1.0",
-    # Generic Huawei CWMP agent (fallback)
-    "HuaweiHomeGateway/2.0 CWMP/1.0",
 ]
 
 

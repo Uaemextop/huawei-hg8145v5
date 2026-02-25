@@ -177,9 +177,11 @@ python megared_crawler.py --debug
   ONT device UAs), swaps HTTP ↔ HTTPS, and builds fresh sessions.
 * **HTTP rejection handling** – 403, 429, 503 responses are retried with
   query stripping, trailing-slash, and `Retry-After` back-off.
-* **Huawei router User-Agents** – the UA pool includes CWMP/TR-069 strings
-  from HG8145V5, HG8245H, HG8546M, and EchoLife devices that the ACS at
-  `acsvip.megared.net.mx:7547` already trusts.
+* **Huawei firmware-extracted User-Agents** – UA pool uses the real strings
+  extracted from EG8145V5 firmware (V500R022C00SPC340B019):
+  `HuaweiHomeGateway` (CWMP sessions), `HW-FTTH` (bulk data),
+  `HW_IPMAC_REPORT` (MAC reports), and two MSIE variants used by the
+  router's built-in HTTP client.
 * **Firmware path probing** – `/firmware/`, `/firmware/update/`, `/fw/`,
   `/download/`, `/upgrade/`, and `/acs/` paths are probed for index files
   including `index.jhtml`, `index.phtml`, `index.jsf`, and other server-side
@@ -191,4 +193,48 @@ python megared_crawler.py --debug
 
 ```bash
 python -m unittest tests.test_megared_crawler -v
+```
+
+---
+
+## acsvip.megared.net.mx Deep Analysis
+
+Standalone analyser for the MEGACABLE TR-069/CWMP ACS server at
+`acsvip.megared.net.mx` (`201.159.200.30`).  Performs DNS resolution,
+TCP/UDP port scanning, TCP handshake analysis, HTTP probing with
+firmware-extracted UAs, and firmware `.bin` file discovery.
+
+### Usage
+
+```bash
+# Full analysis (DNS + TCP + HTTP + firmware file probes)
+python acsvip_analysis.py
+
+# Include UDP port probing
+python acsvip_analysis.py --udp
+
+# Scan a full TCP port range
+python acsvip_analysis.py --tcp-range 1-1024
+
+# Save report as JSON
+python acsvip_analysis.py --json report.json
+```
+
+### Key findings (from firmware + live probing)
+
+| Finding | Detail |
+|---------|--------|
+| **IPv4** | `201.159.200.30` |
+| **IPv6** | `2806:261:300:55:201:159:200:1` |
+| **Reverse DNS** | `customer-SMAL-200-30.megared.net.mx` |
+| **Open TCP** | Port 80 (RST after handshake — IP-whitelisted) |
+| **CWMP UA** | `HuaweiHomeGateway` (from `libhw_smp_cwmp_core.so`) |
+| **Auth** | HTTP Digest, realm `HuaweiHomeGateway` |
+| **ACS path** | `/service/cwmp` on port `7547` |
+| **Firewall** | Whitelist by source IP — only MEGACABLE subscriber ranges |
+
+### Tests
+
+```bash
+python -m unittest tests.test_acsvip_analysis -v
 ```

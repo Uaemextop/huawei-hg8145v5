@@ -706,7 +706,7 @@ class TestTryAlternateScheme(unittest.TestCase):
 # ===================================================================
 
 class TestAlternateUserAgents(unittest.TestCase):
-    """Test the User-Agent pool includes Huawei router UAs."""
+    """Test the User-Agent pool includes firmware-extracted Huawei UAs."""
 
     def test_pool_not_empty(self):
         self.assertGreater(len(_ALTERNATE_USER_AGENTS), 0)
@@ -715,26 +715,27 @@ class TestAlternateUserAgents(unittest.TestCase):
         chrome = [ua for ua in _ALTERNATE_USER_AGENTS if "Chrome" in ua]
         self.assertGreater(len(chrome), 0)
 
-    def test_contains_huawei_hg8145v5(self):
-        hg8145 = [ua for ua in _ALTERNATE_USER_AGENTS if "HG8145V5" in ua]
-        self.assertGreater(len(hg8145), 0, "Pool must include HG8145V5 UA")
+    def test_contains_firmware_cwmp_ua(self):
+        """'HuaweiHomeGateway' is the main CWMP UA from firmware."""
+        self.assertIn("HuaweiHomeGateway", _ALTERNATE_USER_AGENTS)
 
-    def test_contains_huawei_cwmp(self):
-        cwmp = [ua for ua in _ALTERNATE_USER_AGENTS if "CWMP" in ua]
-        self.assertGreater(len(cwmp), 0, "Pool must include CWMP UAs")
+    def test_contains_firmware_ftth_ua(self):
+        """'HW-FTTH' is the bulk data UA from firmware."""
+        self.assertIn("HW-FTTH", _ALTERNATE_USER_AGENTS)
 
-    def test_contains_huawei_hg8245(self):
-        hg8245 = [ua for ua in _ALTERNATE_USER_AGENTS
-                   if "HG8245" in ua or "HG8245H" in ua]
-        self.assertGreater(len(hg8245), 0, "Pool must include HG8245 UA")
+    def test_contains_firmware_ipmac_ua(self):
+        """'HW_IPMAC_REPORT' is the MAC report UA from firmware."""
+        self.assertIn("HW_IPMAC_REPORT", _ALTERNATE_USER_AGENTS)
 
-    def test_contains_echolife(self):
-        echolife = [ua for ua in _ALTERNATE_USER_AGENTS if "EchoLife" in ua]
-        self.assertGreater(len(echolife), 0, "Pool must include EchoLife UA")
+    def test_contains_firmware_ie9_ua(self):
+        """MSIE 9.0/2345Explorer is the web market UA from firmware."""
+        ie9 = [ua for ua in _ALTERNATE_USER_AGENTS if "2345Explorer" in ua]
+        self.assertGreater(len(ie9), 0)
 
-    def test_contains_generic_huawei_gw(self):
-        gw = [ua for ua in _ALTERNATE_USER_AGENTS if "HuaweiHomeGateway" in ua]
-        self.assertGreater(len(gw), 0, "Pool must include generic gateway UA")
+    def test_contains_firmware_ie8_ua(self):
+        """MSIE 8.0/WOW64 is the httpclient UA from firmware."""
+        ie8 = [ua for ua in _ALTERNATE_USER_AGENTS if "MSIE 8.0" in ua]
+        self.assertGreater(len(ie8), 0)
 
     def test_all_strings(self):
         for ua in _ALTERNATE_USER_AGENTS:
