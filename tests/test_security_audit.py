@@ -709,3 +709,192 @@ class TestGenerateAllChallenges(unittest.TestCase):
         mod = self._get_mod()
         self.assertIn("19810101", mod.KNOWN_DATES)
         self.assertIn("19700101", mod.KNOWN_DATES)
+
+
+# ---------------------------------------------------------------------------
+# Tests for tools/web_challenge_password.py
+# ---------------------------------------------------------------------------
+
+def _load_web_challenge_mod():
+    spec = importlib.util.spec_from_file_location(
+        "web_challenge_password",
+        os.path.join(os.path.dirname(__file__), "..", "tools", "web_challenge_password.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestWebChallengePassword(unittest.TestCase):
+    """Tests for the standalone web challenge password script."""
+
+    def _mod(self):
+        return _load_web_challenge_mod()
+
+    def test_sha256_web_challenge_19810101(self):
+        mod = self._mod()
+        self.assertEqual(mod.sha256_web_challenge("19810101"), "364ce967beff355b")
+
+    def test_sha256_web_challenge_20260221(self):
+        mod = self._mod()
+        self.assertEqual(mod.sha256_web_challenge("20260221"), "96eb2f1c1ff60cc5")
+
+    def test_sha256_full_64_chars(self):
+        mod = self._mod()
+        result = mod.sha256_full("19810101")
+        self.assertEqual(len(result), 64)
+        self.assertTrue(result.startswith("364ce967beff355b"))
+
+    def test_md5_web_challenge(self):
+        mod = self._mod()
+        result = mod.md5_web_challenge("19810101")
+        self.assertEqual(result, "794d89deb8f6ff87c4a019ee65b15576")
+
+    def test_validate_date_valid(self):
+        mod = self._mod()
+        self.assertTrue(mod.validate_date("19810101"))
+        self.assertTrue(mod.validate_date("20260221"))
+        self.assertTrue(mod.validate_date("20000101"))
+
+    def test_validate_date_invalid(self):
+        mod = self._mod()
+        self.assertFalse(mod.validate_date("invalid"))
+        self.assertFalse(mod.validate_date("2026022"))  # 7 chars
+        self.assertFalse(mod.validate_date("202602211"))  # 9 chars
+        self.assertFalse(mod.validate_date("20261301"))  # month 13
+        self.assertFalse(mod.validate_date("abcdefgh"))
+
+    def test_cli_mode_output(self):
+        """Verify cli_mode prints results without error."""
+        import io
+        from contextlib import redirect_stdout
+        mod = self._mod()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mod.cli_mode("19810101")
+        output = buf.getvalue()
+        self.assertIn("364ce967beff355b", output)
+        self.assertIn("19810101", output)
+
+
+# ---------------------------------------------------------------------------
+# Tests for tools/cli_challenge_password.py
+# ---------------------------------------------------------------------------
+
+def _load_cli_challenge_mod():
+    spec = importlib.util.spec_from_file_location(
+        "cli_challenge_password",
+        os.path.join(os.path.dirname(__file__), "..", "tools", "cli_challenge_password.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestCliChallengePassword(unittest.TestCase):
+    """Tests for the standalone CLI/Telnet challenge password script."""
+
+    def _mod(self):
+        return _load_cli_challenge_mod()
+
+    def test_sha256_password_16(self):
+        mod = self._mod()
+        self.assertEqual(mod.sha256_password("19810101", 16), "364ce967beff355b")
+
+    def test_sha256_password_default_length(self):
+        mod = self._mod()
+        result = mod.sha256_password("19810101")
+        self.assertEqual(len(result), 16)
+
+    def test_md5_password(self):
+        mod = self._mod()
+        self.assertEqual(mod.md5_password("19810101"), "794d89deb8f6ff87c4a019ee65b15576")
+
+    def test_sha256_with_sn(self):
+        mod = self._mod()
+        result = mod.sha256_with_sn("19810101", "HWTC12345678")
+        self.assertEqual(len(result), 16)
+        # Deterministic — same inputs always produce same output
+        self.assertEqual(result, mod.sha256_with_sn("19810101", "HWTC12345678"))
+
+    def test_sha256_sn_only(self):
+        mod = self._mod()
+        result = mod.sha256_sn_only("HWTC12345678")
+        self.assertEqual(len(result), 16)
+
+    def test_hmac_sha256_password(self):
+        mod = self._mod()
+        result = mod.hmac_sha256_password("19810101", "testkey")
+        self.assertEqual(len(result), 16)
+
+    def test_validate_date(self):
+        mod = self._mod()
+        self.assertTrue(mod.validate_date("19810101"))
+        self.assertFalse(mod.validate_date("notadate"))
+
+    def test_generate_all_passwords_no_sn(self):
+        mod = self._mod()
+        passwords = mod.generate_all_passwords("19810101")
+        # Should include SHA-256, MD5, defaults, and suffix variants
+        self.assertGreaterEqual(len(passwords), 10)
+        # First result should be SHA-256 primary
+        self.assertEqual(passwords[0]["password"], "364ce967beff355b")
+
+    def test_generate_all_passwords_with_sn(self):
+        mod = self._mod()
+        passwords = mod.generate_all_passwords("19810101", serial_number="HWTC12345678")
+        # With SN, should have more results
+        methods = [p["method"] for p in passwords]
+        self.assertTrue(any("Serial number" in m for m in methods))
+        self.assertTrue(any("SN" in m for m in methods))
+
+    def test_generate_all_passwords_with_key(self):
+        mod = self._mod()
+        passwords = mod.generate_all_passwords("19810101", aes_key="mykey123")
+        methods = [p["method"] for p in passwords]
+        self.assertTrue(any("HMAC" in m for m in methods))
+
+    def test_all_passwords_have_required_keys(self):
+        mod = self._mod()
+        passwords = mod.generate_all_passwords("19810101", serial_number="SN123")
+        for p in passwords:
+            self.assertIn("password", p)
+            self.assertIn("method", p)
+            self.assertIn("feature", p)
+            self.assertIn("priority", p)
+
+    def test_factory_dates_constant(self):
+        mod = self._mod()
+        dates = [d[0] for d in mod.FACTORY_DATES]
+        self.assertIn("19810101", dates)
+        self.assertIn("19700101", dates)
+
+    def test_default_passwords_constant(self):
+        mod = self._mod()
+        pwds = [p[0] for p in mod.DEFAULT_PASSWORDS]
+        self.assertIn("admin", pwds)
+        self.assertIn("adminHW", pwds)
+
+    def test_cli_mode_output(self):
+        """Verify cli_mode prints results without error."""
+        import io
+        from contextlib import redirect_stdout
+        mod = self._mod()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mod.cli_mode("19810101", None, None)
+        output = buf.getvalue()
+        self.assertIn("364ce967beff355b", output)
+        self.assertIn("admin", output)
+
+    def test_cli_mode_with_sn(self):
+        """Verify cli_mode with SN prints SN-based passwords."""
+        import io
+        from contextlib import redirect_stdout
+        mod = self._mod()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mod.cli_mode("19810101", "HWTC12345678", None)
+        output = buf.getvalue()
+        self.assertIn("HWTC12345678", output)
+        self.assertIn("12345678", output)  # Last 8 chars
