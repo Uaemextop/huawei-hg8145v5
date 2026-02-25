@@ -160,13 +160,18 @@ python megared_crawler.py --debug
 | `--depth` | `2` | Max BFS crawl depth |
 | `--max-pages` | `200` | Max pages to fetch |
 | `--delay` | `0.5` | Seconds between requests |
+| `--timeout` | `10` | HTTP request timeout in seconds |
 | `--include-ports` | off | Also probe ports 80, 443, 8080, 8443, 7547 |
 | `--debug` | off | Verbose logging |
 
 ### Resilience features
 
+* **DNS pre-resolution** – hostnames that don't resolve are skipped instantly
+  (~0.1s) instead of waiting 40+ seconds for TCP/HTTP timeouts.
 * **Ping-blocked hosts** – when ICMP is blocked the crawler falls back to
-  TCP connect (ports 443/80) and HTTP HEAD checks before skipping a host.
+  TCP connect (ports 443/80) before skipping a host.  HTTP HEAD probes are
+  skipped when both TCP ports are closed, avoiding 10+ seconds of wasted
+  timeout per unreachable host.
 * **Connection-reset recovery** – on `ECONNRESET` / `BrokenPipe` errors the
   crawler applies exponential back-off, rotates User-Agent (including Huawei
   ONT device UAs), swaps HTTP ↔ HTTPS, and builds fresh sessions.
@@ -175,6 +180,12 @@ python megared_crawler.py --debug
 * **Huawei router User-Agents** – the UA pool includes CWMP/TR-069 strings
   from HG8145V5, HG8245H, HG8546M, and EchoLife devices that the ACS at
   `acsvip.megared.net.mx:7547` already trusts.
+* **Firmware path probing** – `/firmware/`, `/firmware/update/`, `/fw/`,
+  `/download/`, `/upgrade/`, and `/acs/` paths are probed for index files
+  including `index.jhtml`, `index.phtml`, `index.jsf`, and other server-side
+  template extensions.
+* **Per-phase timing** – elapsed time is reported for each crawl phase and
+  for individual subdomain reachability checks.
 
 ### Tests
 

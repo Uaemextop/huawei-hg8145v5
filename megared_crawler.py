@@ -117,7 +117,10 @@ DEFAULT_OUTPUT = "megared_output"
 DEFAULT_DEPTH = 2
 DEFAULT_MAX_PAGES = 200
 DEFAULT_DELAY = 0.5   # polite delay between requests (seconds)
-REQUEST_TIMEOUT = 15
+DEFAULT_TIMEOUT = 10  # seconds per HTTP request
+REQUEST_TIMEOUT = DEFAULT_TIMEOUT  # module-level alias (set by CLI --timeout)
+REACHABILITY_TCP_TIMEOUT = 3      # shorter timeout for TCP reachability probes
+REACHABILITY_HTTP_TIMEOUT = 5     # shorter timeout for HTTP HEAD reachability probes
 CONNECTION_RESET_MAX_RETRIES = 3
 
 # Known subdomains and endpoints for megared.net.mx (MEGACABLE ISP)
@@ -150,9 +153,17 @@ INDEX_FILENAMES = [
     "index.asp",
     "index.aspx",
     "index.jsp",
+    "index.jhtml",
     "index.cgi",
     "index.shtml",
     "index.xhtml",
+    "index.mhtml",
+    "index.phtml",
+    "index.rhtml",
+    "index.jspx",
+    "index.jsf",
+    "index.faces",
+    "index.wss",
     "index.pl",
     "index.py",
     "index.rb",
@@ -162,6 +173,8 @@ INDEX_FILENAMES = [
     "index.xml",
     "index.json",
     "index.txt",
+    "index.nsf",
+    "index.yaws",
     "default.html",
     "default.htm",
     "default.asp",
@@ -170,10 +183,12 @@ INDEX_FILENAMES = [
     "home.html",
     "home.php",
     "home.asp",
+    "home.jsp",
     "welcome.html",
     "main.html",
     "main.asp",
     "main.php",
+    "main.jsp",
 ]
 
 # Content types that we parse for links
@@ -211,6 +226,16 @@ COMMON_PATHS = [
     "/help/",
     "/soporte/",
     "/clientes/",
+    "/firmware/",
+    "/firmware/update/",
+    "/firmware/download/",
+    "/fw/",
+    "/update/",
+    "/upgrade/",
+    "/download/",
+    "/files/",
+    "/images/",
+    "/acs/",
 ]
 
 # Pool of User-Agent strings rotated when connection resets occur.
@@ -368,7 +393,22 @@ def build_session(verify_ssl: bool = False) -> requests.Session:
 # Host reachability – fallback when ICMP ping is blocked
 # ---------------------------------------------------------------------------
 
-def ping_host(host: str, timeout: int = 3) -> bool:
+def dns_resolves(host: str) -> bool:
+    """
+    Return True if *host* resolves to at least one IP address via DNS.
+
+    This is the cheapest possible reachability pre-check.  Hosts that do not
+    resolve are guaranteed unreachable — skipping them avoids spending 40+
+    seconds on TCP/HTTP timeout chains per dead subdomain.
+    """
+    try:
+        socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        return True
+    except (socket.gaierror, OSError):
+        return False
+
+
+def ping_host(host: str, timeout: int = 2) -> bool:
     """
     Send an ICMP ping to *host*.  Returns True if the host replies.
 
@@ -389,7 +429,7 @@ def ping_host(host: str, timeout: int = 3) -> bool:
         return False
 
 
-def tcp_connect(host: str, port: int = 443, timeout: int = 5) -> bool:
+def tcp_connect(host: str, port: int = 443, timeout: int = REACHABILITY_TCP_TIMEOUT) -> bool:
     """Try a raw TCP connection to *host*:*port*.  Returns True on success."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -401,7 +441,7 @@ def tcp_connect(host: str, port: int = 443, timeout: int = 5) -> bool:
 def http_head_check(
     host: str,
     session: requests.Session | None = None,
-    timeout: int = 10,
+    timeout: int = REACHABILITY_HTTP_TIMEOUT,
 ) -> dict:
     """
     Perform an HTTP(S) HEAD request to determine reachability and basic
@@ -436,9 +476,11 @@ def check_host_reachable(
     """
     Multi-strategy reachability check for a hostname.
 
+    0. DNS resolution – instant reject if hostname does not resolve.
     1. ICMP ping – fastest but often blocked by firewalls.
     2. TCP connect to port 443 (HTTPS) – works even if ICMP is blocked.
-    3. TCP connect to port 80 (HTTP) – fallback for plain-HTTP servers.
+    3. TCP connect to port 80 (HTTP) – fallback for plain-HTTP servers
+       (skipped if port 443 already succeeded).
     4. HTTP HEAD request – confirms the web server is responding.
 
     Returns a dict describing which method succeeded and server details.
@@ -447,6 +489,7 @@ def check_host_reachable(
     """
     result = {
         "host": host,
+        "dns": False,
         "ping": False,
         "tcp_443": False,
         "tcp_80": False,
@@ -454,6 +497,12 @@ def check_host_reachable(
         "reachable": False,
         "method": "",
     }
+
+    # Step 0 – DNS resolution (instant; avoids 40s+ of timeouts)
+    if not dns_resolves(host):
+        log.debug("Host %s does not resolve in DNS – skipping.", host)
+        return result
+    result["dns"] = True
 
     # Step 1 – ICMP ping (quick, often blocked)
     result["ping"] = ping_host(host)
@@ -472,6 +521,7 @@ def check_host_reachable(
             result["method"] = "tcp:443"
         log.debug("Host %s has port 443 open.", host)
 
+    # Only check port 80 if 443 failed (avoids redundant 3s timeout)
     if not result["reachable"]:
         result["tcp_80"] = tcp_connect(host, 80)
         if result["tcp_80"]:
@@ -480,11 +530,12 @@ def check_host_reachable(
             log.debug("Host %s has port 80 open.", host)
 
     # Step 3 – HTTP HEAD (confirms web server is answering)
-    if result["reachable"] or not result["method"]:
+    # Skip HTTP HEAD entirely if both TCP probes failed — the HEAD
+    # request would just timeout too, wasting 10+ seconds.
+    if result["reachable"]:
         http_info = http_head_check(host, session)
         result["http"] = http_info
         if http_info["reachable"]:
-            result["reachable"] = True
             if not result["method"]:
                 result["method"] = "http"
             log.debug("Host %s HTTP reachable: %s (status %d, server=%s)",
@@ -901,6 +952,7 @@ class MegaredCrawler:
         """Execute the full crawl and return a report."""
         self.report.start_time = datetime.now(timezone.utc).isoformat()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        run_t0 = time.monotonic()
 
         log.info("=" * 60)
         log.info("Megared.net.mx Crawler & Index File Finder")
@@ -914,15 +966,22 @@ class MegaredCrawler:
         # Phase 1: Probe known subdomains and common paths
         log.info("-" * 60)
         log.info("Phase 1: Probing known subdomains and common paths...")
+        p1_t0 = time.monotonic()
         self._probe_subdomains()
+        p1_elapsed = time.monotonic() - p1_t0
+        log.info("Phase 1 completed in %.1fs.", p1_elapsed)
 
         # Phase 2: BFS crawl from discovered pages
         log.info("-" * 60)
         log.info("Phase 2: BFS crawl (depth=%d, max=%d pages)...",
                  self.max_depth, self.max_pages)
+        p2_t0 = time.monotonic()
         self._bfs_crawl()
+        p2_elapsed = time.monotonic() - p2_t0
+        log.info("Phase 2 completed in %.1fs.", p2_elapsed)
 
         # Phase 3: Generate report
+        total_elapsed = time.monotonic() - run_t0
         self.report.end_time = datetime.now(timezone.utc).isoformat()
         self.report.urls_visited = len(self._visited)
         self.report.all_discovered_urls = sorted(self._visited)
@@ -930,7 +989,9 @@ class MegaredCrawler:
         report_path = self.report.save(self.output_dir)
 
         log.info("-" * 60)
-        log.info("Crawl complete!")
+        log.info("Crawl complete in %.1fs!", total_elapsed)
+        log.info("  Phase 1 (reachability + probing) : %.1fs", p1_elapsed)
+        log.info("  Phase 2 (BFS crawl)              : %.1fs", p2_elapsed)
         log.info("  URLs visited      : %d", self.report.urls_visited)
         log.info("  Index files found  : %d", len(self.report.index_files_found))
         log.info("  Errors            : %d", len(self.report.errors))
@@ -945,16 +1006,27 @@ class MegaredCrawler:
         # Pre-check which subdomains are reachable (handles ping-blocked hosts)
         reachable_hosts: dict[str, dict] = {}
         log.info("Checking reachability of %d subdomains...", len(KNOWN_SUBDOMAINS))
+        t0 = time.monotonic()
         for subdomain in KNOWN_SUBDOMAINS:
+            st = time.monotonic()
             info = check_host_reachable(subdomain, self.session)
+            elapsed = time.monotonic() - st
             reachable_hosts[subdomain] = info
             self.report.subdomains_probed.append(subdomain)
             if info["reachable"]:
-                log.info("  ✓ %s  (via %s)", subdomain, info["method"])
+                log.info("  ✓ %s  (via %s, %.1fs)", subdomain, info["method"], elapsed)
             else:
-                log.info("  ✗ %s  (unreachable)", subdomain)
+                reason = "no DNS" if not info.get("dns", True) else "unreachable"
+                log.info("  ✗ %s  (%s, %.1fs)", subdomain, reason, elapsed)
+        reachability_time = time.monotonic() - t0
 
-        targets = []
+        reachable_count = sum(1 for h in reachable_hosts.values() if h["reachable"])
+        log.info("Reachability check done: %d/%d reachable in %.1fs.",
+                 reachable_count, len(KNOWN_SUBDOMAINS), reachability_time)
+
+        # Build target URL list with deduplication
+        seen_targets: set[str] = set()
+        targets: list[str] = []
         for subdomain in KNOWN_SUBDOMAINS:
             if not reachable_hosts[subdomain]["reachable"]:
                 continue  # skip unreachable hosts entirely
@@ -968,21 +1040,32 @@ class MegaredCrawler:
 
             for scheme in schemes:
                 for path in COMMON_PATHS:
-                    targets.append(f"{scheme}://{subdomain}{path}")
+                    u = f"{scheme}://{subdomain}{path}"
+                    if u not in seen_targets:
+                        seen_targets.add(u)
+                        targets.append(u)
                 for idx_file in INDEX_FILENAMES[:10]:
-                    targets.append(f"{scheme}://{subdomain}/{idx_file}")
+                    u = f"{scheme}://{subdomain}/{idx_file}"
+                    if u not in seen_targets:
+                        seen_targets.add(u)
+                        targets.append(u)
 
             if self.include_ports:
                 for port in EXTRA_PORTS:
                     for scheme in ("https", "http"):
                         base = f"{scheme}://{subdomain}:{port}"
-                        targets.append(f"{base}/")
+                        u = f"{base}/"
+                        if u not in seen_targets:
+                            seen_targets.add(u)
+                            targets.append(u)
                         for idx_file in INDEX_FILENAMES[:5]:
-                            targets.append(f"{base}/{idx_file}")
+                            u = f"{base}/{idx_file}"
+                            if u not in seen_targets:
+                                seen_targets.add(u)
+                                targets.append(u)
 
-        log.info("Probing %d target URLs across %d reachable subdomains...",
-                 len(targets),
-                 sum(1 for h in reachable_hosts.values() if h["reachable"]))
+        log.info("Probing %d unique target URLs across %d reachable subdomains...",
+                 len(targets), reachable_count)
 
         for url in targets:
             if self._pages_fetched >= self.max_pages:
@@ -1246,6 +1329,10 @@ def parse_args() -> argparse.Namespace:
         help="Also probe non-standard ports (8080, 8443, 7547, etc.)",
     )
     parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT,
+        help=f"HTTP request timeout in seconds (default: {DEFAULT_TIMEOUT})",
+    )
+    parser.add_argument(
         "--no-verify-ssl", dest="verify_ssl", action="store_false", default=False,
         help="Disable TLS certificate verification (default: disabled)",
     )
@@ -1257,12 +1344,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    global REQUEST_TIMEOUT
     args = parse_args()
 
     _setup_logging(debug=args.debug)
 
     if args.debug:
         logging.getLogger("urllib3").setLevel(logging.DEBUG)
+
+    # Apply user-specified timeout
+    REQUEST_TIMEOUT = args.timeout
 
     try:
         import urllib3

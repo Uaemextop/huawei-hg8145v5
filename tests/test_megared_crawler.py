@@ -30,6 +30,7 @@ from megared_crawler import (
     extract_title,
     is_index_file,
     normalise_url,
+    dns_resolves,
     ping_host,
     tcp_connect,
     http_head_check,
@@ -151,6 +152,18 @@ class TestIsIndexFile(unittest.TestCase):
 
     def test_home_html(self):
         self.assertTrue(is_index_file("https://megared.net.mx/home.html"))
+
+    def test_index_jhtml(self):
+        self.assertTrue(is_index_file("https://megared.net.mx/index.jhtml"))
+
+    def test_index_phtml(self):
+        self.assertTrue(is_index_file("https://megared.net.mx/index.phtml"))
+
+    def test_index_jsf(self):
+        self.assertTrue(is_index_file("https://megared.net.mx/index.jsf"))
+
+    def test_index_jhtml_in_firmware(self):
+        self.assertTrue(is_index_file("https://megared.net.mx/firmware/index.jhtml"))
 
     def test_empty_path(self):
         self.assertTrue(is_index_file("https://megared.net.mx"))
@@ -364,16 +377,59 @@ class TestConfigConstants(unittest.TestCase):
         self.assertIn("index.php", INDEX_FILENAMES)
         self.assertIn("index.asp", INDEX_FILENAMES)
 
+    def test_index_filenames_contain_jhtml(self):
+        self.assertIn("index.jhtml", INDEX_FILENAMES)
+
+    def test_index_filenames_contain_phtml(self):
+        self.assertIn("index.phtml", INDEX_FILENAMES)
+
+    def test_index_filenames_contain_jsf(self):
+        self.assertIn("index.jsf", INDEX_FILENAMES)
+
+    def test_index_filenames_contain_jspx(self):
+        self.assertIn("index.jspx", INDEX_FILENAMES)
+
     def test_common_paths_contain_root(self):
         self.assertIn("/", COMMON_PATHS)
 
     def test_common_paths_contain_cwmp(self):
         self.assertIn("/service/cwmp", COMMON_PATHS)
 
+    def test_common_paths_contain_firmware(self):
+        self.assertIn("/firmware/", COMMON_PATHS)
+
+    def test_common_paths_contain_firmware_update(self):
+        self.assertIn("/firmware/update/", COMMON_PATHS)
+
+    def test_common_paths_contain_download(self):
+        self.assertIn("/download/", COMMON_PATHS)
+
+    def test_common_paths_contain_fw(self):
+        self.assertIn("/fw/", COMMON_PATHS)
+
+    def test_common_paths_contain_acs(self):
+        self.assertIn("/acs/", COMMON_PATHS)
+
 
 # ===================================================================
 # Reachability & ping-blocked host handling
 # ===================================================================
+
+class TestDnsResolves(unittest.TestCase):
+    """Test DNS pre-resolution check."""
+
+    @patch("megared_crawler.socket.getaddrinfo", return_value=[(2, 1, 6, '', ('1.2.3.4', 0))])
+    def test_resolves(self, mock_dns):
+        self.assertTrue(dns_resolves("megared.net.mx"))
+
+    @patch("megared_crawler.socket.getaddrinfo", side_effect=socket.gaierror("not found"))
+    def test_does_not_resolve(self, mock_dns):
+        self.assertFalse(dns_resolves("nonexistent.megared.net.mx"))
+
+    @patch("megared_crawler.socket.getaddrinfo", side_effect=OSError("network"))
+    def test_os_error(self, mock_dns):
+        self.assertFalse(dns_resolves("megared.net.mx"))
+
 
 class TestPingHost(unittest.TestCase):
     """Test ICMP ping wrapper."""
@@ -448,12 +504,13 @@ class TestHttpHeadCheck(unittest.TestCase):
 
 
 class TestCheckHostReachable(unittest.TestCase):
-    """Test multi-strategy reachability (ping → TCP → HTTP)."""
+    """Test multi-strategy reachability (DNS → ping → TCP → HTTP)."""
 
     @patch("megared_crawler.http_head_check")
     @patch("megared_crawler.tcp_connect")
     @patch("megared_crawler.ping_host")
-    def test_ping_blocked_tcp_works(self, mock_ping, mock_tcp, mock_http):
+    @patch("megared_crawler.dns_resolves", return_value=True)
+    def test_ping_blocked_tcp_works(self, mock_dns, mock_ping, mock_tcp, mock_http):
         """Host blocks ICMP but TCP 443 is open."""
         mock_ping.return_value = False
         mock_tcp.side_effect = lambda h, p, **kw: p == 443
@@ -464,12 +521,14 @@ class TestCheckHostReachable(unittest.TestCase):
         self.assertTrue(result["reachable"])
         self.assertFalse(result["ping"])
         self.assertTrue(result["tcp_443"])
+        self.assertTrue(result["dns"])
 
     @patch("megared_crawler.http_head_check")
     @patch("megared_crawler.tcp_connect")
     @patch("megared_crawler.ping_host")
-    def test_all_fail(self, mock_ping, mock_tcp, mock_http):
-        """Completely unreachable host."""
+    @patch("megared_crawler.dns_resolves", return_value=True)
+    def test_all_fail(self, mock_dns, mock_ping, mock_tcp, mock_http):
+        """Completely unreachable host (DNS resolves but nothing open)."""
         mock_ping.return_value = False
         mock_tcp.return_value = False
         mock_http.return_value = {"reachable": False, "status": 0,
@@ -481,7 +540,8 @@ class TestCheckHostReachable(unittest.TestCase):
     @patch("megared_crawler.http_head_check")
     @patch("megared_crawler.tcp_connect")
     @patch("megared_crawler.ping_host")
-    def test_ping_succeeds(self, mock_ping, mock_tcp, mock_http):
+    @patch("megared_crawler.dns_resolves", return_value=True)
+    def test_ping_succeeds(self, mock_dns, mock_ping, mock_tcp, mock_http):
         mock_ping.return_value = True
         mock_tcp.return_value = True
         mock_http.return_value = {"reachable": True, "status": 200,
@@ -491,6 +551,14 @@ class TestCheckHostReachable(unittest.TestCase):
         self.assertTrue(result["reachable"])
         self.assertTrue(result["ping"])
         self.assertEqual(result["method"], "ping")
+
+    @patch("megared_crawler.dns_resolves", return_value=False)
+    def test_dns_fails_skips_everything(self, mock_dns):
+        """Host that does not resolve in DNS is immediately unreachable."""
+        result = check_host_reachable("nope.megared.net.mx")
+        self.assertFalse(result["reachable"])
+        self.assertFalse(result.get("dns", False))
+        self.assertEqual(result["method"], "")
 
 
 # ===================================================================
