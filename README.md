@@ -128,3 +128,56 @@ downloaded_site/
 >
 > You can supply the password securely via the `ROUTER_PASSWORD` environment
 > variable or the `--password` flag (which will prompt if omitted).
+
+---
+
+## Megared.net.mx Crawler
+
+Standalone BFS crawler that maps the MEGACABLE ISP infrastructure at
+`megared.net.mx` and its subdomains, searching for index/default files.
+
+### Usage
+
+```bash
+# Basic crawl
+python megared_crawler.py
+
+# Deeper crawl with more pages
+python megared_crawler.py --depth 3 --max-pages 500
+
+# Include non-standard ports (8080, 8443, 7547 TR-069)
+python megared_crawler.py --include-ports
+
+# Debug output
+python megared_crawler.py --debug
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `megared_output` | Output directory |
+| `--depth` | `2` | Max BFS crawl depth |
+| `--max-pages` | `200` | Max pages to fetch |
+| `--delay` | `0.5` | Seconds between requests |
+| `--include-ports` | off | Also probe ports 80, 443, 8080, 8443, 7547 |
+| `--debug` | off | Verbose logging |
+
+### Resilience features
+
+* **Ping-blocked hosts** – when ICMP is blocked the crawler falls back to
+  TCP connect (ports 443/80) and HTTP HEAD checks before skipping a host.
+* **Connection-reset recovery** – on `ECONNRESET` / `BrokenPipe` errors the
+  crawler applies exponential back-off, rotates User-Agent (including Huawei
+  ONT device UAs), swaps HTTP ↔ HTTPS, and builds fresh sessions.
+* **HTTP rejection handling** – 403, 429, 503 responses are retried with
+  query stripping, trailing-slash, and `Retry-After` back-off.
+* **Huawei router User-Agents** – the UA pool includes CWMP/TR-069 strings
+  from HG8145V5, HG8245H, HG8546M, and EchoLife devices that the ACS at
+  `acsvip.megared.net.mx:7547` already trusts.
+
+### Tests
+
+```bash
+python -m unittest tests.test_megared_crawler -v
+```
