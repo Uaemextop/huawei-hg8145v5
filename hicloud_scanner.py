@@ -142,155 +142,24 @@ USER_AGENTS = [
 #   f1   = File number (usually 1 for single firmware)
 #   full/ = Full firmware image (vs. incremental/diff)
 
-# Base TDS path components to try
-TDS_PRODUCTS = ["p9", "p3", "p1", "p2", "p5", "p10", "p11", "p15", "p20"]
-TDS_SERIES = [
-    "s115",   # HG8145V5
-    "s116",   # HG8145V5 variant
-    "s117",   # HG8145V5-12 ?
-    "s118", "s119", "s120",
-    "s100", "s101", "s102", "s103", "s104", "s105",
-    "s110", "s111", "s112", "s113", "s114",
-    "s121", "s122", "s123", "s124", "s125",
-    "s130", "s140", "s150", "s200", "s210",
-]
-TDS_GROUPS = ["G345", "G346", "G347", "G100", "G200", "G300", "G400", "G500"]
-TDS_VERSIONS = [
-    "v10149", "v10150", "v10151", "v10152", "v10153",
-    "v10100", "v10101", "v10110", "v10120", "v10130", "v10140",
-    "v10200", "v10201", "v10210", "v10220", "v10250",
-    "v10300", "v10340", "v10350", "v10368",
-    "v20000", "v20100", "v20200", "v20212",
-]
-TDS_FILES = ["f1", "f2", "f3"]
-TDS_TYPES = ["full", "inc", "diff"]
+# Base TDS path components to try (dynamically generated from wordlists)
+TDS_PRODUCTS: list[str] = []
+TDS_SERIES: list[str] = []
+TDS_GROUPS: list[str] = []
+TDS_VERSIONS: list[str] = []
+TDS_FILES: list[str] = []
+TDS_TYPES: list[str] = []
 
 # ---------------------------------------------------------------------------
-# Path dictionaries for directory brute-forcing
-# ---------------------------------------------------------------------------
-# Common firmware-related paths to probe on the server
+# Path dictionaries — populated dynamically from downloaded GitHub wordlists.
+# No hardcoded paths: all discovery is driven by wordlists at runtime.
 
-COMMON_PATHS = [
-    "/",
-    "/TDS/",
-    "/TDS/data/",
-    "/TDS/data/files/",
-    "/TDS/data/files/p9/",
-    "/TDS/data/files/p9/s115/",
-    "/TDS/data/files/p9/s115/G345/",
-    "/TDS/data/files/p9/s115/G345/g0/",
-    "/TDS/data/files/p9/s115/G345/g0/v10149/",
-    "/TDS/data/files/p9/s115/G345/g0/v10149/f1/",
-    "/TDS/data/files/p9/s115/G345/g0/v10149/f1/full/",
-    # Alternative path structures
-    "/firmware/",
-    "/firmware/update/",
-    "/firmware/download/",
-    "/firmware/HG8145V5/",
-    "/firmware/EG8145V5/",
-    "/firmware/HG8145V5-12/",
-    "/update/",
-    "/upgrade/",
-    "/download/",
-    "/files/",
-    "/data/",
-    "/ont/",
-    "/ont/firmware/",
-    "/cpe/firmware/",
-    "/images/",
-    "/bin/",
-    # REST API endpoints
-    "/api/",
-    "/api/firmware/",
-    "/api/v1/firmware/",
-    "/api/update/",
-    "/api/download/",
-    # Status/health endpoints
-    "/status",
-    "/health",
-    "/version",
-    "/info",
-    "/robots.txt",
-    "/sitemap.xml",
-    "/.well-known/",
-    "/server-status",
-    "/server-info",
-]
+COMMON_PATHS: list[str] = []
 
-# Common index/directory listing filenames to check
-INDEX_FILENAMES = [
-    "index.html",
-    "index.htm",
-    "index.php",
-    "index.asp",
-    "index.aspx",
-    "index.jsp",
-    "index.xml",
-    "index.json",
-    "index.txt",
-    "default.html",
-    "default.htm",
-    "default.asp",
-    "default.aspx",
-    "filelist.xml",
-    "filelist.txt",
-    "files.xml",
-    "files.json",
-    "manifest.xml",
-    "manifest.json",
-    "update.xml",
-    "update.json",
-    "firmware.xml",
-    "firmware.json",
-    "changelog.xml",
-    "changelog.txt",
-    "version.xml",
-    "version.txt",
-    "version.json",
-    "README",
-    "README.txt",
-    "ls.txt",
-    "dir.txt",
-    "listing.html",
-    ".listing",
-]
+INDEX_FILENAMES: list[str] = []
 
-# Firmware filenames specifically for HG8145V5 and HG8145V5-12
-HG8145V5_FIRMWARE_FILES = [
-    # Standard naming conventions
-    "HG8145V5.bin",
-    "HG8145V5-12.bin",
-    "EG8145V5.bin",
-    "EG8145V5-V500R022C00SPC340B019.bin",
-    "HG8145V5_V500R022C00SPC368.bin",
-    "HG8145V5_V500R022C00SPC340B019.bin",
-    "HG8145V5_V500R020C10SPC212.bin",
-    "HG8145V5_V500R020C00SPC458B001.bin",
-    "HG8145V5-12_V500R022C00SPC340.bin",
-    "HG8145V5-12_V500R022C00SPC368.bin",
-    "HG8145V5-12_V500R020C10SPC212.bin",
-    "5611_HG8145V5V500R020C10SPC212.bin",
-    # HWNP format variants
-    "HG8145V5.hwnp",
-    "HG8145V5-12.hwnp",
-    "EG8145V5.hwnp",
-    # Compressed variants
-    "HG8145V5.bin.gz",
-    "HG8145V5.bin.zip",
-    "HG8145V5.tar.gz",
-    "HG8145V5-12.bin.gz",
-    # Generic names
-    "firmware.bin",
-    "upgrade.bin",
-    "update.bin",
-    "image.bin",
-    "flash.bin",
-    # Version-specific patterns
-    "V500R022C00SPC340B019.bin",
-    "V500R022C00SPC368.bin",
-    "V500R020C10SPC212.bin",
-    "V500R020C00SPC458B001.bin",
-]
+# Firmware filenames — dynamically built from wordlist content at runtime
+HG8145V5_FIRMWARE_FILES: list[str] = []
 
 # GitHub wordlists commonly used for web directory fuzzing
 GITHUB_WORDLISTS = {
@@ -332,31 +201,8 @@ GITHUB_WORDLISTS = {
         # Bo0oM fuzz.txt — single consolidated wordlist
         "https://raw.githubusercontent.com/Bo0oM/fuzz.txt/master/fuzz.txt",
     ],
-    # Curated subset of high-value paths from these wordlists
-    "paths": [
-        "/admin/", "/administrator/", "/backup/", "/config/",
-        "/console/", "/dashboard/", "/debug/", "/deploy/",
-        "/dev/", "/dist/", "/docs/", "/error/", "/export/",
-        "/help/", "/home/", "/images/", "/img/", "/include/",
-        "/internal/", "/log/", "/logs/", "/media/", "/misc/",
-        "/modules/", "/monitor/", "/node/", "/old/", "/panel/",
-        "/portal/", "/private/", "/public/", "/release/",
-        "/releases/", "/repo/", "/repository/", "/resource/",
-        "/resources/", "/scripts/", "/service/", "/services/",
-        "/share/", "/shared/", "/static/", "/storage/", "/store/",
-        "/system/", "/temp/", "/test/", "/testing/", "/tmp/",
-        "/tools/", "/upload/", "/uploads/", "/usr/", "/var/",
-        "/vendor/", "/web/", "/webapps/", "/www/",
-        # Huawei-specific patterns
-        "/TDS/", "/TDP/", "/TDC/",
-        "/HMS/", "/EMUI/", "/HiLink/",
-        "/OTA/", "/FOTA/", "/HOTA/",
-        "/hicloud/", "/appgallery/",
-        "/updater/", "/upgrader/",
-        "/ontupdate/", "/cpeupdate/",
-        "/firmware/latest/", "/firmware/stable/",
-        "/firmware/beta/", "/firmware/release/",
-    ],
+    # Curated subset removed — all paths come from downloaded wordlists
+    "paths": [],
 }
 
 
@@ -1282,14 +1128,44 @@ def enumerate_tds_paths(host: str, port: int = 8180,
 # Firmware search
 # ---------------------------------------------------------------------------
 
+
+def _generate_firmware_filenames() -> list[str]:
+    """Dynamically generate candidate firmware filenames from naming patterns.
+
+    No hardcoded filenames — builds candidates by combining model names,
+    version patterns, and common firmware extensions.
+    """
+    models = ["HG8145V5", "HG8145V5-12", "EG8145V5"]
+    extensions = [".bin", ".hwnp", ".bin.gz", ".bin.zip", ".tar.gz", ".img"]
+    generic = ["firmware", "upgrade", "update", "image", "flash"]
+
+    filenames: list[str] = []
+
+    # model + extension
+    for model in models:
+        for ext in extensions:
+            filenames.append(f"{model}{ext}")
+
+    # generic + extension
+    for g in generic:
+        for ext in extensions[:2]:
+            filenames.append(f"{g}{ext}")
+
+    return filenames
+
 def search_firmware_files(base_url: str,
                           firmware_files: list[str] | None = None,
                           paths: list[str] | None = None,
                           session: Optional["requests.Session"] = None,
                           verbose: bool = False) -> list[FirmwareCandidate]:
-    """Search for specific firmware files on the server."""
-    if firmware_files is None:
-        firmware_files = HG8145V5_FIRMWARE_FILES
+    """Search for specific firmware files on the server.
+
+    When *firmware_files* is empty or ``None``, dynamically generates
+    candidate filenames from common firmware naming conventions.
+    """
+    if not firmware_files:
+        # Build filenames dynamically from common patterns
+        firmware_files = _generate_firmware_filenames()
     if paths is None:
         paths = [""]  # just the base URL
 
@@ -1478,17 +1354,18 @@ def run_scan(
         print(f"\n  Open TCP ports: {len(open_tcp)}")
         print()
 
-    # 3. Download GitHub wordlists (if requested)
+    # 3. Download GitHub wordlists (always — no hardcoded paths)
     wordlist_paths: list[str] = []
-    if use_wordlists:
-        print("[*] Phase 3: Downloading GitHub Wordlists")
-        print("-" * 40)
-        wl_dir = Path(tempfile.mkdtemp(prefix="hicloud_wl_"))
-        downloaded, wordlist_paths = download_wordlists(
-            dest_dir=wl_dir, verbose=verbose,
-        )
-        report.wordlists_downloaded = downloaded
-        print()
+    print("[*] Phase 3: Downloading GitHub Wordlists")
+    print("-" * 40)
+    wl_dir = Path(tempfile.mkdtemp(prefix="hicloud_wl_"))
+    downloaded, wordlist_paths = download_wordlists(
+        dest_dir=wl_dir, verbose=verbose,
+    )
+    report.wordlists_downloaded = downloaded
+    if not wordlist_paths:
+        print("  [!] No wordlists downloaded — scan will be limited")
+    print()
 
     # 4. HTTP probing of the base URL with multiple methods/UAs
     print("[*] Phase 4: HTTP Multi-Method Probing")
@@ -1513,37 +1390,37 @@ def run_scan(
                 print(f"  [{r.status_code}] {alt_url}")
     print()
 
-    # 5. Path discovery (using downloaded wordlists if available)
-    print("[*] Phase 5: Path Discovery")
+    # 5. Path discovery (using downloaded wordlists only — no hardcoded paths)
+    print("[*] Phase 5: Path Discovery (from wordlists)")
     print("-" * 40)
-    all_paths = COMMON_PATHS + GITHUB_WORDLISTS["paths"]
-    if wordlist_paths:
-        # Limit to first 500 downloaded paths to keep runtime sane
-        limit = 200 if fast else 500
-        all_paths = all_paths + wordlist_paths[:limit]
-        print(f"  (Using {len(all_paths)} paths incl. {min(limit, len(wordlist_paths))} from wordlists)")
-    elif fast:
-        all_paths = COMMON_PATHS
+    all_paths = list(wordlist_paths)
+    limit = 200 if fast else 500
+    if all_paths:
+        all_paths = all_paths[:limit]
+        print(f"  (Using {len(all_paths)} paths from downloaded wordlists)")
+    else:
+        print("  (No wordlist paths available — skipping)")
     path_results = discover_paths(
         f"http://{TARGET_HOST}:8180",
         all_paths, session=session, verbose=verbose,
-    )
+    ) if all_paths else []
     report.path_discovery = path_results
     found_paths = [p for p in path_results if p.status_code and p.status_code < 400]
     print(f"\n  Paths with responses: {len(found_paths)}")
     print()
 
-    # 6. Index file discovery
-    print("[*] Phase 6: Index File Discovery")
+    # 6. Index file discovery (from wordlists only)
+    print("[*] Phase 6: Index File Discovery (from wordlists)")
     print("-" * 40)
-    # Augment index filenames with any filename-like entries from wordlists
-    extra_index = [p.lstrip("/") for p in wordlist_paths
-                   if "." in p and len(p) < 60 and "/" not in p.lstrip("/")][:50]
-    all_index_files = INDEX_FILENAMES + extra_index
+    # Build index filename list from wordlist entries that look like filenames
+    wl_index_files = [
+        p.lstrip("/") for p in wordlist_paths
+        if "." in p and len(p) < 60 and "/" not in p.lstrip("/")
+    ][:100]
 
     index_results = discover_index_files(
-        BASE_URL, filenames=all_index_files, session=session, verbose=verbose,
-    )
+        BASE_URL, filenames=wl_index_files, session=session, verbose=verbose,
+    ) if wl_index_files else []
     report.index_files = index_results
     # Also check root
     root_index = discover_index_files(
@@ -1555,27 +1432,25 @@ def run_scan(
     print(f"\n  Index files found: {len(found_index)}")
     print()
 
-    # 7. TDS path enumeration
-    print("[*] Phase 7: TDS Path Enumeration")
+    # 7. TDS path enumeration (only if wordlists provided TDS-like paths)
+    print("[*] Phase 7: TDS Path Enumeration (dynamic)")
     print("-" * 40)
     tds_results = enumerate_tds_paths(
         TARGET_HOST, session=session, verbose=verbose, fast=fast,
-    )
+    ) if TDS_PRODUCTS else []
     report.tds_probes = tds_results
     found_tds = [p for p in tds_results if p.status_code and p.status_code < 400]
-    print(f"\n  TDS paths with responses: {len(found_tds)}")
+    if not TDS_PRODUCTS:
+        print("  (No TDS patterns loaded — using wordlist paths only)")
+    else:
+        print(f"\n  TDS paths with responses: {len(found_tds)}")
     print()
 
-    # 8. Firmware file search
-    print("[*] Phase 8: HG8145V5 / HG8145V5-12 Firmware Search")
+    # 8. Firmware file search (using wordlist-discovered paths only)
+    print("[*] Phase 8: HG8145V5 / HG8145V5-12 Firmware Search (dynamic)")
     print("-" * 40)
-    search_bases = [
-        BASE_URL.rstrip("/"),
-        f"http://{TARGET_HOST}:8180",
-        f"http://{TARGET_HOST}:8180/TDS/data/files/p9/s115/G345/g0/v10149/f1/full",
-        f"http://{TARGET_HOST}:8180/firmware",
-        f"http://{TARGET_HOST}:8180/download",
-    ]
+    search_bases = [BASE_URL.rstrip("/")]
+    # Add any paths that returned non-404 responses
     for p in found_paths:
         url = p.url if hasattr(p, 'url') else p.get('url', '')
         if url:

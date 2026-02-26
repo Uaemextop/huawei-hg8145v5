@@ -118,91 +118,53 @@ class TestUserAgents(unittest.TestCase):
 
 
 class TestTDSPatterns(unittest.TestCase):
-    """Test TDS URL path patterns."""
+    """Test TDS patterns are initially empty (dynamic discovery)."""
 
-    def test_products_include_p9(self):
-        self.assertIn("p9", TDS_PRODUCTS)
+    def test_products_empty_by_default(self):
+        self.assertEqual(TDS_PRODUCTS, [])
 
-    def test_series_include_s115(self):
-        self.assertIn("s115", TDS_SERIES)
+    def test_series_empty_by_default(self):
+        self.assertEqual(TDS_SERIES, [])
 
-    def test_series_include_s117(self):
-        """s117 could be HG8145V5-12 variant."""
-        self.assertIn("s117", TDS_SERIES)
+    def test_groups_empty_by_default(self):
+        self.assertEqual(TDS_GROUPS, [])
 
-    def test_groups_include_g345(self):
-        self.assertIn("G345", TDS_GROUPS)
-
-    def test_versions_include_v10149(self):
-        self.assertIn("v10149", TDS_VERSIONS)
+    def test_versions_empty_by_default(self):
+        self.assertEqual(TDS_VERSIONS, [])
 
 
 class TestCommonPaths(unittest.TestCase):
-    """Test common paths for directory discovery."""
+    """Test common paths are empty (populated from wordlists)."""
 
-    def test_not_empty(self):
-        self.assertGreater(len(COMMON_PATHS), 20)
-
-    def test_includes_tds_path(self):
-        self.assertIn("/TDS/", COMMON_PATHS)
-
-    def test_includes_firmware_path(self):
-        self.assertIn("/firmware/", COMMON_PATHS)
-
-    def test_includes_hg8145v5_path(self):
-        hg = [p for p in COMMON_PATHS if "HG8145V5" in p]
-        self.assertGreater(len(hg), 0)
-
-    def test_includes_full_tds_path(self):
-        full = [p for p in COMMON_PATHS if "v10149" in p]
-        self.assertGreater(len(full), 0)
+    def test_empty_by_default(self):
+        self.assertEqual(COMMON_PATHS, [])
 
 
 class TestIndexFilenames(unittest.TestCase):
-    """Test index file discovery names."""
+    """Test index filenames are empty (populated from wordlists)."""
 
-    def test_not_empty(self):
-        self.assertGreater(len(INDEX_FILENAMES), 20)
-
-    def test_includes_index_html(self):
-        self.assertIn("index.html", INDEX_FILENAMES)
-
-    def test_includes_index_xml(self):
-        self.assertIn("index.xml", INDEX_FILENAMES)
-
-    def test_includes_filelist(self):
-        self.assertIn("filelist.xml", INDEX_FILENAMES)
-
-    def test_includes_firmware_json(self):
-        self.assertIn("firmware.json", INDEX_FILENAMES)
-
-    def test_includes_update_xml(self):
-        self.assertIn("update.xml", INDEX_FILENAMES)
+    def test_empty_by_default(self):
+        self.assertEqual(INDEX_FILENAMES, [])
 
 
 class TestFirmwareFiles(unittest.TestCase):
-    """Test HG8145V5 firmware filename list."""
+    """Test firmware file list is empty (dynamically generated)."""
 
-    def test_not_empty(self):
-        self.assertGreater(len(HG8145V5_FIRMWARE_FILES), 20)
+    def test_empty_by_default(self):
+        self.assertEqual(HG8145V5_FIRMWARE_FILES, [])
 
-    def test_hg8145v5_bin(self):
-        self.assertIn("HG8145V5.bin", HG8145V5_FIRMWARE_FILES)
-
-    def test_hg8145v5_12_bin(self):
-        self.assertIn("HG8145V5-12.bin", HG8145V5_FIRMWARE_FILES)
-
-    def test_eg8145v5_spc340(self):
-        self.assertIn("EG8145V5-V500R022C00SPC340B019.bin",
-                       HG8145V5_FIRMWARE_FILES)
-
-    def test_hg8145v5_12_variants(self):
-        v12 = [f for f in HG8145V5_FIRMWARE_FILES if "HG8145V5-12" in f]
-        self.assertGreater(len(v12), 2, "Should have multiple HG8145V5-12 variants")
-
-    def test_compressed_variants(self):
-        gz = [f for f in HG8145V5_FIRMWARE_FILES if f.endswith(".gz")]
-        self.assertGreater(len(gz), 0)
+    def test_generate_firmware_filenames(self):
+        from hicloud_scanner import _generate_firmware_filenames
+        files = _generate_firmware_filenames()
+        self.assertGreater(len(files), 10)
+        # Should contain HG8145V5 variants
+        hg = [f for f in files if "HG8145V5" in f]
+        self.assertGreater(len(hg), 0)
+        # Should contain different extensions
+        bins = [f for f in files if f.endswith(".bin")]
+        self.assertGreater(len(bins), 0)
+        hwnps = [f for f in files if f.endswith(".hwnp")]
+        self.assertGreater(len(hwnps), 0)
 
 
 class TestGitHubWordlists(unittest.TestCase):
@@ -215,14 +177,13 @@ class TestGitHubWordlists(unittest.TestCase):
         self.assertIn("sources", GITHUB_WORDLISTS)
         self.assertGreater(len(GITHUB_WORDLISTS["sources"]), 0)
 
-    def test_has_paths(self):
-        self.assertIn("paths", GITHUB_WORDLISTS)
-        self.assertGreater(len(GITHUB_WORDLISTS["paths"]), 30)
+    def test_has_download_urls(self):
+        self.assertIn("download_urls", GITHUB_WORDLISTS)
+        self.assertGreater(len(GITHUB_WORDLISTS["download_urls"]), 0)
 
-    def test_includes_huawei_paths(self):
-        paths = GITHUB_WORDLISTS["paths"]
-        huawei = [p for p in paths if "TDS" in p or "HMS" in p or "EMUI" in p]
-        self.assertGreater(len(huawei), 0)
+    def test_paths_empty_by_default(self):
+        """Paths should be empty — all populated from downloaded wordlists."""
+        self.assertEqual(GITHUB_WORDLISTS["paths"], [])
 
 
 class TestPortResult(unittest.TestCase):
@@ -748,8 +709,10 @@ class TestDownloadWordlists(unittest.TestCase):
         mock_session = MagicMock()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.content = b"admin\nbackup\nconfig\nfirmware\nupdate\n"
-        mock_resp.text = "admin\nbackup\nconfig\nfirmware\nupdate\n"
+        # Content must be > 50 bytes to pass the size check
+        lines = "\n".join([f"word{i}" for i in range(30)])
+        mock_resp.content = lines.encode()
+        mock_resp.text = lines
         mock_session.get.return_value = mock_resp
         mock_session_fn.return_value = mock_session
 
@@ -759,8 +722,7 @@ class TestDownloadWordlists(unittest.TestCase):
             )
             self.assertEqual(len(downloaded), 2)
             self.assertGreater(len(paths), 0)
-            self.assertIn("/admin", paths)
-            self.assertIn("/firmware", paths)
+            self.assertIn("/word0", paths)
 
 
 class TestLoadWordlistPaths(unittest.TestCase):
