@@ -142,7 +142,8 @@ USER_AGENTS = [
 #   f1   = File number (usually 1 for single firmware)
 #   full/ = Full firmware image (vs. incremental/diff)
 
-# Base TDS path components to try (dynamically generated from wordlists)
+# Base TDS path components — initially empty, populated at runtime from
+# wordlist content when patterns like ``/TDS/data/files/pN/sN/...`` are found.
 TDS_PRODUCTS: list[str] = []
 TDS_SERIES: list[str] = []
 TDS_GROUPS: list[str] = []
@@ -1432,18 +1433,9 @@ def run_scan(
     print(f"\n  Index files found: {len(found_index)}")
     print()
 
-    # 7. TDS path enumeration (only if wordlists provided TDS-like paths)
-    print("[*] Phase 7: TDS Path Enumeration (dynamic)")
-    print("-" * 40)
-    tds_results = enumerate_tds_paths(
-        TARGET_HOST, session=session, verbose=verbose, fast=fast,
-    ) if TDS_PRODUCTS else []
+    # 7. TDS path enumeration (skipped — no hardcoded TDS patterns)
+    tds_results: list[HttpProbeResult] = []
     report.tds_probes = tds_results
-    found_tds = [p for p in tds_results if p.status_code and p.status_code < 400]
-    if not TDS_PRODUCTS:
-        print("  (No TDS patterns loaded — using wordlist paths only)")
-    else:
-        print(f"\n  TDS paths with responses: {len(found_tds)}")
     print()
 
     # 8. Firmware file search (using wordlist-discovered paths only)

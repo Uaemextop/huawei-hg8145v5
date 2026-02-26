@@ -262,14 +262,18 @@ UPGRADE_SCRIPT_FUNCTIONS = {
     "HW_Script_DealWithDBKey": "Handles debug button press (short press)",
 }
 
+# WARNING: This key is extracted from publicly available firmware for
+# research/analysis purposes only.  It must NOT be used in production systems.
+_ANALYSIS_AES_KEY = "Df7!ui%s9(lmV1L8"
+
 UPGRADE_ENCRYPTION_FLOW = {
     "encrypt": "gzip -f {file} → mv {file}.gz {file} → aescrypt2 0 {file} {file}_tmp",
     "decrypt": "aescrypt2 1 {file} {file}_tmp → mv {file} {file}.gz → gunzip -f {file}.gz",
     "aescrypt2_modes": {
-        0: "Encrypt (AES-128-CBC with key Df7!ui%s9(lmV1L8)",
+        0: "Encrypt (AES-128-CBC)",
         1: "Decrypt",
     },
-    "key": "Df7!ui%s9(lmV1L8",
+    "key": _ANALYSIS_AES_KEY,
     "key_source": "SPEC_OS_AES_CBC_APP_STR in spec_default.cfg",
 }
 
@@ -799,9 +803,9 @@ def attempt_decryption(data: bytes, verbose: bool = False) -> dict:
 
     # Known keys
     keys = [
-        (b"Df7!ui%s9(lmV1L8", "Config AES-128 key"),
-        (hashlib.md5(b"Df7!ui%s9(lmV1L8").digest(), "MD5(config key)"),
-        (hashlib.sha256(b"Df7!ui%s9(lmV1L8").digest()[:16], "SHA256(config key)[:16]"),
+        (_ANALYSIS_AES_KEY.encode(), "Config AES-128 key"),
+        (hashlib.md5(_ANALYSIS_AES_KEY.encode()).digest(), "MD5(config key)"),
+        (hashlib.sha256(_ANALYSIS_AES_KEY.encode()).digest()[:16], "SHA256(config key)[:16]"),
         (b"\x00" * 16, "Zero key"),
     ]
 
