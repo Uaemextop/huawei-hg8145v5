@@ -1,7 +1,9 @@
 """Tests for hicloud_scanner.py — Huawei HiCloud Firmware Server Scanner."""
 
 import json
+import os
 import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +31,7 @@ from hicloud_scanner import (
     PortResult,
     HttpProbeResult,
     FirmwareCandidate,
+    NmapResult,
     ScanReport,
     resolve_host,
     scan_tcp_port,
@@ -38,6 +41,11 @@ from hicloud_scanner import (
     discover_paths,
     discover_index_files,
     search_firmware_files,
+    download_wordlists,
+    load_wordlist_paths,
+    run_nmap_scan,
+    _nmap_available,
+    _parse_nmap_xml,
 )
 
 
@@ -570,6 +578,258 @@ class TestSearchFirmwareFiles(unittest.TestCase):
             firmware_files=["HG8145V5.bin"],
         )
         self.assertFalse(candidates[0].is_downloadable)
+
+
+class TestNmapResult(unittest.TestCase):
+    """Test NmapResult dataclass."""
+
+    def test_to_dict_empty(self):
+        nr = NmapResult(host="1.2.3.4", scan_type="port_scan")
+        d = nr.to_dict()
+        self.assertEqual(d["host"], "1.2.3.4")
+        self.assertEqual(d["scan_type"], "port_scan")
+
+    def test_to_dict_with_ports(self):
+        nr = NmapResult(
+            host="1.2.3.4", scan_type="port_scan",
+            open_ports=["80/tcp", "443/tcp"],
+            services=["80/tcp http (nginx 1.18)", "443/tcp https"],
+        )
+        d = nr.to_dict()
+        self.assertEqual(len(d["open_ports"]), 2)
+        self.assertEqual(len(d["services"]), 2)
+
+    def test_to_dict_with_vulns(self):
+        nr = NmapResult(
+            host="1.2.3.4", scan_type="vuln_scan",
+            vulnerabilities=["[80/tcp] http-vuln-cve2017-5638: VULNERABLE"],
+        )
+        d = nr.to_dict()
+        self.assertEqual(len(d["vulnerabilities"]), 1)
+
+    def test_to_dict_with_error(self):
+        nr = NmapResult(host="1.2.3.4", scan_type="port_scan",
+                        error="nmap not installed")
+        d = nr.to_dict()
+        self.assertIn("error", d)
+
+
+class TestNmapAvailable(unittest.TestCase):
+    """Test nmap availability check."""
+
+    @patch("hicloud_scanner.shutil.which", return_value="/usr/bin/nmap")
+    def test_nmap_found(self, mock_which):
+        self.assertTrue(_nmap_available())
+
+    @patch("hicloud_scanner.shutil.which", return_value=None)
+    def test_nmap_not_found(self, mock_which):
+        self.assertFalse(_nmap_available())
+
+
+class TestParseNmapXml(unittest.TestCase):
+    """Test nmap XML output parsing."""
+
+    def test_parse_empty(self):
+        result = _parse_nmap_xml("<nmaprun></nmaprun>")
+        self.assertEqual(result["ports"], [])
+        self.assertEqual(result["services"], [])
+
+    def test_parse_invalid_xml(self):
+        result = _parse_nmap_xml("not xml at all")
+        self.assertEqual(result["ports"], [])
+
+    def test_parse_open_port(self):
+        xml = """<?xml version="1.0"?>
+        <nmaprun>
+          <host>
+            <ports>
+              <port protocol="tcp" portid="80">
+                <state state="open"/>
+                <service name="http" product="nginx" version="1.18"/>
+              </port>
+              <port protocol="tcp" portid="443">
+                <state state="open"/>
+                <service name="https"/>
+              </port>
+              <port protocol="tcp" portid="22">
+                <state state="closed"/>
+                <service name="ssh"/>
+              </port>
+            </ports>
+          </host>
+        </nmaprun>"""
+        result = _parse_nmap_xml(xml)
+        self.assertEqual(len(result["ports"]), 2)
+        self.assertIn("80/tcp", result["ports"])
+        self.assertIn("443/tcp", result["ports"])
+        # Closed port should not appear
+        self.assertNotIn("22/tcp", result["ports"])
+
+    def test_parse_script_vuln(self):
+        xml = """<?xml version="1.0"?>
+        <nmaprun>
+          <host>
+            <ports>
+              <port protocol="tcp" portid="80">
+                <state state="open"/>
+                <service name="http"/>
+                <script id="http-vuln-cve2017-5638"
+                        output="VULNERABLE: Apache Struts RCE"/>
+              </port>
+            </ports>
+          </host>
+        </nmaprun>"""
+        result = _parse_nmap_xml(xml)
+        self.assertEqual(len(result["scripts"]), 1)
+        self.assertIn("VULNERABLE", result["scripts"][0]["output"])
+
+    def test_parse_os_detection(self):
+        xml = """<?xml version="1.0"?>
+        <nmaprun>
+          <host>
+            <os><osmatch name="Linux 4.4" accuracy="95"/></os>
+            <ports>
+              <port protocol="tcp" portid="80">
+                <state state="open"/>
+                <service name="http"/>
+              </port>
+            </ports>
+          </host>
+        </nmaprun>"""
+        result = _parse_nmap_xml(xml)
+        self.assertEqual(result["os"], "Linux 4.4")
+
+
+class TestRunNmapScan(unittest.TestCase):
+    """Test run_nmap_scan function."""
+
+    @patch("hicloud_scanner._nmap_available", return_value=False)
+    def test_nmap_not_installed(self, mock_avail):
+        nr = run_nmap_scan("1.2.3.4")
+        self.assertEqual(nr.error, "nmap not installed")
+
+    @patch("hicloud_scanner._nmap_available", return_value=True)
+    @patch("hicloud_scanner.subprocess.run")
+    @patch("hicloud_scanner.os.path.exists", return_value=False)
+    def test_nmap_timeout(self, mock_exists, mock_run, mock_avail):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="nmap", timeout=300)
+        nr = run_nmap_scan("1.2.3.4", timeout=300)
+        self.assertIn("timed out", nr.error)
+
+    def test_unknown_scan_type(self):
+        nr = run_nmap_scan("1.2.3.4", scan_type="bogus")
+        # Either nmap not installed or unknown scan_type
+        self.assertTrue(nr.error != "")
+
+
+class TestDownloadWordlists(unittest.TestCase):
+    """Test GitHub wordlist download."""
+
+    def test_wordlist_download_urls_exist(self):
+        """GITHUB_WORDLISTS should have download_urls."""
+        self.assertIn("download_urls", GITHUB_WORDLISTS)
+        self.assertGreater(len(GITHUB_WORDLISTS["download_urls"]), 3)
+
+    def test_wordlist_urls_are_raw_github(self):
+        for url in GITHUB_WORDLISTS["download_urls"]:
+            self.assertTrue(
+                url.startswith("https://raw.githubusercontent.com/"),
+                f"URL is not raw GitHub: {url}",
+            )
+
+    @patch("hicloud_scanner.requests", None)
+    def test_download_without_requests(self):
+        downloaded, paths = download_wordlists()
+        self.assertEqual(downloaded, [])
+        self.assertEqual(paths, [])
+
+    @patch("hicloud_scanner._get_session")
+    def test_download_mocked(self, mock_session_fn):
+        mock_session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"admin\nbackup\nconfig\nfirmware\nupdate\n"
+        mock_resp.text = "admin\nbackup\nconfig\nfirmware\nupdate\n"
+        mock_session.get.return_value = mock_resp
+        mock_session_fn.return_value = mock_session
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloaded, paths = download_wordlists(
+                dest_dir=Path(tmpdir), max_lists=2,
+            )
+            self.assertEqual(len(downloaded), 2)
+            self.assertGreater(len(paths), 0)
+            self.assertIn("/admin", paths)
+            self.assertIn("/firmware", paths)
+
+
+class TestLoadWordlistPaths(unittest.TestCase):
+    """Test loading paths from wordlist files."""
+
+    def test_load_from_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as f:
+            f.write("# comment\nadmin\nbackup\n/config\n\nupdate\n")
+            f.flush()
+            paths = load_wordlist_paths([f.name])
+            self.assertIn("/admin", paths)
+            self.assertIn("/backup", paths)
+            self.assertIn("/config", paths)
+            self.assertIn("/update", paths)
+            os.unlink(f.name)
+
+    def test_load_nonexistent_file(self):
+        paths = load_wordlist_paths(["/nonexistent/file.txt"])
+        self.assertEqual(paths, [])
+
+    def test_deduplication(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as f:
+            f.write("admin\nadmin\nadmin\n")
+            f.flush()
+            paths = load_wordlist_paths([f.name])
+            self.assertEqual(len(paths), 1)
+            os.unlink(f.name)
+
+
+class TestScanReportNewFields(unittest.TestCase):
+    """Test new fields in ScanReport."""
+
+    def test_nmap_results_field(self):
+        r = ScanReport()
+        self.assertEqual(r.nmap_results, [])
+
+    def test_wordlists_downloaded_field(self):
+        r = ScanReport()
+        self.assertEqual(r.wordlists_downloaded, [])
+
+    def test_to_dict_includes_nmap(self):
+        r = ScanReport(
+            nmap_results=[NmapResult(host="1.2.3.4", scan_type="port_scan")],
+        )
+        d = r.to_dict()
+        self.assertIn("nmap_results", d)
+        self.assertEqual(len(d["nmap_results"]), 1)
+
+    def test_to_dict_includes_wordlists(self):
+        r = ScanReport(wordlists_downloaded=["/tmp/common.txt"])
+        d = r.to_dict()
+        self.assertIn("wordlists_downloaded", d)
+        self.assertEqual(d["wordlists_downloaded"], ["/tmp/common.txt"])
+
+    def test_print_summary_with_nmap(self):
+        """print_summary with nmap data should not raise."""
+        r = ScanReport(
+            timestamp="2025-01-01",
+            nmap_results=[NmapResult(
+                host="1.2.3.4", scan_type="port_scan",
+                open_ports=["80/tcp"],
+                vulnerabilities=["[80/tcp] test-vuln: VULNERABLE"],
+            )],
+            wordlists_downloaded=["/tmp/common.txt"],
+            summary="Test",
+        )
+        r.print_summary()  # Should not raise
 
 
 if __name__ == "__main__":

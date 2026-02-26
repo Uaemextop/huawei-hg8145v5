@@ -28,12 +28,17 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -296,6 +301,37 @@ GITHUB_WORDLISTS = {
         "https://github.com/Bo0oM/fuzz.txt",
         "https://github.com/six2dez/OneListForAll",
     ],
+    # Raw download URLs for real wordlists (small/medium size for speed)
+    "download_urls": [
+        # SecLists — common web content discovery
+        (
+            "https://raw.githubusercontent.com/danielmiessler/SecLists"
+            "/master/Discovery/Web-Content/common.txt"
+        ),
+        # SecLists — directory listing filenames
+        (
+            "https://raw.githubusercontent.com/danielmiessler/SecLists"
+            "/master/Discovery/Web-Content/directory-list-2.3-small.txt"
+        ),
+        # SecLists — raft filenames (common index/default files)
+        (
+            "https://raw.githubusercontent.com/danielmiessler/SecLists"
+            "/master/Discovery/Web-Content/raft-small-files.txt"
+        ),
+        # SecLists — raft directories
+        (
+            "https://raw.githubusercontent.com/danielmiessler/SecLists"
+            "/master/Discovery/Web-Content/raft-small-directories.txt"
+        ),
+        # fuzzdb — common file names
+        (
+            "https://raw.githubusercontent.com/fuzzdb-project/fuzzdb"
+            "/master/discovery/predictable-filepaths/"
+            "filename-dirname-bruteforce/raft-small-files.txt"
+        ),
+        # Bo0oM fuzz.txt — single consolidated wordlist
+        "https://raw.githubusercontent.com/Bo0oM/fuzz.txt/master/fuzz.txt",
+    ],
     # Curated subset of high-value paths from these wordlists
     "paths": [
         "/admin/", "/administrator/", "/backup/", "/config/",
@@ -424,6 +460,40 @@ class FirmwareCandidate:
 
 
 @dataclass
+class NmapResult:
+    """Result of an nmap scan."""
+    command: str = ""
+    host: str = ""
+    scan_type: str = ""        # "port_scan", "vuln_scan", "service_detect"
+    open_ports: list = field(default_factory=list)
+    services: list = field(default_factory=list)
+    vulnerabilities: list = field(default_factory=list)
+    os_detection: str = ""
+    raw_output: str = ""
+    xml_output: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict:
+        d = {
+            "command": self.command,
+            "host": self.host,
+            "scan_type": self.scan_type,
+        }
+        if self.open_ports:
+            d["open_ports"] = self.open_ports
+        if self.services:
+            d["services"] = self.services
+        if self.vulnerabilities:
+            d["vulnerabilities"] = self.vulnerabilities
+        if self.os_detection:
+            d["os_detection"] = self.os_detection
+        if self.error:
+            d["error"] = self.error
+        # raw_output/xml_output omitted from dict for brevity
+        return d
+
+
+@dataclass
 class ScanReport:
     """Full scan report for Huawei HiCloud firmware server."""
     timestamp: str = ""
@@ -437,6 +507,8 @@ class ScanReport:
     index_files: list = field(default_factory=list)
     firmware_candidates: list = field(default_factory=list)
     tds_probes: list = field(default_factory=list)
+    nmap_results: list = field(default_factory=list)
+    wordlists_downloaded: list = field(default_factory=list)
     summary: str = ""
 
     def to_dict(self) -> dict:
@@ -462,6 +534,9 @@ class ScanReport:
             "tds_probes_count": len(self.tds_probes),
             "tds_probes": [p.to_dict() if hasattr(p, 'to_dict') else p
                            for p in self.tds_probes],
+            "nmap_results": [n.to_dict() if hasattr(n, 'to_dict') else n
+                             for n in self.nmap_results],
+            "wordlists_downloaded": self.wordlists_downloaded,
             "summary": self.summary,
         }
 
@@ -523,6 +598,38 @@ class ScanReport:
                 status = "✓ DOWNLOAD" if dl else f"[{code}]"
                 size_str = f" ({size:,} bytes)" if size else ""
                 print(f"    {status} {fn}{size_str}")
+            print()
+
+        if self.nmap_results:
+            print(f"Nmap Scans: {len(self.nmap_results)}")
+            for nr in self.nmap_results:
+                st = nr.scan_type if hasattr(nr, 'scan_type') else nr.get('scan_type', '')
+                host = nr.host if hasattr(nr, 'host') else nr.get('host', '')
+                ports = nr.open_ports if hasattr(nr, 'open_ports') else nr.get('open_ports', [])
+                vulns = nr.vulnerabilities if hasattr(nr, 'vulnerabilities') else nr.get('vulnerabilities', [])
+                svcs = nr.services if hasattr(nr, 'services') else nr.get('services', [])
+                err = nr.error if hasattr(nr, 'error') else nr.get('error', '')
+                print(f"  [{st}] {host}")
+                if ports:
+                    print(f"    Open ports: {len(ports)}")
+                    for p in ports[:20]:
+                        print(f"      {p}")
+                if svcs:
+                    print(f"    Services: {len(svcs)}")
+                    for s in svcs[:10]:
+                        print(f"      {s}")
+                if vulns:
+                    print(f"    Vulnerabilities: {len(vulns)}")
+                    for v in vulns:
+                        print(f"      ⚠ {v}")
+                if err:
+                    print(f"    Error: {err}")
+            print()
+
+        if self.wordlists_downloaded:
+            print(f"Wordlists Downloaded: {len(self.wordlists_downloaded)}")
+            for wl in self.wordlists_downloaded:
+                print(f"  {wl}")
             print()
 
         if self.summary:
@@ -652,6 +759,318 @@ def scan_ports(host: str, tcp_ports: list[int], udp_ports: list[int],
                 print(f"  [+] {port}/udp OPEN  {r.banner[:60]}")
 
     return tcp_results, udp_results
+
+
+# ---------------------------------------------------------------------------
+# Nmap integration
+# ---------------------------------------------------------------------------
+
+def _nmap_available() -> bool:
+    """Check if nmap is installed."""
+    return shutil.which("nmap") is not None
+
+
+def _parse_nmap_xml(xml_str: str) -> dict:
+    """Parse nmap XML output into structured data."""
+    result: dict = {"ports": [], "services": [], "scripts": [], "os": ""}
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return result
+
+    # Extract host info
+    for host_el in root.findall(".//host"):
+        # OS detection
+        for osmatch in host_el.findall(".//osmatch"):
+            result["os"] = osmatch.get("name", "")
+            break
+
+        # Ports and services
+        for port_el in host_el.findall(".//port"):
+            portid = port_el.get("portid", "")
+            protocol = port_el.get("protocol", "")
+            state_el = port_el.find("state")
+            state = state_el.get("state", "") if state_el is not None else ""
+            service_el = port_el.find("service")
+            svc_name = service_el.get("name", "") if service_el is not None else ""
+            svc_product = service_el.get("product", "") if service_el is not None else ""
+            svc_version = service_el.get("version", "") if service_el is not None else ""
+
+            if state == "open":
+                result["ports"].append(f"{portid}/{protocol}")
+                svc_str = svc_name
+                if svc_product:
+                    svc_str += f" ({svc_product}"
+                    if svc_version:
+                        svc_str += f" {svc_version}"
+                    svc_str += ")"
+                result["services"].append(f"{portid}/{protocol} {svc_str}")
+
+            # NSE script results (vulnerabilities)
+            for script_el in port_el.findall("script"):
+                sid = script_el.get("id", "")
+                output = script_el.get("output", "")
+                result["scripts"].append({
+                    "port": f"{portid}/{protocol}",
+                    "script": sid,
+                    "output": output.strip()[:500],
+                })
+
+        # Host-level scripts
+        for script_el in host_el.findall(".//hostscript/script"):
+            sid = script_el.get("id", "")
+            output = script_el.get("output", "")
+            result["scripts"].append({
+                "port": "host",
+                "script": sid,
+                "output": output.strip()[:500],
+            })
+
+    return result
+
+
+def run_nmap_scan(host: str, scan_type: str = "port_scan",
+                  ports: str = "-", timeout: int = 300,
+                  verbose: bool = False) -> NmapResult:
+    """Run an nmap scan against a host.
+
+    Parameters
+    ----------
+    host : str
+        Target hostname or IP.
+    scan_type : str
+        One of ``"port_scan"`` (TCP SYN + service detection),
+        ``"vuln_scan"`` (NSE vulnerability scripts), or
+        ``"full_scan"`` (both combined).
+    ports : str
+        Port specification (``"-"`` = all 65535, ``"1-1024"`` = range).
+    timeout : int
+        Maximum seconds to wait for nmap to finish.
+    verbose : bool
+        Print progress.
+    """
+    if not _nmap_available():
+        return NmapResult(host=host, scan_type=scan_type,
+                          error="nmap not installed")
+
+    result = NmapResult(host=host, scan_type=scan_type)
+
+    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
+        xml_path = tmp.name
+
+    try:
+        # Build nmap command
+        cmd = ["nmap"]
+
+        if scan_type == "port_scan":
+            # SYN scan + service version + OS detection on all ports
+            cmd += [
+                "-sS", "-sV",              # SYN scan + service version
+                "-p", ports,                # port range (- = all)
+                "--open",                   # only show open ports
+                "-T4",                      # aggressive timing
+                "--max-retries", "2",
+                "-oX", xml_path,            # XML output
+            ]
+        elif scan_type == "vuln_scan":
+            # Vulnerability scanning with NSE scripts
+            cmd += [
+                "-sV",                      # service version (needed by scripts)
+                "-p", ports,
+                "--script", (
+                    "vuln,"                         # all vuln category scripts
+                    "http-enum,"                    # enumerate web directories
+                    "http-headers,"                 # grab HTTP headers
+                    "http-methods,"                 # check allowed methods
+                    "http-title,"                   # page titles
+                    "http-server-header,"           # server identification
+                    "http-robots.txt,"              # robots.txt
+                    "ssl-cert,"                     # TLS certificate info
+                    "ssl-enum-ciphers,"             # cipher enumeration
+                    "http-vuln-cve2017-5638,"       # Apache Struts RCE
+                    "http-vuln-cve2014-3120,"       # Elasticsearch RCE
+                    "http-shellshock"               # Shellshock
+                ),
+                "--script-timeout", "30s",
+                "-T4",
+                "--max-retries", "2",
+                "-oX", xml_path,
+            ]
+        elif scan_type == "full_scan":
+            # Combined: all ports + services + vuln scripts
+            cmd += [
+                "-sS", "-sV",
+                "-p", ports,
+                "--open",
+                "--script", (
+                    "vuln,"
+                    "http-enum,"
+                    "http-headers,"
+                    "http-methods,"
+                    "http-title,"
+                    "http-server-header,"
+                    "ssl-cert,"
+                    "ssl-enum-ciphers"
+                ),
+                "--script-timeout", "30s",
+                "-T4",
+                "--max-retries", "2",
+                "-oX", xml_path,
+            ]
+        else:
+            result.error = f"Unknown scan_type: {scan_type}"
+            return result
+
+        cmd.append(host)
+        result.command = " ".join(cmd)
+
+        if verbose:
+            print(f"  [nmap] Running: {result.command}")
+
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+        result.raw_output = proc.stdout + proc.stderr
+
+        # Parse XML output
+        if os.path.exists(xml_path):
+            result.xml_output = Path(xml_path).read_text(encoding="utf-8",
+                                                          errors="replace")
+            parsed = _parse_nmap_xml(result.xml_output)
+            result.open_ports = parsed["ports"]
+            result.services = parsed["services"]
+            result.os_detection = parsed["os"]
+
+            # Extract vulnerabilities from script results
+            for script in parsed["scripts"]:
+                sid = script["script"]
+                out = script["output"]
+                port = script["port"]
+                # vuln scripts usually contain VULNERABLE or CVE
+                if ("VULNERABLE" in out.upper() or "CVE-" in out.upper()
+                        or sid.startswith("http-vuln")
+                        or sid == "vulners"):
+                    result.vulnerabilities.append(
+                        f"[{port}] {sid}: {out[:200]}"
+                    )
+                elif sid in ("http-enum", "http-headers", "http-title",
+                             "http-methods", "http-server-header",
+                             "http-robots.txt"):
+                    # Informational, still useful
+                    result.services.append(f"[{port}] {sid}: {out[:150]}")
+
+        if proc.returncode != 0 and not result.open_ports:
+            result.error = f"nmap exit code {proc.returncode}"
+
+        if verbose:
+            print(f"  [nmap] Open ports: {len(result.open_ports)}")
+            for p in result.open_ports[:15]:
+                print(f"    {p}")
+            if result.vulnerabilities:
+                print(f"  [nmap] Vulnerabilities: {len(result.vulnerabilities)}")
+                for v in result.vulnerabilities:
+                    print(f"    ⚠ {v[:120]}")
+
+    except subprocess.TimeoutExpired:
+        result.error = f"nmap timed out after {timeout}s"
+    except FileNotFoundError:
+        result.error = "nmap binary not found"
+    except Exception as e:
+        result.error = f"nmap error: {str(e)[:200]}"
+    finally:
+        if os.path.exists(xml_path):
+            os.unlink(xml_path)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GitHub wordlist download
+# ---------------------------------------------------------------------------
+
+def download_wordlists(dest_dir: Optional[Path] = None,
+                       max_lists: int = 6,
+                       verbose: bool = False) -> tuple[list[str], list[str]]:
+    """Download file-index / crawling wordlists from GitHub.
+
+    Returns ``(downloaded_files, all_paths)`` where *all_paths* is the
+    deduplicated union of every line from every downloaded wordlist.
+    """
+    if requests is None:
+        return [], []
+
+    if dest_dir is None:
+        dest_dir = Path(tempfile.mkdtemp(prefix="hicloud_wl_"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    urls = GITHUB_WORDLISTS["download_urls"][:max_lists]
+    downloaded: list[str] = []
+    all_paths: list[str] = []
+    seen: set[str] = set()
+
+    session = _get_session()
+
+    for url in urls:
+        fname = url.rstrip("/").rsplit("/", 1)[-1]
+        dest = dest_dir / fname
+        if verbose:
+            print(f"  [↓] Downloading {fname} …")
+        try:
+            resp = session.get(url, timeout=30, verify=False)
+            if resp.status_code == 200 and len(resp.content) > 50:
+                dest.write_bytes(resp.content)
+                downloaded.append(str(dest))
+                # Parse lines into paths
+                for line in resp.text.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    # Normalise: ensure leading slash
+                    if not line.startswith("/"):
+                        line = "/" + line
+                    # Skip very long lines, binary junk, comments
+                    if len(line) > 200:
+                        continue
+                    if line not in seen:
+                        seen.add(line)
+                        all_paths.append(line)
+                if verbose:
+                    print(f"         {len(resp.content):,} bytes → {dest}")
+            else:
+                if verbose:
+                    print(f"         HTTP {resp.status_code} — skipped")
+        except Exception as e:
+            if verbose:
+                print(f"         Error: {e}")
+
+    if verbose:
+        print(f"  [✓] {len(downloaded)} wordlists downloaded, "
+              f"{len(all_paths)} unique paths loaded")
+
+    return downloaded, all_paths
+
+
+def load_wordlist_paths(wordlist_files: list[str]) -> list[str]:
+    """Load paths from previously downloaded wordlist files."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for fpath in wordlist_files:
+        try:
+            text = Path(fpath).read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if not line.startswith("/"):
+                    line = "/" + line
+                if len(line) > 200:
+                    continue
+                if line not in seen:
+                    seen.add(line)
+                    paths.append(line)
+        except OSError:
+            continue
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1408,8 @@ def download_firmware(candidate: FirmwareCandidate,
 
 def run_scan(
     scan_ports_flag: bool = False,
+    nmap_scan: bool = False,
+    use_wordlists: bool = False,
     fast: bool = False,
     download_dir: Optional[Path] = None,
     verbose: bool = True,
@@ -1015,9 +1436,36 @@ def run_scan(
     report.resolved_ips = list(set(report.resolved_ips))
     print()
 
-    # 2. Port scanning (optional, slow)
-    if scan_ports_flag:
-        print("[*] Phase 2: Port Scanning")
+    # 2. Nmap full port scan + vulnerability detection (if requested)
+    if nmap_scan:
+        print("[*] Phase 2: Nmap Port Scan (all ports)")
+        print("-" * 40)
+        if _nmap_available():
+            port_range = "1-10000" if fast else "-"
+            nr = run_nmap_scan(TARGET_HOST, scan_type="port_scan",
+                               ports=port_range, verbose=verbose)
+            report.nmap_results.append(nr)
+
+            # Vulnerability scan on discovered open ports
+            if nr.open_ports:
+                open_str = ",".join(p.split("/")[0] for p in nr.open_ports)
+                print(f"\n  [*] Running vulnerability scan on {open_str}...")
+                vr = run_nmap_scan(TARGET_HOST, scan_type="vuln_scan",
+                                   ports=open_str, verbose=verbose)
+                report.nmap_results.append(vr)
+            else:
+                # Still run vuln scan on common ports
+                print("\n  [*] Running vulnerability scan on common ports...")
+                common = "80,443,8080,8180,8443,7547"
+                vr = run_nmap_scan(TARGET_HOST, scan_type="vuln_scan",
+                                   ports=common, verbose=verbose)
+                report.nmap_results.append(vr)
+        else:
+            print("  [!] nmap not installed — skipping")
+        print()
+    elif scan_ports_flag:
+        # Fallback: Python port scan
+        print("[*] Phase 2: Port Scanning (Python)")
         print("-" * 40)
         tcp_ports = DEFAULT_TCP_PORTS[:20] if fast else DEFAULT_TCP_PORTS
         udp_ports = DEFAULT_UDP_PORTS[:5] if fast else DEFAULT_UDP_PORTS
@@ -1030,8 +1478,20 @@ def run_scan(
         print(f"\n  Open TCP ports: {len(open_tcp)}")
         print()
 
-    # 3. HTTP probing of the base URL with multiple methods/UAs
-    print("[*] Phase 3: HTTP Multi-Method Probing")
+    # 3. Download GitHub wordlists (if requested)
+    wordlist_paths: list[str] = []
+    if use_wordlists:
+        print("[*] Phase 3: Downloading GitHub Wordlists")
+        print("-" * 40)
+        wl_dir = Path(tempfile.mkdtemp(prefix="hicloud_wl_"))
+        downloaded, wordlist_paths = download_wordlists(
+            dest_dir=wl_dir, verbose=verbose,
+        )
+        report.wordlists_downloaded = downloaded
+        print()
+
+    # 4. HTTP probing of the base URL with multiple methods/UAs
+    print("[*] Phase 4: HTTP Multi-Method Probing")
     print("-" * 40)
     methods = ["GET", "HEAD", "OPTIONS", "POST"]
     uas = USER_AGENTS[:4] if fast else USER_AGENTS
@@ -1053,12 +1513,17 @@ def run_scan(
                 print(f"  [{r.status_code}] {alt_url}")
     print()
 
-    # 4. Path discovery
-    print("[*] Phase 4: Path Discovery")
+    # 5. Path discovery (using downloaded wordlists if available)
+    print("[*] Phase 5: Path Discovery")
     print("-" * 40)
     all_paths = COMMON_PATHS + GITHUB_WORDLISTS["paths"]
-    if fast:
-        all_paths = COMMON_PATHS  # Skip wordlist paths in fast mode
+    if wordlist_paths:
+        # Limit to first 500 downloaded paths to keep runtime sane
+        limit = 200 if fast else 500
+        all_paths = all_paths + wordlist_paths[:limit]
+        print(f"  (Using {len(all_paths)} paths incl. {min(limit, len(wordlist_paths))} from wordlists)")
+    elif fast:
+        all_paths = COMMON_PATHS
     path_results = discover_paths(
         f"http://{TARGET_HOST}:8180",
         all_paths, session=session, verbose=verbose,
@@ -1068,11 +1533,16 @@ def run_scan(
     print(f"\n  Paths with responses: {len(found_paths)}")
     print()
 
-    # 5. Index file discovery
-    print("[*] Phase 5: Index File Discovery")
+    # 6. Index file discovery
+    print("[*] Phase 6: Index File Discovery")
     print("-" * 40)
+    # Augment index filenames with any filename-like entries from wordlists
+    extra_index = [p.lstrip("/") for p in wordlist_paths
+                   if "." in p and len(p) < 60 and "/" not in p.lstrip("/")][:50]
+    all_index_files = INDEX_FILENAMES + extra_index
+
     index_results = discover_index_files(
-        BASE_URL, session=session, verbose=verbose,
+        BASE_URL, filenames=all_index_files, session=session, verbose=verbose,
     )
     report.index_files = index_results
     # Also check root
@@ -1085,8 +1555,8 @@ def run_scan(
     print(f"\n  Index files found: {len(found_index)}")
     print()
 
-    # 6. TDS path enumeration
-    print("[*] Phase 6: TDS Path Enumeration")
+    # 7. TDS path enumeration
+    print("[*] Phase 7: TDS Path Enumeration")
     print("-" * 40)
     tds_results = enumerate_tds_paths(
         TARGET_HOST, session=session, verbose=verbose, fast=fast,
@@ -1096,10 +1566,9 @@ def run_scan(
     print(f"\n  TDS paths with responses: {len(found_tds)}")
     print()
 
-    # 7. Firmware file search
-    print("[*] Phase 7: HG8145V5 / HG8145V5-12 Firmware Search")
+    # 8. Firmware file search
+    print("[*] Phase 8: HG8145V5 / HG8145V5-12 Firmware Search")
     print("-" * 40)
-    # Search on the base URL and key TDS paths
     search_bases = [
         BASE_URL.rstrip("/"),
         f"http://{TARGET_HOST}:8180",
@@ -1107,12 +1576,11 @@ def run_scan(
         f"http://{TARGET_HOST}:8180/firmware",
         f"http://{TARGET_HOST}:8180/download",
     ]
-    # Add any discovered paths that returned 200
     for p in found_paths:
         url = p.url if hasattr(p, 'url') else p.get('url', '')
         if url:
             search_bases.append(url.rstrip("/"))
-    search_bases = list(dict.fromkeys(search_bases))  # deduplicate
+    search_bases = list(dict.fromkeys(search_bases))
 
     for base in search_bases:
         candidates = search_firmware_files(
@@ -1120,10 +1588,10 @@ def run_scan(
         )
         report.firmware_candidates.extend(candidates)
 
-    # 8. Download any found firmware
+    # 9. Download any found firmware
     downloadable = [f for f in report.firmware_candidates if f.is_downloadable]
     if downloadable and download_dir:
-        print(f"\n[*] Phase 8: Downloading {len(downloadable)} firmware files")
+        print(f"\n[*] Phase 9: Downloading {len(downloadable)} firmware files")
         print("-" * 40)
         for fw in downloadable:
             download_firmware(fw, download_dir, session=session, verbose=verbose)
@@ -1136,11 +1604,24 @@ def run_scan(
                    if (p.status_code if hasattr(p, 'status_code')
                        else p.get('status_code', 0)) in range(200, 400))
 
+    nmap_info = ""
+    if report.nmap_results:
+        total_open = sum(len(n.open_ports) for n in report.nmap_results
+                         if hasattr(n, 'open_ports'))
+        total_vulns = sum(len(n.vulnerabilities) for n in report.nmap_results
+                          if hasattr(n, 'vulnerabilities'))
+        nmap_info = (f" Nmap found {total_open} open ports, "
+                     f"{total_vulns} vulnerabilities.")
+
+    wl_info = ""
+    if report.wordlists_downloaded:
+        wl_info = f" {len(report.wordlists_downloaded)} wordlists downloaded."
+
     report.summary = (
         f"Scan complete. {total_probes} HTTP probes sent, "
         f"{ok_count} responses with 2xx/3xx status. "
         f"{len(report.firmware_candidates)} firmware candidates checked, "
-        f"{len(downloadable)} downloadable."
+        f"{len(downloadable)} downloadable.{nmap_info}{wl_info}"
     )
 
     return report
@@ -1158,13 +1639,22 @@ def parse_args() -> argparse.Namespace:
             "Examples:\n"
             "  python hicloud_scanner.py\n"
             "  python hicloud_scanner.py --scan-ports\n"
+            "  python hicloud_scanner.py --nmap --wordlists\n"
             "  python hicloud_scanner.py --download-dir ./firmware\n"
             "  python hicloud_scanner.py --json results.json --fast\n"
         ),
     )
     parser.add_argument(
         "--scan-ports", action="store_true", default=False,
-        help="Enable TCP/UDP port scanning (slow)",
+        help="Enable Python TCP/UDP port scanning (use --nmap instead for full scan)",
+    )
+    parser.add_argument(
+        "--nmap", action="store_true", default=False,
+        help="Use nmap for full port scanning + vulnerability detection (NSE scripts)",
+    )
+    parser.add_argument(
+        "--wordlists", action="store_true", default=False,
+        help="Download file-index wordlists from GitHub (SecLists, fuzzdb, fuzz.txt)",
     )
     parser.add_argument(
         "--fast", action="store_true", default=False,
@@ -1190,6 +1680,8 @@ def main() -> None:
 
     report = run_scan(
         scan_ports_flag=args.scan_ports,
+        nmap_scan=args.nmap,
+        use_wordlists=args.wordlists,
         fast=args.fast,
         download_dir=args.download_dir,
         verbose=not args.quiet,
