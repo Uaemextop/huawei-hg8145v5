@@ -155,6 +155,12 @@ CRAWLABLE_TYPES = {
 # Signals that the session has expired – checked only against HTML responses
 _LOGIN_MARKERS = ("txt_Username", "txt_Password", "loginbutton")
 
+# Maximum length for a valid X_HW_Token string.
+# Real tokens from GetRandCount.asp / GetRandToken.asp are short numeric or
+# hex strings (typically 10-20 chars).  Anything longer almost certainly means
+# the endpoint returned an HTML error page (which we must NOT store as a token).
+_MAX_TOKEN_LENGTH = 64
+
 # URL path patterns for write-action endpoints that must NEVER be crawled.
 # • logout – terminates the session
 # • reboot / factory / restore / reset – make irreversible hardware changes
@@ -966,9 +972,12 @@ class Crawler:
         # Using login.cgi as Referer caused HTTP 403 on every admin page.
         self.session.headers["Referer"] = self.base + "/"
 
-        # Fetch a fresh X_HW_Token right after login.
-        # GetRandToken.asp also needs the correct Referer, which is now set.
-        self._refresh_token()
+        # Do NOT proactively refresh the X_HW_Token here.
+        # The token endpoint (/html/ssmp/common/GetRandToken.asp) may not exist
+        # on all firmware versions.  An absent endpoint can respond with
+        # Set-Cookie: Cookie=default, invalidating the just-acquired session.
+        # The token is fetched lazily on demand inside _retry_with_token()
+        # when a 403 response is actually encountered.
 
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
@@ -1149,14 +1158,34 @@ class Crawler:
         POST to /html/ssmp/common/GetRandToken.asp to get a fresh X_HW_Token.
         The token is stored in _current_token for use in 403 retries.
         Falls back silently if the endpoint is unavailable (e.g. not yet logged in).
+
+        Session-safety: saves the ``Cookie`` value before the POST and restores
+        it if the token endpoint resets it to ``default`` (the logged-out state).
+        This prevents the token-refresh call from silently invalidating an
+        authenticated session when the endpoint does not exist on the firmware.
         """
+        saved_cookie = self.session.cookies.get("Cookie")
         try:
             resp = self.session.post(
                 self.base + TOKEN_URL,
                 timeout=REQUEST_TIMEOUT,
             )
+            # Restore the session cookie if the endpoint reset it to default.
+            after_cookie = self.session.cookies.get("Cookie", "")
+            if (
+                saved_cookie
+                and saved_cookie.lower() != "default"
+                and after_cookie.lower() == "default"
+            ):
+                self.session.cookies.set(
+                    "Cookie", saved_cookie, domain=self.host, path="/"
+                )
+                log.debug("Session cookie restored after token refresh (endpoint reset it)")
             token = resp.text.strip()
-            if token and len(token) >= 8:
+            # Validate: a real X_HW_Token is a short alphanumeric string.
+            # Reject HTML error pages (contain '<', spaces, etc.) that the
+            # router returns when the endpoint is absent or unauthenticated.
+            if token and len(token) <= _MAX_TOKEN_LENGTH and token.replace("-", "").isalnum():
                 self._current_token = token
                 log.debug("X_HW_Token refreshed: %s…", token[:12])
         except requests.RequestException as exc:
@@ -1251,7 +1280,9 @@ class Crawler:
                     # Always restore root as Referer — admin pages are accessed
                     # inside the frameset at "/" and need this header to return 200.
                     self.session.headers["Referer"] = self.base + "/"
-                    self._refresh_token()
+                    # Token is refreshed lazily on the next 403 – do NOT call
+                    # _refresh_token() here because the token endpoint can reset
+                    # Cookie=default, invalidating the freshly re-acquired session.
                     self._visited.discard(key)
                     self._queue.appendleft(url)
                     return
