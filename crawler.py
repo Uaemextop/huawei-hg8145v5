@@ -171,7 +171,7 @@ _BLOCKED_PATH_RE = re.compile(
 # Crawling them via a GET causes is_session_expired() to fire a false positive,
 # which triggers an infinite re-login loop.  We save them pre-auth instead and
 # skip HTTP fetches for them during BFS.
-_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp"])
+_AUTH_PAGE_PATHS: frozenset[str] = frozenset(["/login.asp", "/index.asp", "/"])
 
 
 # ---------------------------------------------------------------------------
@@ -251,20 +251,44 @@ def pbkdf2_sha256_password(password: str, salt: str, iterations: int) -> str:
     return base64.b64encode(sha256_hex.encode("utf-8")).decode("ascii")   # step 3
 
 
-def detect_login_mode(session: requests.Session, host: str) -> str:
+def detect_login_mode(session: requests.Session, host: str,
+                      output_dir: Path | None = None) -> str:
     """
-    Fetch /index.asp and parse the embedded JavaScript to determine which
-    login method the router uses.
+    Determine which login method the router uses by parsing CfgMode from JS.
+
+    Tries three sources in order:
+      1. GET /index.asp from the router (live)
+      2. Pre-downloaded index.asp on disk (output_dir/index.asp)
+      3. Pre-downloaded index.html on disk (output_dir/index.html, from "/" save)
 
     Returns the CfgMode string (e.g. 'MEGACABLE2', 'DVODACOM2WIFI', …).
     Returns an empty string on failure (safe fallback = base64 path).
     """
+    _CFG_RE = re.compile(r"""var\s+CfgMode\s*=\s*['"]([^'"]+)['"]""")
+
+    # 1. Try live fetch
     try:
         resp = session.get(base_url(host) + LOGIN_PAGE, timeout=REQUEST_TIMEOUT)
-        cfg_mode = re.search(r"""var\s+CfgMode\s*=\s*['"]([^'"]+)['"]""", resp.text)
-        return cfg_mode.group(1) if cfg_mode else ""
+        m = _CFG_RE.search(resp.text)
+        if m:
+            return m.group(1)
     except Exception:
-        return ""
+        pass
+
+    # 2. Fallback: check pre-downloaded files on disk
+    if output_dir:
+        for name in ("index.asp", "index.html"):
+            p = output_dir / name
+            if p.exists() and p.stat().st_size > 0:
+                try:
+                    m = _CFG_RE.search(p.read_text(encoding="utf-8", errors="replace"))
+                    if m:
+                        log.debug("CfgMode found in local %s", name)
+                        return m.group(1)
+                except OSError:
+                    pass
+
+    return ""
 
 
 def get_rand_token(session: requests.Session, host: str) -> str:
@@ -280,7 +304,30 @@ def get_rand_token(session: requests.Session, host: str) -> str:
     return token
 
 
-def login(session: requests.Session, host: str, username: str, password: str) -> str | None:
+def _deduplicate_cookies(session: requests.Session, host: str) -> None:
+    """
+    Remove duplicate 'Cookie' entries from the session cookie jar.
+
+    The pre-login cookie is set without domain=, while the router's Set-Cookie
+    response creates an entry with domain='192.168.100.1'.  Both coexist in the
+    jar, but only the server-set value represents the authenticated session.
+    We keep the last (newest) entry and remove all others.
+    """
+    cookie_entries = []
+    for cookie in session.cookies:
+        if cookie.name == "Cookie":
+            cookie_entries.append(cookie)
+    if len(cookie_entries) > 1:
+        # Keep the last one (server-set), remove the rest
+        for old in cookie_entries[:-1]:
+            session.cookies.clear(old.domain, old.path, old.name)
+        kept = cookie_entries[-1]
+        log.debug("Deduplicated cookies: kept value=%s domain=%s",
+                  kept.value[:40] if kept.value else "", kept.domain)
+
+
+def login(session: requests.Session, host: str, username: str, password: str,
+          output_dir: Path | None = None) -> str | None:
     """
     Authenticate against the HG8145V5 admin interface.
 
@@ -297,10 +344,10 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     or None on failure.  The URL is used as a seed and as the Referer header.
     """
     # Step 1 – load login page; also detect router config mode
-    cfg_mode = detect_login_mode(session, host)
+    cfg_mode = detect_login_mode(session, host, output_dir=output_dir)
     log.debug("Router CfgMode: %r", cfg_mode)
 
-    log.debug("Cookies after GET /index.asp: %s", dict(session.cookies))
+    log.debug("Cookies before login setup: %s", dict(session.cookies))
 
     use_sha256 = cfg_mode.upper() == "DVODACOM2WIFI"
 
@@ -337,15 +384,17 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
         # Set the pre-login cookie to mimic what the login page JS does:
         #   var cookie2 = "Cookie=body:Language:english:id=-1;path=/";
         #   document.cookie = cookie2;
-        # NOTE: in document.cookie syntax ';path=/' is a COOKIE ATTRIBUTE,
-        # not part of the value.  We specify it via the path= kwarg here so
-        # the router receives the correct value: 'body:Language:english:id=-1'.
+        # IMPORTANT: Do NOT set domain= on the cookie.  Setting domain=host
+        # prevents the router's Set-Cookie from updating the value, because
+        # requests creates a duplicate entry.  Without domain=, the cookie
+        # is properly replaced by the server's response.
+        session.cookies.clear()
         session.cookies.set(
             "Cookie",
             "body:Language:english:id=-1",
-            domain=host,
             path="/",
         )
+        log.debug("Pre-login cookie set (no domain): %s", dict(session.cookies))
         try:
             token = get_rand_token(session, host)
         except requests.RequestException as exc:
@@ -371,6 +420,13 @@ def login(session: requests.Session, host: str, username: str, password: str) ->
     except requests.RequestException as exc:
         log.error("Login POST failed: %s", exc)
         return None
+
+    # Deduplicate cookies: the login POST may have set a new cookie with
+    # domain from the server (e.g. '192.168.100.1') while our pre-login
+    # cookie has domain=''.  Keep only the last (server-set) value.
+    _deduplicate_cookies(session, host)
+
+    log.debug("Cookies after login POST: %s", dict(session.cookies))
 
     # A successful login redirects away from the login form.
     # If the response still contains the login form, credentials were wrong.
@@ -955,8 +1011,13 @@ class Crawler:
         # session-expiry detection).  Saving it here and marking it visited
         # ensures it is available for offline analysis without revisiting it.
         self._save_pre_auth(LOGIN_PAGE)
+        # The root URL "/" typically serves the same content as /index.asp on
+        # Huawei routers.  Pre-save it so it is available for link extraction
+        # and marked visited, preventing false session-expiry detection.
+        self._save_pre_auth("/")
 
-        post_login_url = login(self.session, self.host, self.username, self.password)
+        post_login_url = login(self.session, self.host, self.username, self.password,
+                               output_dir=self.output_dir)
         if not post_login_url:
             sys.exit(1)
 
@@ -970,6 +1031,13 @@ class Crawler:
         # GetRandToken.asp also needs the correct Referer, which is now set.
         self._refresh_token()
 
+        # --- Post-login admin frameset discovery ---
+        # After authentication, "/" may serve a different page than before
+        # login (e.g. the admin frameset with navigation frames).  Fetch it
+        # now and save the authenticated version, extracting links to admin
+        # pages that are only visible after login.
+        self._save_post_auth_frameset()
+
         # Resume: scan previously downloaded files so we don't re-fetch them
         # and so we can discover links that were not followed before.
         if not self.force:
@@ -978,14 +1046,20 @@ class Crawler:
                 log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # --- Dynamic seeding ---
-        # Seed only from "/" (the authenticated admin frameset).
-        # /index.asp was already handled pre-auth by _save_pre_auth() above.
-        # Everything else is discovered by recursively following links.
-        self._enqueue(self.base + "/")
-        if post_login_url not in (self.base + "/",):
+        # Do not seed URLs that are in _AUTH_PAGE_PATHS (/, /index.asp,
+        # /login.asp) because they always return the login form and would
+        # trigger false session-expiry detection.  Links discovered from
+        # _save_pre_auth() already seed all JS/CSS/image resources.
+        # Only seed the post-login URL if it resolves to a genuine admin page.
+        post_path = urllib.parse.urlparse(post_login_url or "").path.lower()
+        if post_login_url and post_path not in _AUTH_PAGE_PATHS:
             self._enqueue(post_login_url)
 
-        log.info("Seeding from / + post-login URL. Dynamic discovery begins.")
+        log.info(
+            "Seeding from pre-auth + post-auth pages. Queue: %d URLs. "
+            "Dynamic discovery begins.",
+            len(self._queue),
+        )
 
         # Exhaust the queue with optional tqdm progress bar
         if _TQDM_AVAILABLE:
@@ -1137,6 +1211,55 @@ class Crawler:
         except requests.RequestException as exc:
             log.debug("Could not pre-download %s: %s", path, exc)
 
+    def _save_post_auth_frameset(self) -> None:
+        """
+        Fetch "/" with the authenticated session to get the admin frameset.
+
+        After login, "/" may return a completely different page (the admin UI
+        with navigation frames) than before login (the login form).  This
+        method fetches the authenticated version, saves it for offline
+        analysis, and extracts links to admin pages that are only accessible
+        after authentication.
+
+        The content is saved as 'admin_frameset.html' to avoid overwriting
+        the pre-auth index.html.  Links are extracted and seeded into the
+        BFS queue.
+        """
+        url = self.base + "/"
+        try:
+            resp = self.session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            if not resp.ok:
+                log.debug("Post-auth frameset fetch failed: HTTP %s", resp.status_code)
+                return
+
+            ct = resp.headers.get("Content-Type", "text/html")
+            content = resp.content
+
+            # If the response still contains the login form, the session
+            # is not actually authenticated — skip saving.
+            text = content.decode("utf-8", errors="replace")
+            if all(marker in text for marker in _LOGIN_MARKERS):
+                log.debug("Post-auth '/' still shows login form — skipping frameset save")
+                return
+
+            # Save as admin_frameset.html (separate from pre-auth index.html)
+            frameset_path = self.output_dir / "admin_frameset.html"
+            save_file(frameset_path, content)
+            log.info("Post-auth frameset saved: %d bytes", len(content))
+
+            # Extract and enqueue links from the authenticated frameset
+            added = 0
+            for link in extract_links(content, ct, url, self.base):
+                k = url_key(link)
+                if k not in self._visited:
+                    self._queue.append(link)
+                    added += 1
+            if added:
+                log.info("Post-auth frameset: +%d new URLs discovered", added)
+
+        except requests.RequestException as exc:
+            log.debug("Could not fetch post-auth frameset: %s", exc)
+
     def _heartbeat(self) -> None:
         """
         POST to GetRandToken.asp to refresh both the session idle timer and
@@ -1244,7 +1367,8 @@ class Crawler:
                 self._relogin_count += 1
                 self.session.cookies.clear()
                 new_login_url = login(
-                    self.session, self.host, self.username, self.password
+                    self.session, self.host, self.username, self.password,
+                    output_dir=self.output_dir,
                 )
                 if new_login_url:
                     log.info("Re-login successful (attempt %d)", self._relogin_count)
