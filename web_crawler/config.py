@@ -267,6 +267,75 @@ WP_THEME_PROBES = [
 ]
 
 # ---------------------------------------------------------------------------
+# Deep WP plugin/theme internal files to crawl once a slug is confirmed
+# ---------------------------------------------------------------------------
+WP_PLUGIN_FILES = [
+    "readme.txt",
+    "README.md",
+    "changelog.txt",
+    "CHANGELOG.md",
+    "license.txt",
+    "composer.json",
+    "package.json",
+    "uninstall.php",
+    "includes/",
+    "assets/",
+    "css/",
+    "js/",
+    "languages/",
+    "templates/",
+    "admin/",
+    "public/",
+    "vendor/autoload.php",
+    "config.php",
+    "settings.php",
+    "debug.log",
+    ".htaccess",
+]
+
+WP_THEME_FILES = [
+    "style.css",
+    "screenshot.png",
+    "screenshot.jpg",
+    "functions.php",
+    "header.php",
+    "footer.php",
+    "index.php",
+    "single.php",
+    "page.php",
+    "sidebar.php",
+    "archive.php",
+    "search.php",
+    "404.php",
+    "comments.php",
+    "front-page.php",
+    "template-parts/",
+    "inc/",
+    "assets/",
+    "css/",
+    "js/",
+    "images/",
+    "fonts/",
+    "readme.txt",
+    "README.md",
+    "changelog.txt",
+    "rtl.css",
+    "woocommerce.css",
+    "editor-style.css",
+    "theme.json",
+]
+
+# ---------------------------------------------------------------------------
+# Cache-bypass query parameters (appended to force fresh responses)
+# ---------------------------------------------------------------------------
+CACHE_BYPASS_PARAMS = [
+    "nocache=1",
+    "cachebuster={rand}",
+    "v={rand}",
+    "_={rand}",
+]
+
+# ---------------------------------------------------------------------------
 # Content types parsed for further links
 # ---------------------------------------------------------------------------
 CRAWLABLE_TYPES = {

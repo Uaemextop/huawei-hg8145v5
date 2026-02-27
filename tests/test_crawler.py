@@ -1,6 +1,6 @@
 """
 Tests for crawler soft-404 detection, WordPress detection, WAF/protection
-detection, header retry, and JSON extraction.
+detection, header retry, cache bypass, deep WP crawl, and JSON extraction.
 """
 
 import unittest
@@ -13,7 +13,9 @@ from web_crawler.config import (
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
+    WP_PLUGIN_FILES,
     WP_PLUGIN_PROBES,
+    WP_THEME_FILES,
     WP_THEME_PROBES,
     HEADER_RETRY_MAX,
     RETRY_STATUS_CODES,
@@ -21,7 +23,7 @@ from web_crawler.config import (
 from web_crawler.core.crawler import Crawler
 from web_crawler.core.storage import content_hash
 from web_crawler.extraction.json_extract import extract_json_paths
-from web_crawler.session import random_headers
+from web_crawler.session import random_headers, cache_bust_url
 
 
 BASE = "https://example.com"
@@ -305,6 +307,157 @@ class TestJsonFullUrlExtraction(unittest.TestCase):
         data = '{"flag": "httponly", "attr": "httprequest"}'
         result = extract_json_paths(data, PAGE, BASE)
         self.assertEqual(len(result), 0)
+
+
+# ------------------------------------------------------------------ #
+# Cache-busting
+# ------------------------------------------------------------------ #
+
+class TestCacheBusting(unittest.TestCase):
+    """Test cache-bust URL generation."""
+
+    def test_cache_bust_adds_param(self):
+        url = "https://example.com/page.html"
+        busted = cache_bust_url(url)
+        self.assertIn("_cb=", busted)
+        self.assertTrue(busted.startswith("https://example.com/page.html?"))
+
+    def test_cache_bust_preserves_query(self):
+        url = "https://example.com/search?q=test"
+        busted = cache_bust_url(url)
+        self.assertIn("q=test", busted)
+        self.assertIn("&_cb=", busted)
+
+    def test_cache_bust_random_value(self):
+        url = "https://example.com/"
+        bust1 = cache_bust_url(url)
+        bust2 = cache_bust_url(url)
+        # They should differ (extremely unlikely to be the same)
+        # Just check both have the parameter
+        self.assertIn("_cb=", bust1)
+        self.assertIn("_cb=", bust2)
+
+    def test_random_headers_has_cache_control(self):
+        hdrs = random_headers("https://example.com")
+        self.assertIn("Cache-Control", hdrs)
+        self.assertIn("Pragma", hdrs)
+        self.assertEqual(hdrs["Pragma"], "no-cache")
+
+
+# ------------------------------------------------------------------ #
+# Deep WP plugin/theme crawl config
+# ------------------------------------------------------------------ #
+
+class TestDeepWPCrawlConfig(unittest.TestCase):
+    """Test WP plugin/theme internal file lists."""
+
+    def test_plugin_files_not_empty(self):
+        self.assertGreater(len(WP_PLUGIN_FILES), 5)
+
+    def test_plugin_files_contains_readme(self):
+        self.assertIn("readme.txt", WP_PLUGIN_FILES)
+
+    def test_plugin_files_contains_composer(self):
+        self.assertIn("composer.json", WP_PLUGIN_FILES)
+
+    def test_plugin_files_contains_debug_log(self):
+        self.assertIn("debug.log", WP_PLUGIN_FILES)
+
+    def test_theme_files_not_empty(self):
+        self.assertGreater(len(WP_THEME_FILES), 10)
+
+    def test_theme_files_contains_style_css(self):
+        self.assertIn("style.css", WP_THEME_FILES)
+
+    def test_theme_files_contains_functions_php(self):
+        self.assertIn("functions.php", WP_THEME_FILES)
+
+    def test_theme_files_contains_header_php(self):
+        self.assertIn("header.php", WP_THEME_FILES)
+
+    def test_theme_files_contains_footer_php(self):
+        self.assertIn("footer.php", WP_THEME_FILES)
+
+    def test_theme_files_contains_screenshot(self):
+        self.assertIn("screenshot.png", WP_THEME_FILES)
+
+    def test_theme_files_contains_theme_json(self):
+        self.assertIn("theme.json", WP_THEME_FILES)
+
+
+# ------------------------------------------------------------------ #
+# Deep WP crawl logic
+# ------------------------------------------------------------------ #
+
+class TestDeepWPCrawl(unittest.TestCase):
+    """Test that confirmed plugins/themes trigger deep crawl."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        return crawler
+
+    def test_deep_crawl_plugin(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        crawler._deep_crawl_wp_plugin("wordfence", 0)
+        self.assertIn("wordfence", crawler._wp_confirmed_plugins)
+        # Check that internal files were enqueued
+        queued = {url for url, _ in crawler._queue}
+        self.assertTrue(
+            any("/wp-content/plugins/wordfence/readme.txt" in u for u in queued)
+        )
+        self.assertTrue(
+            any("/wp-content/plugins/wordfence/composer.json" in u for u in queued)
+        )
+
+    def test_deep_crawl_theme(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        crawler._deep_crawl_wp_theme("flavor", 0)
+        self.assertIn("flavor", crawler._wp_confirmed_themes)
+        queued = {url for url, _ in crawler._queue}
+        self.assertTrue(
+            any("/wp-content/themes/flavor/functions.php" in u for u in queued)
+        )
+        self.assertTrue(
+            any("/wp-content/themes/flavor/style.css" in u for u in queued)
+        )
+
+    def test_deep_crawl_not_duplicated(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        crawler._deep_crawl_wp_plugin("wordfence", 0)
+        q_size = len(crawler._queue)
+        crawler._deep_crawl_wp_plugin("wordfence", 0)
+        self.assertEqual(len(crawler._queue), q_size)
+
+    def test_check_wp_deep_crawl_plugin_path(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        crawler._check_wp_deep_crawl(
+            "/wp-content/plugins/akismet/readme.txt", 0
+        )
+        self.assertIn("akismet", crawler._wp_confirmed_plugins)
+
+    def test_check_wp_deep_crawl_theme_path(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        crawler._check_wp_deep_crawl(
+            "/wp-content/themes/flavor/style.css", 0
+        )
+        self.assertIn("flavor", crawler._wp_confirmed_themes)
+
+    def test_wp_nonce_extraction(self):
+        crawler = self._make_crawler()
+        crawler._wp_detected = True
+        html = '''<script>var wpApiSettings = {"nonce":"abc123def","root":"https:\\/\\/example.com\\/wp-json\\/"};</script>'''
+        crawler._extract_wp_nonce(html)
+        self.assertEqual(crawler.session.headers.get("X-WP-Nonce"), "abc123def")
 
 
 if __name__ == "__main__":

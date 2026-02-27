@@ -19,6 +19,7 @@ pages and static assets with NO page limit.  Supports:
 
 import json
 import random
+import re
 import string
 import time
 import urllib.parse
@@ -50,10 +51,12 @@ from web_crawler.config import (
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
+    WP_PLUGIN_FILES,
     WP_PLUGIN_PROBES,
+    WP_THEME_FILES,
     WP_THEME_PROBES,
 )
-from web_crawler.session import build_session, random_headers
+from web_crawler.session import build_session, cache_bust_url, random_headers
 from web_crawler.core.storage import content_hash, save_file, smart_local_path
 from web_crawler.extraction.links import extract_links
 from web_crawler.utils.log import log
@@ -100,6 +103,11 @@ class Crawler:
         # WordPress detection
         self._wp_detected: bool = False
         self._wp_probed: bool = False
+        self._wp_confirmed_plugins: set[str] = set()
+        self._wp_confirmed_themes: set[str] = set()
+
+        # Cloudflare bypass state
+        self._cf_bypass_done: bool = False
 
         # robots.txt
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -286,12 +294,12 @@ class Crawler:
         self._wp_probed = True
         for path in WP_DISCOVERY_PATHS:
             self._enqueue(self.base + path, 0)
-        # Plugin enumeration
+        # Plugin enumeration (readme.txt to confirm existence)
         for slug in WP_PLUGIN_PROBES:
             self._enqueue(
                 self.base + f"/wp-content/plugins/{slug}/readme.txt", 0
             )
-        # Theme enumeration
+        # Theme enumeration (style.css to confirm existence)
         for slug in WP_THEME_PROBES:
             self._enqueue(
                 self.base + f"/wp-content/themes/{slug}/style.css", 0
@@ -302,6 +310,28 @@ class Crawler:
         total = (len(WP_DISCOVERY_PATHS) + len(WP_PLUGIN_PROBES)
                  + len(WP_THEME_PROBES) + 10)
         log.info("WordPress detected – enqueued %d discovery URLs", total)
+
+    def _deep_crawl_wp_plugin(self, slug: str, depth: int) -> None:
+        """Enqueue internal files for a confirmed WordPress plugin."""
+        if slug in self._wp_confirmed_plugins:
+            return
+        self._wp_confirmed_plugins.add(slug)
+        base_path = f"/wp-content/plugins/{slug}/"
+        for f in WP_PLUGIN_FILES:
+            self._enqueue(self.base + base_path + f, depth + 1)
+        log.info("  [WP-PLUGIN] Deep-crawling plugin '%s' (%d files)",
+                 slug, len(WP_PLUGIN_FILES))
+
+    def _deep_crawl_wp_theme(self, slug: str, depth: int) -> None:
+        """Enqueue internal files for a confirmed WordPress theme."""
+        if slug in self._wp_confirmed_themes:
+            return
+        self._wp_confirmed_themes.add(slug)
+        base_path = f"/wp-content/themes/{slug}/"
+        for f in WP_THEME_FILES:
+            self._enqueue(self.base + base_path + f, depth + 1)
+        log.info("  [WP-THEME] Deep-crawling theme '%s' (%d files)",
+                 slug, len(WP_THEME_FILES))
 
     # ------------------------------------------------------------------
     # WAF / Cloudflare / CAPTCHA detection
@@ -327,12 +357,15 @@ class Crawler:
         self, url: str
     ) -> requests.Response | None:
         """Retry *url* up to HEADER_RETRY_MAX times with different header
-        profiles.  Returns a successful response or ``None``."""
+        profiles, cache-busted URLs, and Cloudflare-aware techniques.
+        Returns a successful response or ``None``."""
         for attempt in range(1, HEADER_RETRY_MAX + 1):
             hdrs = random_headers(self.base)
+            # Use cache-busted URL to bypass CDN/proxy cached 403
+            bust_url = cache_bust_url(url)
             try:
                 resp = self.session.get(
-                    url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                    bust_url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                     headers=hdrs,
                 )
                 if resp.ok:
@@ -343,6 +376,25 @@ class Crawler:
                     )
                     self._stats["retry_ok"] += 1
                     return resp
+                # Cloudflare cookie-based challenge: first request sets
+                # cf_clearance cookie, second request should succeed
+                if not self._cf_bypass_done and resp.status_code == 403:
+                    cf_cookies = {c.name for c in self.session.cookies
+                                  if "cf" in c.name.lower()
+                                  or "clearance" in c.name.lower()}
+                    if cf_cookies:
+                        self._cf_bypass_done = True
+                        log.debug("  Cloudflare cookies found (%s), retrying",
+                                  ", ".join(cf_cookies))
+                        time.sleep(self.delay * 2)
+                        resp2 = self.session.get(
+                            url, timeout=REQUEST_TIMEOUT,
+                            allow_redirects=True, headers=hdrs,
+                        )
+                        if resp2.ok:
+                            self._stats["retry_ok"] += 1
+                            log.info("  [CF-BYPASS] Succeeded for %s", url)
+                            return resp2
                 log.debug(
                     "  [RETRY %d/%d] HTTP %s for %s",
                     attempt, HEADER_RETRY_MAX, resp.status_code, url,
@@ -574,7 +626,16 @@ class Crawler:
             final_parsed = urllib.parse.urlparse(final_url)
             # Reject cross-domain redirects
             if final_parsed.netloc != self.allowed_host:
-                log.debug("  Redirect to external host %s – skipping", final_parsed.netloc)
+                log.debug("  Redirect to external host %s – skipping",
+                          final_parsed.netloc)
+                self._stats["err"] += 1
+                return
+            # WordPress protection: redirect to wp-login.php means
+            # the page requires authentication – save the redirect
+            # target but don't treat as error
+            if "wp-login.php" in final_parsed.path:
+                log.debug("  WP auth redirect to wp-login.php – skipping %s",
+                          url)
                 self._stats["err"] += 1
                 return
             # Mark the final URL as visited too
@@ -589,7 +650,7 @@ class Crawler:
             self._enqueue(url, depth)
             return
 
-        # Handle 403 / 402 – retry with rotated headers
+        # Handle 403 / 402 – retry with rotated headers + cache busting
         if resp.status_code in RETRY_STATUS_CODES:
             log.info("  [%d] Blocked – retrying with rotated headers: %s",
                      resp.status_code, url)
@@ -647,25 +708,33 @@ class Crawler:
             if not self._wp_detected and self.detect_wordpress(text):
                 self._wp_detected = True
                 self._enqueue_wp_discovery(depth)
+
+            # Extract WP nonce from HTML for REST API access
+            if self._wp_detected:
+                self._extract_wp_nonce(text)
         else:
             text = None
 
-        # Always save the file (every type: html, php, js, css, json, xml,
-        # txt, asp, images, fonts, pdf, …)
+        # Deep-crawl confirmed WP plugins/themes
+        path_lower = parsed_url.path.lower()
+        if self._wp_detected and resp.ok:
+            self._check_wp_deep_crawl(path_lower, depth)
+
+        # Always save the file (every type)
         ch = content_hash(content)
         if ch in self._hashes:
             log.debug("  Duplicate content for %s – not saving again", url)
             self._stats["dup"] += 1
         else:
             self._hashes.add(ch)
-            local = smart_local_path(url, self.output_dir, content_type, content_disp)
+            local = smart_local_path(url, self.output_dir, content_type,
+                                     content_disp)
             save_file(local, content)
             self._save_http_headers(local, resp, url)
             self._stats["ok"] += 1
 
         # Extract and enqueue links from parseable content
         ct = ct_lower
-        path_lower = parsed_url.path.lower()
         is_parseable_ext = path_lower.endswith(
             (".asp", ".aspx", ".jsp", ".php", ".html", ".htm",
              ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
@@ -693,3 +762,42 @@ class Crawler:
                 log.debug("  +%d new URLs enqueued", added)
 
         time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # WordPress deep-crawl helpers
+    # ------------------------------------------------------------------
+
+    _WP_NONCE_RE = re.compile(
+        r"""(?:wp_rest_nonce|wpApiSettings[^}]*nonce)\W*[=:]\s*['"]([a-f0-9]+)['"]""",
+        re.I,
+    )
+
+    def _extract_wp_nonce(self, html: str) -> None:
+        """Extract a WP REST nonce from page HTML and set it on the session
+        so subsequent REST API calls are authenticated."""
+        m = self._WP_NONCE_RE.search(html)
+        if m:
+            nonce = m.group(1)
+            self.session.headers["X-WP-Nonce"] = nonce
+            log.debug("  WP nonce extracted: %s", nonce)
+
+    def _check_wp_deep_crawl(self, path_lower: str, depth: int) -> None:
+        """If a WP plugin/theme slug is confirmed (its readme.txt or
+        style.css was fetched successfully), deep-crawl its internal
+        files."""
+        import re as _re
+        # Plugin: /wp-content/plugins/<slug>/readme.txt
+        m = _re.match(
+            r"/wp-content/plugins/([a-z0-9_-]+)/readme\.txt$",
+            path_lower,
+        )
+        if m:
+            self._deep_crawl_wp_plugin(m.group(1), depth)
+            return
+        # Theme: /wp-content/themes/<slug>/style.css
+        m = _re.match(
+            r"/wp-content/themes/([a-z0-9_-]+)/style\.css$",
+            path_lower,
+        )
+        if m:
+            self._deep_crawl_wp_theme(m.group(1), depth)
