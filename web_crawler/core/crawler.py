@@ -31,6 +31,7 @@ from web_crawler.config import (
     BLOCKED_PATH_RE,
     CRAWLABLE_TYPES,
     DEFAULT_DELAY,
+    HIDDEN_FILE_PROBES,
     REQUEST_TIMEOUT,
 )
 from web_crawler.session import build_session
@@ -69,6 +70,7 @@ class Crawler:
         self._visited: set[str] = set()
         self._queue: deque[tuple[str, int]] = deque()  # (url, depth)
         self._hashes: set[str] = set()
+        self._probed_dirs: set[str] = set()  # directories already probed for hidden files
         self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0}
 
         # robots.txt
@@ -173,12 +175,60 @@ class Crawler:
         ".html": "text/html",
         ".htm":  "text/html",
         ".asp":  "text/html",
+        ".aspx": "text/html",
+        ".jsp":  "text/html",
         ".php":  "text/html",
         ".txt":  "text/plain",
         ".js":   "application/javascript",
+        ".mjs":  "application/javascript",
+        ".cjs":  "application/javascript",
+        ".ts":   "application/javascript",
+        ".jsx":  "application/javascript",
+        ".tsx":  "application/javascript",
         ".css":  "text/css",
+        ".scss": "text/css",
+        ".sass": "text/css",
+        ".less": "text/css",
         ".json": "application/json",
         ".xml":  "application/xml",
+        ".svg":  "application/xml",
+        ".rss":  "application/xml",
+        ".atom": "application/xml",
+        ".env":  "text/plain",
+        ".cfg":  "text/plain",
+        ".conf": "text/plain",
+        ".config": "text/plain",
+        ".hst":  "text/plain",
+        ".ini":  "text/plain",
+        ".toml": "text/plain",
+        ".yml":  "text/plain",
+        ".yaml": "text/plain",
+        ".log":  "text/plain",
+        ".sql":  "text/plain",
+        ".csv":  "text/plain",
+        ".tsv":  "text/plain",
+        ".md":   "text/plain",
+        ".rst":  "text/plain",
+        ".py":   "text/plain",
+        ".rb":   "text/plain",
+        ".pl":   "text/plain",
+        ".sh":   "text/plain",
+        ".bat":  "text/plain",
+        ".ps1":  "text/plain",
+        ".lua":  "text/plain",
+        ".go":   "text/plain",
+        ".rs":   "text/plain",
+        ".java": "text/plain",
+        ".c":    "text/plain",
+        ".cpp":  "text/plain",
+        ".h":    "text/plain",
+        ".vue":  "text/html",
+        ".svelte": "text/html",
+        ".htaccess": "text/plain",
+        ".htpasswd": "text/plain",
+        ".gitignore": "text/plain",
+        ".dockerignore": "text/plain",
+        ".editorconfig": "text/plain",
     }
 
     def _parse_local_file(self, local_path: Path, url: str) -> int:
@@ -254,11 +304,36 @@ class Crawler:
             encoding="utf-8",
         )
 
+    def _probe_hidden_files(self, url: str, depth: int) -> None:
+        """Enqueue hidden/config files for every new directory discovered."""
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path
+        # Derive directory: strip filename if path doesn't end with /
+        if path.endswith("/"):
+            dir_path = path
+        else:
+            dir_path = path.rsplit("/", 1)[0] + "/"
+        if not dir_path:
+            dir_path = "/"
+
+        if dir_path in self._probed_dirs:
+            return
+        self._probed_dirs.add(dir_path)
+
+        for probe in HIDDEN_FILE_PROBES:
+            probe_url = self.base + dir_path + probe
+            self._enqueue(probe_url, depth + 1)
+
+        log.debug("Probed %d hidden files at %s", len(HIDDEN_FILE_PROBES), dir_path)
+
     def _fetch_and_process(self, url: str, depth: int) -> None:
         key = url_key(url)
         if key in self._visited:
             return
         self._visited.add(key)
+
+        # Probe hidden/config files at each new directory
+        self._probe_hidden_files(url, depth)
 
         # Blocked patterns
         parsed_url = urllib.parse.urlparse(url)
@@ -324,8 +399,19 @@ class Crawler:
         ct = content_type.split(";")[0].strip().lower()
         path_lower = parsed_url.path.lower()
         is_parseable_ext = path_lower.endswith(
-            (".asp", ".php", ".html", ".htm", ".js", ".css",
-             ".json", ".xml", ".txt")
+            (".asp", ".aspx", ".jsp", ".php", ".html", ".htm",
+             ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
+             ".css", ".scss", ".sass", ".less",
+             ".json", ".xml", ".svg", ".rss", ".atom",
+             ".txt", ".csv", ".tsv", ".md", ".rst",
+             ".env", ".cfg", ".conf", ".config", ".hst",
+             ".ini", ".toml", ".yml", ".yaml",
+             ".log", ".sql",
+             ".py", ".rb", ".pl", ".sh", ".bat", ".ps1",
+             ".lua", ".go", ".rs", ".java", ".c", ".cpp", ".h",
+             ".vue", ".svelte",
+             ".htaccess", ".htpasswd",
+             ".gitignore", ".dockerignore", ".editorconfig")
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)

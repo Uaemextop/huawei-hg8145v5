@@ -90,5 +90,82 @@ class TestExtractLinks(unittest.TestCase):
         self.assertIn("https://example.com/images/logo.png", result)
 
 
+class TestHiddenFileExtraction(unittest.TestCase):
+    """Test that hidden/config file references are extracted from JS/HTML."""
+
+    def test_js_env_path(self):
+        js = 'var config = "/.env";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/.env", result)
+
+    def test_js_htaccess_path(self):
+        js = 'var path = "/.htaccess";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/.htaccess", result)
+
+    def test_js_config_path(self):
+        js = 'var f = "/app/.config";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/app/.config", result)
+
+    def test_js_cfg_path(self):
+        js = 'var f = "/settings.cfg";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/settings.cfg", result)
+
+    def test_js_hst_path(self):
+        js = 'var f = "/data/history.hst";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/data/history.hst", result)
+
+    def test_js_env_local_path(self):
+        js = 'var f = "/.env.local";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/.env.local", result)
+
+    def test_js_gitignore_path(self):
+        js = 'var f = "/.gitignore";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/.gitignore", result)
+
+    def test_hidden_file_in_html_link(self):
+        html = '<a href="/.env">env</a>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/.env", result)
+
+    def test_hidden_file_in_html_script(self):
+        html = '<script>var x = "/config.ini";</script>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/config.ini", result)
+
+
+class TestHiddenFileProbeConfig(unittest.TestCase):
+    """Test that the probe list is properly configured."""
+
+    def test_probe_list_not_empty(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertGreater(len(HIDDEN_FILE_PROBES), 0)
+
+    def test_probe_list_contains_env(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertIn(".env", HIDDEN_FILE_PROBES)
+
+    def test_probe_list_contains_htaccess(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertIn(".htaccess", HIDDEN_FILE_PROBES)
+
+    def test_probe_list_contains_cfg(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertIn(".cfg", HIDDEN_FILE_PROBES)
+
+    def test_probe_list_contains_hst(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertIn(".hst", HIDDEN_FILE_PROBES)
+
+    def test_probe_list_contains_config(self):
+        from web_crawler.config import HIDDEN_FILE_PROBES
+        self.assertIn(".config", HIDDEN_FILE_PROBES)
+
+
 if __name__ == "__main__":
     unittest.main()
