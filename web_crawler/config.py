@@ -112,6 +112,11 @@ WAF_SIGNATURES = {
         "ithemes security",
         "solid security",
     ],
+    "siteground": [
+        "sg-captcha",
+        "sgcaptcha",
+        ".well-known/sgcaptcha",
+    ],
     "captcha": [
         "captcha",
         "recaptcha",
@@ -130,6 +135,15 @@ WAF_SIGNATURES = {
 # ---------------------------------------------------------------------------
 # Soft-404 (false positive) detection
 # ---------------------------------------------------------------------------
+
+# Extensions blocked at the nginx/SiteGround WAF level.  Requests for
+# files with these extensions always receive HTTP 403 regardless of
+# whether the file exists, so probing them is futile.
+SITEGROUND_BLOCKED_EXTENSIONS = frozenset({
+    ".env", ".sql", ".log", ".conf", ".ini", ".cfg",
+    ".yml", ".yaml", ".toml", ".pem", ".key", ".db",
+})
+
 SOFT_404_KEYWORDS = [
     "page not found",
     "página no encontrada",
@@ -193,11 +207,19 @@ WP_DISCOVERY_PATHS = [
     "/wp-json/wp/v2/users",
     "/wp-json/wp/v2/media",
     "/wp-json/wp/v2/comments",
+    # WooCommerce Store API (public, no auth needed)
+    "/wp-json/wc/store/v1/products",
+    "/wp-json/wc/store/v1/products/categories",
+    "/wp-json/wc/store/v1/products/tags",
+    "/wp-json/wc/store/v1/products/attributes",
     # Sitemaps
     "/wp-sitemap.xml",
     "/wp-sitemap-posts-post-1.xml",
     "/wp-sitemap-posts-page-1.xml",
+    "/wp-sitemap-posts-product-1.xml",
     "/wp-sitemap-taxonomies-category-1.xml",
+    "/wp-sitemap-taxonomies-product_cat-1.xml",
+    "/wp-sitemap-taxonomies-product_tag-1.xml",
     "/wp-sitemap-users-1.xml",
     "/sitemap.xml",
     "/sitemap_index.xml",
@@ -205,14 +227,37 @@ WP_DISCOVERY_PATHS = [
     "/feed/",
     "/comments/feed/",
     "/feed/atom/",
-    # Login / admin
+    # Root PHP files (accessible)
     "/wp-login.php",
+    "/wp-cron.php",
+    "/wp-links-opml.php",
+    "/wp-signup.php",
+    "/wp-activate.php",
+    "/wp-comments-post.php",
+    # wp-admin PHP (redirect to login if not authenticated, still saved)
     "/wp-admin/",
+    "/wp-admin/install.php",
+    "/wp-admin/about.php",
+    "/wp-admin/admin.php",
+    "/wp-admin/index.php",
+    "/wp-admin/edit.php",
+    "/wp-admin/upload.php",
+    "/wp-admin/plugins.php",
+    "/wp-admin/themes.php",
+    "/wp-admin/users.php",
+    "/wp-admin/tools.php",
+    "/wp-admin/options-general.php",
+    "/wp-admin/site-health.php",
+    "/wp-admin/update-core.php",
     # Common files
     "/readme.html",
     "/license.txt",
     "/wp-includes/css/dist/block-library/style.min.css",
     "/wp-includes/js/jquery/jquery.min.js",
+    # WP REST API alternate (bypasses /wp-json/ path if blocked)
+    "/?rest_route=/wp/v2/posts",
+    "/?rest_route=/wp/v2/pages",
+    "/?rest_route=/wp/v2/media",
 ]
 
 # ---------------------------------------------------------------------------

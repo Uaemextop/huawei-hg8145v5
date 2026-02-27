@@ -678,5 +678,151 @@ class TestLogging(unittest.TestCase):
         self.assertEqual(output, "simple message")
 
 
+# ------------------------------------------------------------------ #
+# SiteGround CAPTCHA (PoW) solver
+# ------------------------------------------------------------------ #
+
+class TestSGCaptchaSolver(unittest.TestCase):
+    """Tests for the SiteGround Proof-of-Work captcha solver."""
+
+    def test_solve_sg_pow_basic(self):
+        """solve_sg_pow returns a valid base64 solution."""
+        from web_crawler.session import solve_sg_pow
+        result = solve_sg_pow("20:1234567890:aabbccdd:deadbeef:")
+        self.assertIsNotNone(result)
+        sol, counter = result
+        self.assertIsInstance(sol, str)
+        self.assertGreater(counter, 0)
+
+    def test_solve_sg_pow_verifies_leading_zeros(self):
+        """Solution actually has the required leading zero bits."""
+        import hashlib, struct, base64
+        from web_crawler.session import solve_sg_pow
+        challenge = "16:9999999:abcdef12:0123456789abcdef:"
+        result = solve_sg_pow(challenge)
+        self.assertIsNotNone(result)
+        sol, _ = result
+        data = base64.b64decode(sol)
+        h = hashlib.sha1(data).digest()
+        first_word = struct.unpack(">I", h[:4])[0]
+        self.assertEqual(first_word >> (32 - 16), 0)
+
+    def test_solve_sg_pow_invalid_challenge(self):
+        """Invalid challenge returns None."""
+        from web_crawler.session import solve_sg_pow
+        self.assertIsNone(solve_sg_pow(""))
+        self.assertIsNone(solve_sg_pow("notanumber:x:y:z:"))
+        self.assertIsNone(solve_sg_pow("99:x:y:z:"))
+
+    def test_is_sg_captcha_response_header(self):
+        """Detect SG-Captcha via header."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.headers = {"SG-Captcha": "challenge"}
+        resp.status_code = 202
+        resp.text = ""
+        self.assertTrue(is_sg_captcha_response(resp))
+
+    def test_is_sg_captcha_response_body(self):
+        """Detect SG-Captcha via body meta refresh."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 202
+        resp.text = '<html><meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=%2F.env"></html>'
+        self.assertTrue(is_sg_captcha_response(resp))
+
+    def test_not_sg_captcha_normal_200(self):
+        """Normal 200 page is not detected as captcha."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 200
+        resp.text = "<html><body>Hello</body></html>"
+        self.assertFalse(is_sg_captcha_response(resp))
+
+    def test_counter_to_bytes(self):
+        """counter_to_bytes encodes correctly."""
+        from web_crawler.session import _counter_to_bytes
+        self.assertEqual(_counter_to_bytes(0), b"\x00")
+        self.assertEqual(_counter_to_bytes(1), b"\x01")
+        self.assertEqual(_counter_to_bytes(255), b"\xff")
+        self.assertEqual(_counter_to_bytes(256), b"\x01\x00")
+        self.assertEqual(_counter_to_bytes(65536), b"\x01\x00\x00")
+        self.assertEqual(_counter_to_bytes(16777216), b"\x01\x00\x00\x00")
+
+
+# ------------------------------------------------------------------ #
+# Probe 403 threshold / adaptive disabling
+# ------------------------------------------------------------------ #
+
+class TestProbe403Threshold(unittest.TestCase):
+    """Tests for the adaptive probe disabling on consecutive 403 errors."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        return crawler
+
+    def test_probe_urls_are_tracked(self):
+        """_probe_hidden_files populates _probe_urls."""
+        crawler = self._make_crawler()
+        crawler._probe_hidden_files("https://example.com/page.html", 0)
+        self.assertGreater(len(crawler._probe_urls), 0)
+
+    def test_probing_disabled_after_threshold(self):
+        """After PROBE_403_THRESHOLD 403s, probing is disabled."""
+        from web_crawler.config import PROBE_403_THRESHOLD
+        crawler = self._make_crawler()
+        crawler._probe_403_count = PROBE_403_THRESHOLD
+        crawler._probing_disabled = True
+        # After disabling, _probe_hidden_files should not enqueue
+        prev_queue = len(crawler._queue)
+        crawler._probe_hidden_files("https://example.com/new/", 0)
+        self.assertEqual(len(crawler._queue), prev_queue)
+
+    def test_probing_not_disabled_below_threshold(self):
+        """Below threshold, probing still works."""
+        crawler = self._make_crawler()
+        crawler._probe_403_count = 5
+        crawler._probe_hidden_files("https://example.com/dir/", 0)
+        self.assertGreater(len(crawler._queue), 0)
+
+    def test_probe_dir_dedup(self):
+        """Same directory is not probed twice."""
+        crawler = self._make_crawler()
+        crawler._probe_hidden_files("https://example.com/a/page.html", 0)
+        q1 = len(crawler._queue)
+        crawler._probe_hidden_files("https://example.com/a/other.html", 0)
+        self.assertEqual(len(crawler._queue), q1)
+
+
+# ------------------------------------------------------------------ #
+# WAF signatures include SiteGround
+# ------------------------------------------------------------------ #
+
+class TestSiteGroundWAFSignature(unittest.TestCase):
+    """Tests for SiteGround WAF detection signatures."""
+
+    def test_siteground_in_waf_signatures(self):
+        self.assertIn("siteground", WAF_SIGNATURES)
+
+    def test_siteground_detects_sg_captcha_header(self):
+        headers = {"SG-Captcha": "challenge", "Server": "nginx"}
+        body = ""
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("siteground", result)
+
+    def test_siteground_detects_sgcaptcha_body(self):
+        headers = {}
+        body = '<meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=%2Ftest">'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("siteground", result)
+
+
 if __name__ == "__main__":
     unittest.main()
