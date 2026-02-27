@@ -8,11 +8,15 @@ pages and static assets with NO page limit.  Supports:
 * Configurable depth limit
 * Resume from previously downloaded files
 * Deduplication by content hash
+* Soft-404 / false-positive detection
+* WordPress auto-discovery (REST API, sitemaps, feeds)
 * Saves ALL file types (html, php, asp, js, css, json, xml, txt, images, …)
 * Saves HTTP response headers alongside each downloaded file
 """
 
 import json
+import random
+import string
 import time
 import urllib.parse
 import urllib.robotparser
@@ -33,6 +37,10 @@ from web_crawler.config import (
     DEFAULT_DELAY,
     HIDDEN_FILE_PROBES,
     REQUEST_TIMEOUT,
+    SOFT_404_KEYWORDS,
+    SOFT_404_MIN_KEYWORD_HITS,
+    SOFT_404_SIZE_RATIO,
+    WP_DISCOVERY_PATHS,
 )
 from web_crawler.session import build_session
 from web_crawler.core.storage import content_hash, save_file, smart_local_path
@@ -71,7 +79,15 @@ class Crawler:
         self._queue: deque[tuple[str, int]] = deque()  # (url, depth)
         self._hashes: set[str] = set()
         self._probed_dirs: set[str] = set()  # directories already probed for hidden files
-        self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0}
+        self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0, "soft404": 0}
+
+        # Soft-404 detection
+        self._soft404_size: int | None = None
+        self._soft404_hash: str | None = None
+
+        # WordPress detection
+        self._wp_detected: bool = False
+        self._wp_probed: bool = False
 
         # robots.txt
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -89,6 +105,9 @@ class Crawler:
         log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
             log.info("Max depth        : %d", self.max_depth)
+
+        # Build soft-404 baseline
+        self._build_soft404_fingerprint()
 
         # Resume from disk
         if not self.force:
@@ -109,11 +128,13 @@ class Crawler:
                 self._fetch_and_process(url, depth)
 
         log.info(
-            "Crawl complete. visited=%d  ok=%d  skip=%d  dup=%d  err=%d",
+            "Crawl complete. visited=%d  ok=%d  skip=%d  dup=%d  "
+            "soft404=%d  err=%d",
             len(self._visited),
             self._stats["ok"],
             self._stats["skip"],
             self._stats["dup"],
+            self._stats["soft404"],
             self._stats["err"],
         )
         log.info("Files saved in: %s", self.output_dir.resolve())
@@ -170,6 +191,88 @@ class Crawler:
             return self._robots.can_fetch("*", url)
         except Exception:
             return True
+
+    # ------------------------------------------------------------------
+    # Soft-404 detection
+    # ------------------------------------------------------------------
+
+    def _build_soft404_fingerprint(self) -> None:
+        """Fetch a random non-existent URL to fingerprint the server's
+        custom error page (soft-404)."""
+        slug = "".join(random.choices(string.ascii_lowercase, k=12))
+        probe = f"{self.base}/_{slug}_does_not_exist_{slug}.html"
+        try:
+            resp = self.session.get(
+                probe, timeout=REQUEST_TIMEOUT, allow_redirects=True
+            )
+        except requests.RequestException:
+            log.debug("Soft-404 probe failed (request error); detection disabled.")
+            return
+
+        if not resp.ok:
+            # Server returns a real HTTP 404 – no soft-404 problem.
+            log.debug("Server returns HTTP %s for missing pages – no soft-404.", resp.status_code)
+            return
+
+        # Server returned 200 for a non-existent page – soft-404 likely.
+        body = resp.content
+        self._soft404_size = len(body)
+        self._soft404_hash = content_hash(body)
+        log.info(
+            "Soft-404 baseline: %d bytes, hash=%s (server returns 200 for missing pages)",
+            self._soft404_size, self._soft404_hash,
+        )
+
+    def _is_soft_404(self, content: bytes, url: str) -> bool:
+        """Return True if *content* looks like a soft-404 (false positive)."""
+        if self._soft404_hash is None:
+            return False
+
+        # Exact match with baseline
+        if content_hash(content) == self._soft404_hash:
+            log.debug("  Soft-404 (exact match): %s", url)
+            return True
+
+        # Size-based heuristic + keyword check
+        size = len(content)
+        if self._soft404_size and self._soft404_size > 0:
+            ratio = abs(size - self._soft404_size) / self._soft404_size
+            if ratio <= SOFT_404_SIZE_RATIO:
+                text = content.decode("utf-8", errors="replace").lower()
+                hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
+                if hits >= SOFT_404_MIN_KEYWORD_HITS:
+                    log.debug(
+                        "  Soft-404 (size+keywords, %d hits): %s", hits, url
+                    )
+                    return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # WordPress detection & discovery
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def detect_wordpress(html: str) -> bool:
+        """Return True if the HTML indicates a WordPress site."""
+        lower = html.lower()
+        indicators = [
+            "wp-content/",
+            "wp-includes/",
+            'name="generator" content="wordpress',
+            "/wp-json/",
+            "wp-emoji-release.min.js",
+        ]
+        return any(ind in lower for ind in indicators)
+
+    def _enqueue_wp_discovery(self, depth: int) -> None:
+        """Enqueue WordPress-specific discovery URLs."""
+        if self._wp_probed:
+            return
+        self._wp_probed = True
+        for path in WP_DISCOVERY_PATHS:
+            self._enqueue(self.base + path, depth + 1)
+        log.info("WordPress detected – enqueued %d discovery URLs", len(WP_DISCOVERY_PATHS))
 
     _DISK_CT: dict[str, str] = {
         ".html": "text/html",
@@ -368,6 +471,20 @@ class Crawler:
             self._stats["err"] += 1
             return
 
+        # Track final URL after redirects to avoid re-crawling
+        final_url = resp.url
+        if final_url != url:
+            final_parsed = urllib.parse.urlparse(final_url)
+            # Reject cross-domain redirects
+            if final_parsed.netloc != self.allowed_host:
+                log.debug("  Redirect to external host %s – skipping", final_parsed.netloc)
+                self._stats["err"] += 1
+                return
+            # Mark the final URL as visited too
+            final_key = url_key(final_url)
+            self._visited.add(final_key)
+            log.debug("  Redirect: %s → %s", url, final_url)
+
         if not resp.ok:
             log.warning("HTTP %s for %s – skipping", resp.status_code, url)
             self._stats["err"] += 1
@@ -381,6 +498,20 @@ class Crawler:
             "  ← HTTP %s  CT: %s  %d bytes",
             resp.status_code, content_type, len(content),
         )
+
+        # Soft-404 detection – skip false positives
+        ct_lower = content_type.split(";")[0].strip().lower()
+        if ct_lower in ("text/html", "application/xhtml+xml") and self._is_soft_404(content, url):
+            self._stats["soft404"] += 1
+            log.info("  [SOFT-404] %s – not saving", url)
+            return
+
+        # WordPress detection on first HTML page
+        if ct_lower in ("text/html", "application/xhtml+xml") and not self._wp_detected:
+            text = content.decode("utf-8", errors="replace")
+            if self.detect_wordpress(text):
+                self._wp_detected = True
+                self._enqueue_wp_discovery(depth)
 
         # Always save the file (every type: html, php, js, css, json, xml,
         # txt, asp, images, fonts, pdf, …)
@@ -396,7 +527,7 @@ class Crawler:
             self._stats["ok"] += 1
 
         # Extract and enqueue links from parseable content
-        ct = content_type.split(";")[0].strip().lower()
+        ct = ct_lower
         path_lower = parsed_url.path.lower()
         is_parseable_ext = path_lower.endswith(
             (".asp", ".aspx", ".jsp", ".php", ".html", ".htm",

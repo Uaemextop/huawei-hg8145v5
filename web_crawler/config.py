@@ -18,6 +18,74 @@ REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 
 # ---------------------------------------------------------------------------
+# Soft-404 (false positive) detection
+# ---------------------------------------------------------------------------
+# Keywords commonly found in custom error / not-found pages.
+SOFT_404_KEYWORDS = [
+    "page not found",
+    "página no encontrada",
+    "pagina no encontrada",
+    "no encontrado",
+    "not found",
+    "404",
+    "error 404",
+    "page doesn't exist",
+    "page does not exist",
+    "nothing found",
+    "no existe",
+    "no se encontró",
+    "no se encontro",
+    "the page you requested",
+    "this page could not be found",
+    "we couldn't find",
+    "lo sentimos",
+    "oops",
+]
+
+# When the soft-404 baseline is available, responses whose size is within
+# this ratio of the baseline size are candidates for soft-404 comparison.
+SOFT_404_SIZE_RATIO = 0.15
+
+# Minimum number of matching keywords in the body to consider a response a
+# soft-404 (when it also matches the baseline size).
+SOFT_404_MIN_KEYWORD_HITS = 1
+
+# ---------------------------------------------------------------------------
+# WordPress discovery paths (auto-queued when WP is detected)
+# ---------------------------------------------------------------------------
+WP_DISCOVERY_PATHS = [
+    # REST API
+    "/wp-json/",
+    "/wp-json/wp/v2/posts",
+    "/wp-json/wp/v2/pages",
+    "/wp-json/wp/v2/categories",
+    "/wp-json/wp/v2/tags",
+    "/wp-json/wp/v2/users",
+    "/wp-json/wp/v2/media",
+    "/wp-json/wp/v2/comments",
+    # Sitemaps
+    "/wp-sitemap.xml",
+    "/wp-sitemap-posts-post-1.xml",
+    "/wp-sitemap-posts-page-1.xml",
+    "/wp-sitemap-taxonomies-category-1.xml",
+    "/wp-sitemap-users-1.xml",
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    # Feeds
+    "/feed/",
+    "/comments/feed/",
+    "/feed/atom/",
+    # Login / admin
+    "/wp-login.php",
+    "/wp-admin/",
+    # Common files
+    "/readme.html",
+    "/license.txt",
+    "/wp-includes/css/dist/block-library/style.min.css",
+    "/wp-includes/js/jquery/jquery.min.js",
+]
+
+# ---------------------------------------------------------------------------
 # Content types parsed for further links
 # ---------------------------------------------------------------------------
 CRAWLABLE_TYPES = {
@@ -157,6 +225,13 @@ HIDDEN_FILE_PROBES = [
     "wp-admin/install.php",
     "wp-content/debug.log",
     "xmlrpc.php",
+    "wp-trackback.php",
+    "wp-links-opml.php",
+    "wp-content/uploads/",
+    "wp-content/plugins/",
+    "wp-content/themes/",
+    "wp-json/",
+    "readme.html",
     # -- Joomla --
     "configuration.php",
     "configuration.php.bak",
