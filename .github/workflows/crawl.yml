@@ -103,14 +103,22 @@ jobs:
           # Check if a repo already exists and find next available name
           REPO_NAME="$REPO_BASE"
           COPY=0
+          MAX_COPIES=10
           while true; do
             HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
               -H "Authorization: token $ONT_TOKEN" \
               "https://api.github.com/repos/${OWNER}/${REPO_NAME}")
             if [ "$HTTP_CODE" = "404" ]; then
               break
+            elif [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::Unexpected response (HTTP $HTTP_CODE) checking repo ${OWNER}/${REPO_NAME}. Verify your token and permissions."
+              exit 1
             fi
             COPY=$((COPY + 1))
+            if [ "$COPY" -gt "$MAX_COPIES" ]; then
+              echo "::error::Exceeded maximum of $MAX_COPIES name attempts. Please delete old repos or choose a different name."
+              exit 1
+            fi
             REPO_NAME="${REPO_BASE}-${COPY}"
             echo "Repo exists, trying: $REPO_NAME"
           done
