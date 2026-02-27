@@ -1,31 +1,63 @@
-# huawei-hg8145v5
+# web-crawler
 
-Python crawler for the Huawei HG8145V5 router admin web interface.
+Generic Python web crawler that downloads all reachable pages and static assets
+from any website.
 
-Logs into the router at `http://192.168.100.1`, then **exhaustively crawls
-every reachable admin page and static asset** (HTML/ASP, JavaScript, CSS,
-images, fonts, JSON, XML, …) until no new URLs remain.  Preserves the
-original server directory structure on disk for fully-offline code analysis.
+Starting from a seed URL, the crawler performs an **exhaustive BFS** (breadth-first
+search), downloading every linked page and asset (HTML, JavaScript, CSS, images,
+fonts, JSON, XML, …) until no new URLs remain.  Preserves the original server
+directory structure on disk for fully-offline browsing and analysis.
 
 ## Features
 
-* **Two-step authenticated login** – replicates the router's anti-CSRF token
-  flow (POST to `/asp/GetRandCount.asp`, then POST to `/login.cgi` with a
-  Base64-encoded password)
-* **Dynamic cookie management** – session cookies are automatically tracked;
-  if the session expires mid-crawl the script re-authenticates and retries
+* **Generic** – works with any website (no site-specific authentication)
 * **Exhaustive recursive BFS** – continues until the queue is completely empty
+* **robots.txt respect** – checks `/robots.txt` before crawling (disable with `--no-robots`)
+* **Configurable depth limit** – limit crawl depth with `--depth N`
+* **Configurable page limit** – limit total pages with `--max-pages N`
+* **Configurable delay** – set delay between requests with `--delay N`
 * **Deep link extraction** from every content type:
 
   | Source | Patterns extracted |
   |--------|--------------------|
-  | HTML / ASP | `href`, `src`, `action`, `data-src`, `srcset`, inline `<style>`, inline `<script>` |
+  | HTML | `href`, `src`, `action`, `data-src`, `srcset`, inline `<style>`, inline `<script>` |
   | CSS | `url()`, `@import` |
-  | JavaScript | `Form.setAction()`, `$.ajax({url:})`, `window.location`, `location.href`, all root-relative `'/...'` string literals, `RequestFile=` in CGI query strings, `document.write(...)` |
+  | JavaScript | `window.location`, `location.href`, `fetch()`, `$.ajax({url:})`, all root-relative `'/...'` string literals, `document.write(...)` |
+  | JSON | String values starting with `/` |
 
-* **Seed list of 60+ known HG8145V5 paths** (admin menus, status pages, WAN,
-  WLAN, LAN, security, QoS, voice, TR-069, system, …)
-* **ASP responses treated as HTML** regardless of the `Content-Type` header
+* **Resume / skip already-downloaded files** – existing files are loaded from
+  disk and parsed for undiscovered links so the crawl continues without
+  re-fetching
+* **Content deduplication** – identical content is saved only once
+
+## Project structure
+
+```
+web_crawler/              # Main Python package
+├── __init__.py           # Package version
+├── __main__.py           # Entry point: python -m web_crawler
+├── cli.py                # CLI argument parsing
+├── config.py             # Configuration constants
+├── session.py            # HTTP session creation (requests + retry)
+├── extraction/           # Link extraction submodule
+│   ├── __init__.py
+│   ├── css.py            # CSS url() and @import extraction
+│   ├── html_parser.py    # HTML attribute extraction (BeautifulSoup)
+│   ├── javascript.py     # Deep JS path extraction
+│   ├── json_extract.py   # JSON value path extraction
+│   └── links.py          # Master dispatcher
+├── core/                 # Core crawler submodule
+│   ├── __init__.py
+│   ├── crawler.py        # BFS Crawler class
+│   └── storage.py        # File I/O and local path mapping
+└── utils/                # Utility submodule
+    ├── __init__.py
+    ├── log.py            # Coloured logging setup
+    └── url.py            # URL normalisation and deduplication
+tests/                    # Unit tests
+├── test_extraction.py    # Link extraction tests
+└── test_url.py           # URL normalisation tests
+```
 
 ## Requirements
 
@@ -36,95 +68,81 @@ original server directory structure on disk for fully-offline code analysis.
 
 ```bash
 pip install -r requirements.txt
+
+# Or install as a package (includes optional tqdm and colorlog):
+pip install -e ".[ui]"
 ```
 
 ## Usage
 
 ```bash
-# Prompts for password if not set in environment
-python crawler.py
+# Basic crawl
+python -m web_crawler https://example.com
 
-# Password via environment variable (recommended – avoids shell history)
-set ROUTER_PASSWORD=your_password_here   # Windows
-export ROUTER_PASSWORD=your_password_here  # Linux / macOS
-python crawler.py
+# With depth limit
+python -m web_crawler https://example.com --depth 3
 
-# All options explicit
-python crawler.py --host 192.168.100.1 --user Mega_gpon \
-    --password your_password_here --output downloaded_site
+# Custom output directory
+python -m web_crawler https://example.com --output my_site
 
-# Verbose debug output (shows every cookie, every new URL enqueued)
-python crawler.py --debug
+# Limit number of pages
+python -m web_crawler https://example.com --max-pages 100
+
+# Custom delay between requests (be polite!)
+python -m web_crawler https://example.com --delay 1.0
+
+# Ignore robots.txt
+python -m web_crawler https://example.com --no-robots
+
+# Force re-download even if files already exist
+python -m web_crawler https://example.com --force
+
+# Verbose debug output
+python -m web_crawler https://example.com --debug
+
+# Disable SSL verification (for self-signed certs)
+python -m web_crawler https://example.com --no-verify-ssl
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host` | `192.168.100.1` | Router IP address |
-| `--user` | `Mega_gpon` | Admin username |
-| `--password` | *(env / prompt)* | Admin password |
+| `url` | *(required)* | Target URL to crawl |
 | `--output` | `downloaded_site` | Local output directory |
-| `--no-verify-ssl` | off | Disable TLS verification (for self-signed certs) |
-| `--debug` | off | Verbose logging (cookies, queued URLs, byte counts) |
+| `--depth` | `0` (unlimited) | Maximum crawl depth |
+| `--max-pages` | `0` (unlimited) | Maximum number of pages to download |
+| `--delay` | `0.25` | Delay between requests in seconds |
+| `--no-verify-ssl` | off | Disable TLS certificate verification |
+| `--no-robots` | off | Ignore robots.txt restrictions |
+| `--force` | off | Re-download files even if they exist on disk |
+| `--debug` | off | Verbose logging |
 
-## How the login works
+## Running tests
 
-The router login page (`index.asp`) uses a two-step flow:
-
-1. `GET /index.asp` – router sets initial session cookies
-2. `POST /asp/GetRandCount.asp` – returns a one-time anti-CSRF token
-3. `POST /login.cgi` with:
-   - `UserName` = your username
-   - `PassWord` = `Base64(UTF-8(password))`  *(replicated from `util.js`)*
-   - `Language` = `english`
-   - `x.X_HW_Token` = token from step 2
-   - Cookie `Cookie=body:Language:english:id=-1;path=/`  *(replicated from login page JS)*
-
-A successful login redirects to the main admin frame; if the login form is
-returned again the credentials are incorrect.
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Output structure (example)
 
 ```
 downloaded_site/
-├── index.asp
-├── login.asp
-├── main.asp
-├── Cuscss/
-│   ├── login.css
-│   └── english/
-│       └── frame.css
-├── resource/
-│   └── common/
-│       ├── jquery.min.js
-│       ├── md5.js
-│       ├── util.js
-│       └── ...
-├── frameaspdes/
-│   └── english/
-│       └── ssmpdes.js
-├── html/
-│   └── ssmp/
-│       ├── home.asp
-│       ├── wlan.asp
-│       ├── lan.asp
-│       └── ...
-└── images/
-    └── hwlogo.ico
+├── index.html
+├── about.html
+├── css/
+│   └── style.css
+├── js/
+│   └── main.js
+├── images/
+│   ├── logo.png
+│   └── banner.jpg
+└── blog/
+    ├── index.html
+    └── post-1.html
 ```
 
-## Default credentials (from router label)
-
-| Field | Value |
-|-------|-------|
-| User  | `Mega_gpon` |
-| Password | *(see router label)* |
-
-> **Security notice:** The router ships with a default password printed on its
-> label.  Change both the admin password and the Wi-Fi passphrase before
-> connecting the device to untrusted networks.  Never commit real passwords to
-> public repositories.
->
-> You can supply the password securely via the `ROUTER_PASSWORD` environment
-> variable or the `--password` flag (which will prompt if omitted).
+> **Note:** Please be respectful when crawling websites. Always check
+> `robots.txt`, use appropriate delays between requests, and avoid
+> overwhelming servers. The `--delay` flag (default 0.25s) helps prevent
+> excessive load on the target server.
