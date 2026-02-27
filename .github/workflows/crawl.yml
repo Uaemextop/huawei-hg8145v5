@@ -110,6 +110,9 @@ jobs:
               "https://api.github.com/repos/${OWNER}/${REPO_NAME}")
             if [ "$HTTP_CODE" = "404" ]; then
               break
+            elif [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::Unexpected response (HTTP $HTTP_CODE) checking repo ${OWNER}/${REPO_NAME}. Verify your token and permissions."
+              exit 1
             fi
             COPY=$((COPY + 1))
             if [ "$COPY" -gt "$MAX_COPIES" ]; then
