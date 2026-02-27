@@ -1,5 +1,6 @@
 """
-Tests for crawler soft-404 detection, WordPress detection, and JSON extraction.
+Tests for crawler soft-404 detection, WordPress detection, WAF/protection
+detection, header retry, and JSON extraction.
 """
 
 import unittest
@@ -9,11 +10,18 @@ from unittest.mock import MagicMock, patch
 from web_crawler.config import (
     SOFT_404_KEYWORDS,
     SOFT_404_SIZE_RATIO,
+    USER_AGENTS,
+    WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
+    WP_PLUGIN_PROBES,
+    WP_THEME_PROBES,
+    HEADER_RETRY_MAX,
+    RETRY_STATUS_CODES,
 )
 from web_crawler.core.crawler import Crawler
 from web_crawler.core.storage import content_hash
 from web_crawler.extraction.json_extract import extract_json_paths
+from web_crawler.session import random_headers
 
 
 BASE = "https://example.com"
@@ -125,6 +133,139 @@ class TestWordPressDetection(unittest.TestCase):
         self.assertIn("/wp-sitemap.xml", WP_DISCOVERY_PATHS)
         self.assertIn("/feed/", WP_DISCOVERY_PATHS)
 
+    def test_wp_plugin_probes_not_empty(self):
+        self.assertGreater(len(WP_PLUGIN_PROBES), 20)
+        self.assertIn("wordfence", WP_PLUGIN_PROBES)
+        self.assertIn("woocommerce", WP_PLUGIN_PROBES)
+        self.assertIn("akismet", WP_PLUGIN_PROBES)
+
+    def test_wp_theme_probes_not_empty(self):
+        self.assertGreater(len(WP_THEME_PROBES), 5)
+        self.assertIn("twentytwentyfive", WP_THEME_PROBES)
+        self.assertIn("astra", WP_THEME_PROBES)
+
+
+# ------------------------------------------------------------------ #
+# WAF / Cloudflare / CAPTCHA detection
+# ------------------------------------------------------------------ #
+
+class TestWAFDetection(unittest.TestCase):
+    """Test WAF / Cloudflare / CAPTCHA detection."""
+
+    def test_detect_cloudflare_header(self):
+        headers = {"CF-RAY": "abc123", "Server": "cloudflare"}
+        result = Crawler.detect_protection(headers, "")
+        self.assertIn("cloudflare", result)
+
+    def test_detect_cloudflare_body(self):
+        headers = {}
+        body = '<title>Attention Required! | Cloudflare</title>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("cloudflare", result)
+
+    def test_detect_wordfence(self):
+        headers = {}
+        body = 'This site is protected by Wordfence'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("wordfence", result)
+
+    def test_detect_sucuri(self):
+        headers = {"X-Sucuri-ID": "12345"}
+        result = Crawler.detect_protection(headers, "")
+        self.assertIn("sucuri", result)
+
+    def test_detect_captcha(self):
+        headers = {}
+        body = '<div class="g-recaptcha" data-sitekey="xyz"></div>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("captcha", result)
+
+    def test_detect_hcaptcha(self):
+        headers = {}
+        body = '<div class="h-captcha" data-sitekey="xyz"></div>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("captcha", result)
+
+    def test_detect_turnstile(self):
+        headers = {}
+        body = '<div class="cf-turnstile" data-sitekey="xyz"></div>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("captcha", result)
+
+    def test_detect_imperva(self):
+        headers = {"X-Iinfo": "1-2-3"}
+        result = Crawler.detect_protection(headers, "")
+        self.assertIn("imperva", result)
+
+    def test_detect_modsecurity(self):
+        headers = {"Server": "Apache/ModSecurity"}
+        result = Crawler.detect_protection(headers, "")
+        self.assertIn("modsecurity", result)
+
+    def test_no_protection_detected(self):
+        headers = {"Server": "nginx"}
+        body = '<html><body>Hello</body></html>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertEqual(result, [])
+
+    def test_multiple_protections(self):
+        headers = {"CF-RAY": "abc"}
+        body = '<div class="g-recaptcha"></div>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertIn("cloudflare", result)
+        self.assertIn("captcha", result)
+
+    def test_waf_signatures_config(self):
+        self.assertIn("cloudflare", WAF_SIGNATURES)
+        self.assertIn("wordfence", WAF_SIGNATURES)
+        self.assertIn("sucuri", WAF_SIGNATURES)
+        self.assertIn("captcha", WAF_SIGNATURES)
+        self.assertIn("imperva", WAF_SIGNATURES)
+        self.assertIn("modsecurity", WAF_SIGNATURES)
+        self.assertIn("akamai", WAF_SIGNATURES)
+
+
+# ------------------------------------------------------------------ #
+# User-Agent rotation and header retry
+# ------------------------------------------------------------------ #
+
+class TestHeaderRotation(unittest.TestCase):
+    """Test User-Agent pool and header rotation."""
+
+    def test_user_agents_pool_not_empty(self):
+        self.assertGreater(len(USER_AGENTS), 5)
+
+    def test_user_agents_all_strings(self):
+        for ua in USER_AGENTS:
+            self.assertIsInstance(ua, str)
+            self.assertGreater(len(ua), 20)
+
+    def test_user_agents_diverse(self):
+        """Pool should contain multiple browser families."""
+        all_uas = " ".join(USER_AGENTS).lower()
+        self.assertIn("chrome", all_uas)
+        self.assertIn("firefox", all_uas)
+        self.assertIn("safari", all_uas)
+
+    def test_random_headers_returns_dict(self):
+        hdrs = random_headers("https://example.com")
+        self.assertIsInstance(hdrs, dict)
+        self.assertIn("User-Agent", hdrs)
+        self.assertIn("Accept", hdrs)
+        self.assertIn("Accept-Language", hdrs)
+
+    def test_random_headers_with_referer(self):
+        hdrs = random_headers("https://example.com")
+        self.assertEqual(hdrs["Referer"], "https://example.com")
+        self.assertEqual(hdrs["Origin"], "https://example.com")
+
+    def test_retry_status_codes_config(self):
+        self.assertIn(403, RETRY_STATUS_CODES)
+        self.assertIn(402, RETRY_STATUS_CODES)
+
+    def test_header_retry_max_config(self):
+        self.assertGreater(HEADER_RETRY_MAX, 0)
+
 
 # ------------------------------------------------------------------ #
 # JSON extraction – full URL support for WordPress REST API
@@ -158,6 +299,12 @@ class TestJsonFullUrlExtraction(unittest.TestCase):
         data = '{"page": "/blog/post.html"}'
         result = extract_json_paths(data, PAGE, BASE)
         self.assertIn("https://example.com/blog/post.html", result)
+
+    def test_http_prefix_no_false_match(self):
+        """Strings like 'httponly' should not be treated as URLs."""
+        data = '{"flag": "httponly", "attr": "httprequest"}'
+        result = extract_json_paths(data, PAGE, BASE)
+        self.assertEqual(len(result), 0)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ def extract_json_paths(text: str, page_url: str, base: str) -> set[str]:
             elif isinstance(item, list):
                 queue.extend(item)
             elif isinstance(item, str):
-                if item.startswith("/") or item.startswith("http"):
+                if item.startswith("/") or item.startswith(("http://", "https://")):
                     n = normalise_url(item, page_url, base)
                     if n:
                         found.add(n)
