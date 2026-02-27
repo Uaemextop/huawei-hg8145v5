@@ -266,6 +266,35 @@ class TestWAFDetection(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# --no-check-captcha flag (skip_captcha_check)
+# ------------------------------------------------------------------ #
+
+class TestSkipCaptchaCheck(unittest.TestCase):
+    """Test that skip_captcha_check disables protection detection."""
+
+    def _make_crawler(self, skip: bool = False) -> Crawler:
+        return Crawler(
+            start_url="https://example.com",
+            output_dir=Path("/tmp/test_skip_captcha"),
+            skip_captcha_check=skip,
+        )
+
+    def test_default_captcha_check_enabled(self):
+        c = self._make_crawler(skip=False)
+        self.assertFalse(c.skip_captcha_check)
+
+    def test_captcha_check_disabled(self):
+        c = self._make_crawler(skip=True)
+        self.assertTrue(c.skip_captcha_check)
+
+    def test_detect_protection_still_works(self):
+        """detect_protection() itself is unaffected by the flag."""
+        body = '<div class="g-recaptcha"></div>'
+        result = Crawler.detect_protection({}, body)
+        self.assertIn("captcha", result)
+
+
+# ------------------------------------------------------------------ #
 # User-Agent rotation and header retry
 # ------------------------------------------------------------------ #
 
@@ -622,6 +651,31 @@ class TestLogging(unittest.TestCase):
                 content = f.read()
             self.assertIn("debug detail for file", content)
             self._cleanup_log(_log)
+
+
+    def test_category_formatter_highlights_tags(self):
+        """_CategoryFormatter should inject ANSI codes for known tags."""
+        from web_crawler.utils.log import _CategoryFormatter, _CATEGORY_STYLES, _ANSI_RESET
+        formatter = _CategoryFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.WARNING, pathname="", lineno=0,
+            msg="  [PROTECTION] captcha on https://example.com – not saving",
+            args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        style = _CATEGORY_STYLES["[PROTECTION]"]
+        self.assertIn(f"{style}[PROTECTION]{_ANSI_RESET}", output)
+
+    def test_category_formatter_no_tag(self):
+        """Messages without known tags are unchanged."""
+        from web_crawler.utils.log import _CategoryFormatter
+        formatter = _CategoryFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="simple message", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertEqual(output, "simple message")
 
 
 if __name__ == "__main__":

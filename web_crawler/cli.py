@@ -78,6 +78,12 @@ def parse_args() -> argparse.Namespace:
         "--git-push-every", type=int, default=0, metavar="N",
         help="Commit and push crawled files every N saved files (requires git repo in output dir)",
     )
+    parser.add_argument(
+        "--no-check-captcha", dest="skip_captcha_check", action="store_true",
+        default=False,
+        help="Disable WAF/CAPTCHA protection detection – save pages even if "
+             "captcha or WAF signatures are found",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +125,7 @@ def main() -> None:
         respect_robots=args.respect_robots,
         force=args.force,
         git_push_every=args.git_push_every,
+        skip_captcha_check=args.skip_captcha_check,
     )
 
     t0 = time.monotonic()

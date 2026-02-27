@@ -37,6 +37,11 @@ on:
         required: false
         default: "100"
         type: string
+      skip_captcha:
+        description: "Skip WAF/CAPTCHA detection – save pages even if captcha signatures are found"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -205,6 +210,7 @@ jobs:
             --delay "${{ inputs.delay }}" \
             --output downloaded_site \
             ${{ inputs.no_robots && '--no-robots' || '' }} \
+            ${{ inputs.skip_captcha && '--no-check-captcha' || '' }} \
             $GIT_PUSH_ARG
 
       - name: Final push of remaining files
@@ -247,6 +253,7 @@ jobs:
             - **Depth**: ${{ inputs.depth }}
             - **Delay**: ${{ inputs.delay }}s
             - **robots.txt ignored**: ${{ inputs.no_robots }}
+            - **Skip CAPTCHA check**: ${{ inputs.skip_captcha }}
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
           files: "crawl-${{ steps.reponame.outputs.name }}.zip"

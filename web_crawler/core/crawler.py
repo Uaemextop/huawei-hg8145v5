@@ -82,6 +82,7 @@ class Crawler:
         respect_robots: bool = True,
         force: bool = False,
         git_push_every: int = 0,
+        skip_captcha_check: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -92,6 +93,7 @@ class Crawler:
         self.delay = delay
         self.force = force
         self.git_push_every = git_push_every
+        self.skip_captcha_check = skip_captcha_check
         self.session = build_session(verify_ssl=verify_ssl)
 
         self._visited: set[str] = set()
@@ -760,12 +762,13 @@ class Crawler:
         # Detect WAF / Cloudflare / CAPTCHA on successful responses too
         if ct_lower in ("text/html", "application/xhtml+xml"):
             text = content.decode("utf-8", errors="replace")
-            protections = self.detect_protection(dict(resp.headers), text)
-            if protections:
-                log.warning("  [PROTECTION] %s on %s – not saving",
-                            ", ".join(protections), url)
-                self._stats["waf"] += 1
-                return
+            if not self.skip_captcha_check:
+                protections = self.detect_protection(dict(resp.headers), text)
+                if protections:
+                    log.warning("  [PROTECTION] %s on %s – not saving",
+                                ", ".join(protections), url)
+                    self._stats["waf"] += 1
+                    return
 
             # Soft-404 detection – skip false positives
             if self._is_soft_404(content, url):
