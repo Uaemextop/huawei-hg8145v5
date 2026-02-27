@@ -128,3 +128,167 @@ downloaded_site/
 >
 > You can supply the password securely via the `ROUTER_PASSWORD` environment
 > variable or the `--password` flag (which will prompt if omitted).
+
+---
+
+## Megared.net.mx Crawler
+
+Standalone BFS crawler that maps the MEGACABLE ISP infrastructure at
+`megared.net.mx` and its subdomains, searching for index/default files.
+
+### Usage
+
+```bash
+# Basic crawl
+python megared_crawler.py
+
+# Deeper crawl with more pages
+python megared_crawler.py --depth 3 --max-pages 500
+
+# Include non-standard ports (8080, 8443, 7547 TR-069)
+python megared_crawler.py --include-ports
+
+# Debug output
+python megared_crawler.py --debug
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `megared_output` | Output directory |
+| `--depth` | `2` | Max BFS crawl depth |
+| `--max-pages` | `200` | Max pages to fetch |
+| `--delay` | `0.5` | Seconds between requests |
+| `--timeout` | `10` | HTTP request timeout in seconds |
+| `--include-ports` | off | Also probe ports 80, 443, 8080, 8443, 7547 |
+| `--debug` | off | Verbose logging |
+
+### Resilience features
+
+* **DNS pre-resolution** – hostnames that don't resolve are skipped instantly
+  (~0.1s) instead of waiting 40+ seconds for TCP/HTTP timeouts.
+* **Ping-blocked hosts** – when ICMP is blocked the crawler falls back to
+  TCP connect (ports 443/80) before skipping a host.  HTTP HEAD probes are
+  skipped when both TCP ports are closed, avoiding 10+ seconds of wasted
+  timeout per unreachable host.
+* **Connection-reset recovery** – on `ECONNRESET` / `BrokenPipe` errors the
+  crawler applies exponential back-off, rotates User-Agent (including Huawei
+  ONT device UAs), swaps HTTP ↔ HTTPS, and builds fresh sessions.
+* **HTTP rejection handling** – 403, 429, 503 responses are retried with
+  query stripping, trailing-slash, and `Retry-After` back-off.
+* **Huawei firmware-extracted User-Agents** – UA pool uses the real strings
+  extracted from EG8145V5 firmware (V500R022C00SPC340B019):
+  `HuaweiHomeGateway` (CWMP sessions), `HW-FTTH` (bulk data),
+  `HW_IPMAC_REPORT` (MAC reports), and two MSIE variants used by the
+  router's built-in HTTP client.
+* **Firmware path probing** – `/firmware/`, `/firmware/update/`, `/fw/`,
+  `/download/`, `/upgrade/`, and `/acs/` paths are probed for index files
+  including `index.jhtml`, `index.phtml`, `index.jsf`, and other server-side
+  template extensions.
+* **Per-phase timing** – elapsed time is reported for each crawl phase and
+  for individual subdomain reachability checks.
+
+### Tests
+
+```bash
+python -m unittest tests.test_megared_crawler -v
+```
+
+---
+
+## acsvip.megared.net.mx Deep Analysis
+
+Standalone analyser for the MEGACABLE TR-069/CWMP ACS server at
+`acsvip.megared.net.mx` (`201.159.200.30`).  Performs DNS resolution,
+TCP/UDP port scanning, TCP handshake analysis, HTTP probing with
+firmware-extracted UAs, and firmware `.bin` file discovery.
+
+### Usage
+
+```bash
+# Full analysis (DNS + TCP + HTTP + firmware file probes)
+python acsvip_analysis.py
+
+# Include UDP port probing
+python acsvip_analysis.py --udp
+
+# Scan a full TCP port range
+python acsvip_analysis.py --tcp-range 1-1024
+
+# Save report as JSON
+python acsvip_analysis.py --json report.json
+```
+
+### Key findings (from firmware + live probing)
+
+| Finding | Detail |
+|---------|--------|
+| **IPv4** | `201.159.200.30` |
+| **IPv6** | `2806:261:300:55:201:159:200:1` |
+| **Reverse DNS** | `customer-SMAL-200-30.megared.net.mx` |
+| **Open TCP** | Port 80 (RST after handshake — IP-whitelisted) |
+| **CWMP UA** | `HuaweiHomeGateway` (from `libhw_smp_cwmp_core.so`) |
+| **Auth** | HTTP Digest, realm `HuaweiHomeGateway` |
+| **ACS path** | `/service/cwmp` on port `7547` |
+| **Firewall** | Whitelist by source IP — only MEGACABLE subscriber ranges |
+
+### Tests
+
+```bash
+python -m unittest tests.test_acsvip_analysis -v
+```
+
+---
+
+## Firmware Analysis Tool
+
+`firmware_tools/fw_analysis.py` documents the complete reverse-engineering of
+the EG8145V5 firmware (V500R022C00SPC340B019), including:
+
+- **65 ISP operator profiles** extracted from customization configs
+- **35 ACS endpoints** (TR-069 servers from ISPs worldwide)
+- **6 certificates** and **6 keys** embedded in the firmware
+- **TR-069 Download RPC protocol** reconstructed from Capstone disassembly
+- **5 firmware-extracted User-Agent strings**
+
+### Usage
+
+```bash
+# Print full firmware analysis report
+python firmware_tools/fw_analysis.py
+
+# Save as JSON
+python firmware_tools/fw_analysis.py --json fw_report.json
+```
+
+### Use as library
+
+```python
+from firmware_tools.fw_analysis import (
+    ACS_ENDPOINTS,
+    FIRMWARE_USER_AGENTS,
+    ISP_OPERATORS,
+    get_report,
+)
+
+# Get all ACS endpoints
+for ep in ACS_ENDPOINTS:
+    print(f"{ep['protocol']}://{ep['host']}:{ep['port']}{ep['path']}")
+
+# Get firmware-extracted User-Agents
+print(FIRMWARE_USER_AGENTS["cwmp"])  # "HuaweiHomeGateway"
+```
+
+### Probe ACS endpoints for firmware files
+
+```bash
+# Run the crawler with ACS firmware probing
+python megared_crawler.py --probe-acs
+```
+
+### Tests
+
+```bash
+python -m unittest tests.test_fw_analysis -v
+```
