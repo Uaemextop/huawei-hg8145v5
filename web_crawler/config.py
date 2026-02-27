@@ -148,10 +148,36 @@ SOFT_404_KEYWORDS = [
     "we couldn't find",
     "lo sentimos",
     "oops",
+    "page you are looking for",
+    "page you were looking for",
+    "requested page was not found",
+    "requested url was not found",
+    "la página que buscas",
+    "la pagina que buscas",
+    "contenido no disponible",
+    "recurso no encontrado",
+    "enlace roto",
+    "página no existe",
+    "pagina no existe",
+]
+
+# Keywords that indicate a soft-404 when found in the <title> tag
+SOFT_404_TITLE_KEYWORDS = [
+    "404",
+    "not found",
+    "page not found",
+    "error 404",
+    "no encontrado",
+    "no encontrada",
+    "página no encontrada",
+    "pagina no encontrada",
 ]
 
 SOFT_404_SIZE_RATIO = 0.15
 SOFT_404_MIN_KEYWORD_HITS = 1
+
+# Minimum keyword hits for standalone detection (without baseline fingerprint)
+SOFT_404_STANDALONE_MIN_HITS = 2
 
 # ---------------------------------------------------------------------------
 # WordPress discovery paths (auto-queued when WP is detected)

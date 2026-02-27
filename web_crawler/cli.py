@@ -5,6 +5,7 @@ Command-line interface for the generic web crawler.
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 from web_crawler.config import DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
             "  python -m web_crawler https://example.com\n"
             "  python -m web_crawler https://example.com --depth 3\n"
             "  python -m web_crawler https://example.com --output my_site\n"
+            "  python -m web_crawler https://example.com --log-file crawl.log\n"
         ),
     )
     parser.add_argument(
@@ -68,13 +70,17 @@ def parse_args() -> argparse.Namespace:
         "--debug", action="store_true",
         help="Enable verbose debug logging",
     )
+    parser.add_argument(
+        "--log-file",
+        help="Write detailed logs to this file (always at DEBUG level)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    setup_logging(debug=args.debug)
+    setup_logging(debug=args.debug, log_file=args.log_file)
 
     if args.debug:
         logging.getLogger("urllib3").setLevel(logging.DEBUG)
@@ -109,7 +115,11 @@ def main() -> None:
         respect_robots=args.respect_robots,
         force=args.force,
     )
+
+    t0 = time.monotonic()
     crawler.run()
+    elapsed = time.monotonic() - t0
+    log.info("Total elapsed time: %.1f s", elapsed)
 
 
 if __name__ == "__main__":

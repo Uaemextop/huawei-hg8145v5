@@ -48,6 +48,8 @@ from web_crawler.config import (
     SOFT_404_KEYWORDS,
     SOFT_404_MIN_KEYWORD_HITS,
     SOFT_404_SIZE_RATIO,
+    SOFT_404_STANDALONE_MIN_HITS,
+    SOFT_404_TITLE_KEYWORDS,
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
@@ -246,27 +248,55 @@ class Crawler:
         )
 
     def _is_soft_404(self, content: bytes, url: str) -> bool:
-        """Return True if *content* looks like a soft-404 (false positive)."""
-        if self._soft404_hash is None:
-            return False
+        """Return True if *content* looks like a soft-404 (false positive).
 
-        # Exact match with baseline
-        if content_hash(content) == self._soft404_hash:
-            log.debug("  Soft-404 (exact match): %s", url)
-            return True
+        Detection layers:
+        1. Exact hash match with the baseline probe.
+        2. Size-based heuristic + keyword check (when baseline exists).
+        3. ``<title>`` tag contains 404-related keywords.
+        4. Standalone keyword check (works even without baseline).
+        """
+        text = content.decode("utf-8", errors="replace").lower()
 
-        # Size-based heuristic + keyword check
-        size = len(content)
-        if self._soft404_size and self._soft404_size > 0:
-            ratio = abs(size - self._soft404_size) / self._soft404_size
-            if ratio <= SOFT_404_SIZE_RATIO:
-                text = content.decode("utf-8", errors="replace").lower()
-                hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
-                if hits >= SOFT_404_MIN_KEYWORD_HITS:
-                    log.debug(
-                        "  Soft-404 (size+keywords, %d hits): %s", hits, url
+        # --- Layer 1: baseline fingerprint exact match ---
+        if self._soft404_hash is not None:
+            if content_hash(content) == self._soft404_hash:
+                log.info("  [SOFT-404] Exact baseline match: %s", url)
+                return True
+
+            # --- Layer 2: size similarity + keywords ---
+            size = len(content)
+            if self._soft404_size and self._soft404_size > 0:
+                ratio = abs(size - self._soft404_size) / self._soft404_size
+                if ratio <= SOFT_404_SIZE_RATIO:
+                    hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
+                    if hits >= SOFT_404_MIN_KEYWORD_HITS:
+                        log.info(
+                            "  [SOFT-404] Size+keywords (%d hits): %s",
+                            hits, url,
+                        )
+                        return True
+
+        # --- Layer 3: <title> tag contains 404-like keywords ---
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.S)
+        if title_match:
+            title = title_match.group(1).strip()
+            for kw in SOFT_404_TITLE_KEYWORDS:
+                if kw in title:
+                    log.info(
+                        "  [SOFT-404] Title contains '%s': %s (title='%s')",
+                        kw, url, title[:80],
                     )
                     return True
+
+        # --- Layer 4: standalone keyword check (no baseline needed) ---
+        hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
+        if hits >= SOFT_404_STANDALONE_MIN_HITS:
+            log.info(
+                "  [SOFT-404] Standalone keyword detection (%d hits): %s",
+                hits, url,
+            )
+            return True
 
         return False
 
@@ -695,8 +725,10 @@ class Crawler:
             text = content.decode("utf-8", errors="replace")
             protections = self.detect_protection(dict(resp.headers), text)
             if protections:
-                log.info("  [PROTECTION] %s on %s",
-                         ", ".join(protections), url)
+                log.warning("  [PROTECTION] %s on %s – not saving",
+                            ", ".join(protections), url)
+                self._stats["waf"] += 1
+                return
 
             # Soft-404 detection – skip false positives
             if self._is_soft_404(content, url):
