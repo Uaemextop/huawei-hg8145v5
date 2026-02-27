@@ -32,6 +32,11 @@ on:
         required: false
         default: ""
         type: string
+      git_push_every:
+        description: "Commit and push crawled files every N saved files (0 = disabled, requires create_repo)"
+        required: false
+        default: "100"
+        type: string
 
 permissions:
   contents: write
@@ -53,14 +58,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run web crawler
-        run: |
-          python -m web_crawler "${{ inputs.url }}" \
-            --depth "${{ inputs.depth }}" \
-            --delay "${{ inputs.delay }}" \
-            --output downloaded_site \
-            ${{ inputs.no_robots && '--no-robots' || '' }}
-
       - name: Generate normalized repo name
         id: reponame
         run: |
@@ -78,37 +75,9 @@ jobs:
           print(f'name={name}')
           " "${{ inputs.url }}" >> "$GITHUB_OUTPUT"
 
-      - name: Zip downloaded site
-        run: |
-          cd downloaded_site
-          zip -r ../crawl-${{ steps.reponame.outputs.name }}.zip .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: "crawl-${{ steps.reponame.outputs.name }}"
-          path: downloaded_site/
-          retention-days: 90
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "crawl-${{ steps.reponame.outputs.name }}-${{ github.run_number }}"
-          name: "Crawl ${{ inputs.url }} (#${{ github.run_number }})"
-          body: |
-            ## Web Crawl Results
-
-            - **URL**: ${{ inputs.url }}
-            - **Depth**: ${{ inputs.depth }}
-            - **Delay**: ${{ inputs.delay }}s
-            - **robots.txt ignored**: ${{ inputs.no_robots }}
-            - **Run**: #${{ github.run_number }}
-          files: "crawl-${{ steps.reponame.outputs.name }}.zip"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create repository with crawled content
+      - name: Create repository for live progress
         if: inputs.create_repo == true
+        id: create_repo
         env:
           ONT_TOKEN: ${{ secrets.ONT }}
         run: |
@@ -118,7 +87,6 @@ jobs:
           OWNER="${{ inputs.repo_owner }}"
 
           if [ -z "$OWNER" ]; then
-            # Default to the user who owns the token
             RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: token $ONT_TOKEN" \
               https://api.github.com/user)
             HTTP_CODE=$(echo "$RESP" | tail -1)
@@ -184,24 +152,95 @@ jobs:
           fi
           echo "✅ Repository created: ${OWNER}/${REPO_NAME}"
 
-          echo "Pushing crawled content to ${OWNER}/${REPO_NAME}"
-
+          # Initialize git in the output directory
+          mkdir -p downloaded_site
           cd downloaded_site
           git init
           git config user.name "Web Crawler Bot"
           git config user.email "crawler@users.noreply.github.com"
-
-          # Configure credential helper to avoid token in remote URL
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
+          git checkout -b main
+
+          # Initial commit so push works
+          echo "# Crawl of ${{ inputs.url }}" > README.md
+          echo "" >> README.md
+          echo "- **Depth**: ${{ inputs.depth }}" >> README.md
+          echo "- **Delay**: ${{ inputs.delay }}s" >> README.md
+          echo "- **Run**: #${{ github.run_number }}" >> README.md
+          echo "- **Status**: 🔄 Crawling in progress…" >> README.md
+          git add -A
+          git commit -m "Initial commit – crawl starting"
+          git push -u origin main
+
+          echo "repo_ready=true" >> "$GITHUB_OUTPUT"
+          echo "repo_full=${OWNER}/${REPO_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run web crawler
+        env:
+          ONT_TOKEN: ${{ secrets.ONT }}
+        run: |
+          # Re-apply git credentials if repo was created
+          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
+            cd downloaded_site
+            git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+            cd ..
+          fi
+
+          GIT_PUSH_ARG=""
+          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ] && [ "${{ inputs.git_push_every }}" != "0" ]; then
+            GIT_PUSH_ARG="--git-push-every ${{ inputs.git_push_every }}"
+          fi
+
+          python -m web_crawler "${{ inputs.url }}" \
+            --depth "${{ inputs.depth }}" \
+            --delay "${{ inputs.delay }}" \
+            --output downloaded_site \
+            ${{ inputs.no_robots && '--no-robots' || '' }} \
+            $GIT_PUSH_ARG
+
+      - name: Final push of remaining files
+        if: inputs.create_repo == true && steps.create_repo.outputs.repo_ready == 'true'
+        env:
+          ONT_TOKEN: ${{ secrets.ONT }}
+        run: |
+          cd downloaded_site
+          git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+
+          # Update README with completion status
+          REPO_FULL="${{ steps.create_repo.outputs.repo_full }}"
+          sed -i 's/🔄 Crawling in progress…/✅ Crawl complete/' README.md
 
           git add -A
-          git commit -m "Crawl of ${{ inputs.url }}
+          git diff --cached --quiet || git commit -m "Crawl complete: ${{ inputs.url }}"
+          git push
 
-          Depth: ${{ inputs.depth }}
-          Delay: ${{ inputs.delay }}s
-          Run: #${{ github.run_number }}"
+      - name: Zip downloaded site
+        run: |
+          cd downloaded_site
+          zip -r ../crawl-${{ steps.reponame.outputs.name }}.zip . -x '.git/*'
 
-          git branch -M main
-          git push -u origin main
-          echo "✅ Content pushed: https://github.com/${OWNER}/${REPO_NAME}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "crawl-${{ steps.reponame.outputs.name }}"
+          path: downloaded_site/
+          retention-days: 90
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "crawl-${{ steps.reponame.outputs.name }}-${{ github.run_number }}"
+          name: "Crawl ${{ inputs.url }} (#${{ github.run_number }})"
+          body: |
+            ## Web Crawl Results
+
+            - **URL**: ${{ inputs.url }}
+            - **Depth**: ${{ inputs.depth }}
+            - **Delay**: ${{ inputs.delay }}s
+            - **robots.txt ignored**: ${{ inputs.no_robots }}
+            - **Run**: #${{ github.run_number }}
+            ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
+          files: "crawl-${{ steps.reponame.outputs.name }}.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

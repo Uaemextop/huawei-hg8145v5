@@ -499,6 +499,66 @@ class TestDeepWPCrawl(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# Git push integration
+# ------------------------------------------------------------------ #
+
+class TestGitPushIntegration(unittest.TestCase):
+    """Test the periodic git push feature."""
+
+    def _make_crawler(self, git_push_every=0):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                git_push_every=git_push_every,
+            )
+        return crawler
+
+    def test_git_push_disabled_by_default(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.git_push_every, 0)
+        # Should not attempt any subprocess calls
+        crawler._stats["ok"] = 100
+        crawler._maybe_git_push()  # no error, does nothing
+
+    def test_git_push_not_triggered_below_threshold(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 50
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            mock_run.assert_not_called()
+
+    def test_git_push_triggered_at_threshold(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 100
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            self.assertEqual(mock_run.call_count, 3)  # add, commit, push
+
+    def test_git_push_triggered_at_multiple(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 200
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            self.assertEqual(mock_run.call_count, 3)
+
+    def test_git_push_not_triggered_off_multiple(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 150
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            mock_run.assert_not_called()
+
+    def test_git_not_found_disables_feature(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 100
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            crawler._maybe_git_push()
+        self.assertEqual(crawler.git_push_every, 0)
+
+
+# ------------------------------------------------------------------ #
 # Logging system
 # ------------------------------------------------------------------ #
 

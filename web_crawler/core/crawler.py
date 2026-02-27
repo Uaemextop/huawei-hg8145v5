@@ -21,6 +21,7 @@ import json
 import random
 import re
 import string
+import subprocess
 import time
 import urllib.parse
 import urllib.robotparser
@@ -80,6 +81,7 @@ class Crawler:
         verify_ssl: bool = True,
         respect_robots: bool = True,
         force: bool = False,
+        git_push_every: int = 0,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -89,6 +91,7 @@ class Crawler:
         self.max_depth = max_depth
         self.delay = delay
         self.force = force
+        self.git_push_every = git_push_every
         self.session = build_session(verify_ssl=verify_ssl)
 
         self._visited: set[str] = set()
@@ -581,6 +584,39 @@ class Crawler:
             encoding="utf-8",
         )
 
+    def _maybe_git_push(self) -> None:
+        """Commit and push progress every *git_push_every* saved files."""
+        if self.git_push_every <= 0:
+            return
+        if self._stats["ok"] % self.git_push_every != 0:
+            return
+
+        ok = self._stats["ok"]
+        log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
+        try:
+            cwd = str(self.output_dir.resolve())
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=cwd, check=True, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"Crawl progress: {ok} files saved"],
+                cwd=cwd, check=True, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "push"],
+                cwd=cwd, check=True, capture_output=True, timeout=120,
+            )
+            log.info("[GIT] Push OK (%d files)", ok)
+        except subprocess.CalledProcessError as exc:
+            log.warning("[GIT] Push failed: %s", exc.stderr.decode(errors="replace").strip() if exc.stderr else exc)
+        except FileNotFoundError:
+            log.warning("[GIT] git not found – disabling periodic push")
+            self.git_push_every = 0
+        except Exception as exc:
+            log.warning("[GIT] Push error: %s", exc)
+
     def _probe_hidden_files(self, url: str, depth: int) -> None:
         """Enqueue hidden/config files for every new directory discovered."""
         parsed = urllib.parse.urlparse(url)
@@ -762,6 +798,7 @@ class Crawler:
             save_file(local, content)
             self._save_http_headers(local, resp, url)
             self._stats["ok"] += 1
+            self._maybe_git_push()
 
         # Extract and enqueue links from parseable content
         ct = ct_lower

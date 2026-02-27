@@ -74,6 +74,10 @@ def parse_args() -> argparse.Namespace:
         "--log-file",
         help="Write detailed logs to this file (always at DEBUG level)",
     )
+    parser.add_argument(
+        "--git-push-every", type=int, default=0, metavar="N",
+        help="Commit and push crawled files every N saved files (requires git repo in output dir)",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +118,7 @@ def main() -> None:
         verify_ssl=args.verify_ssl,
         respect_robots=args.respect_robots,
         force=args.force,
+        git_push_every=args.git_push_every,
     )
 
     t0 = time.monotonic()
