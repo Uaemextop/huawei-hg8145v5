@@ -281,7 +281,9 @@ class Crawler:
                         return True
 
         # --- Layer 3: <title> tag contains 404-like keywords ---
-        title_match = re.search(r"<title[^>]*>(.*?)</title>", text, re.S)
+        # Search only the first 4 KB where <title> typically appears.
+        head = text[:4096]
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", head, re.S)
         if title_match:
             title = title_match.group(1).strip()
             for kw in SOFT_404_TITLE_KEYWORDS:
@@ -610,7 +612,8 @@ class Crawler:
             )
             log.info("[GIT] Push OK (%d files)", ok)
         except subprocess.CalledProcessError as exc:
-            log.warning("[GIT] Push failed: %s", exc.stderr.decode(errors="replace").strip() if exc.stderr else exc)
+            msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
+            log.warning("[GIT] Push failed: %s", msg)
         except FileNotFoundError:
             log.warning("[GIT] git not found – disabling periodic push")
             self.git_push_every = 0
