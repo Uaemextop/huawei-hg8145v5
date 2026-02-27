@@ -44,7 +44,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "a":       ["href"],
         "link":    ["href"],
         "script":  ["src"],
-        "img":     ["src", "data-src"],
+        "img":     ["src", "data-src", "data-lazy-src"],
         "source":  ["src", "srcset"],
         "iframe":  ["src"],
         "frame":   ["src"],
