@@ -21,6 +21,7 @@ import json
 import random
 import re
 import string
+import subprocess
 import time
 import urllib.parse
 import urllib.robotparser
@@ -48,6 +49,8 @@ from web_crawler.config import (
     SOFT_404_KEYWORDS,
     SOFT_404_MIN_KEYWORD_HITS,
     SOFT_404_SIZE_RATIO,
+    SOFT_404_STANDALONE_MIN_HITS,
+    SOFT_404_TITLE_KEYWORDS,
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
@@ -78,6 +81,7 @@ class Crawler:
         verify_ssl: bool = True,
         respect_robots: bool = True,
         force: bool = False,
+        git_push_every: int = 0,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -87,6 +91,7 @@ class Crawler:
         self.max_depth = max_depth
         self.delay = delay
         self.force = force
+        self.git_push_every = git_push_every
         self.session = build_session(verify_ssl=verify_ssl)
 
         self._visited: set[str] = set()
@@ -246,27 +251,55 @@ class Crawler:
         )
 
     def _is_soft_404(self, content: bytes, url: str) -> bool:
-        """Return True if *content* looks like a soft-404 (false positive)."""
-        if self._soft404_hash is None:
-            return False
+        """Return True if *content* looks like a soft-404 (false positive).
 
-        # Exact match with baseline
-        if content_hash(content) == self._soft404_hash:
-            log.debug("  Soft-404 (exact match): %s", url)
-            return True
+        Detection layers:
+        1. Exact hash match with the baseline probe.
+        2. Size-based heuristic + keyword check (when baseline exists).
+        3. ``<title>`` tag contains 404-related keywords.
+        4. Standalone keyword check (works even without baseline).
+        """
+        text = content.decode("utf-8", errors="replace").lower()
 
-        # Size-based heuristic + keyword check
-        size = len(content)
-        if self._soft404_size and self._soft404_size > 0:
-            ratio = abs(size - self._soft404_size) / self._soft404_size
-            if ratio <= SOFT_404_SIZE_RATIO:
-                text = content.decode("utf-8", errors="replace").lower()
-                hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
-                if hits >= SOFT_404_MIN_KEYWORD_HITS:
+        # --- Layer 1: baseline fingerprint exact match ---
+        if self._soft404_hash is not None:
+            if content_hash(content) == self._soft404_hash:
+                log.debug("  Soft-404 (exact baseline match): %s", url)
+                return True
+
+            # --- Layer 2: size similarity + keywords ---
+            size = len(content)
+            if self._soft404_size and self._soft404_size > 0:
+                ratio = abs(size - self._soft404_size) / self._soft404_size
+                if ratio <= SOFT_404_SIZE_RATIO:
+                    hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
+                    if hits >= SOFT_404_MIN_KEYWORD_HITS:
+                        log.debug(
+                            "  Soft-404 (size+keywords, %d hits): %s",
+                            hits, url,
+                        )
+                        return True
+
+        # --- Layer 3: <title> tag contains 404-like keywords ---
+        # Search only the first 4 KB where <title> typically appears.
+        head = text[:4096]
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", head, re.S)
+        if title_match:
+            title = title_match.group(1).strip()
+            for kw in SOFT_404_TITLE_KEYWORDS:
+                if kw in title:
                     log.debug(
-                        "  Soft-404 (size+keywords, %d hits): %s", hits, url
+                        "  Soft-404 (title contains '%s'): %s", kw, url,
                     )
                     return True
+
+        # --- Layer 4: standalone keyword check (no baseline needed) ---
+        hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
+        if hits >= SOFT_404_STANDALONE_MIN_HITS:
+            log.debug(
+                "  Soft-404 (standalone, %d keyword hits): %s", hits, url,
+            )
+            return True
 
         return False
 
@@ -553,6 +586,40 @@ class Crawler:
             encoding="utf-8",
         )
 
+    def _maybe_git_push(self) -> None:
+        """Commit and push progress every *git_push_every* saved files."""
+        if self.git_push_every <= 0:
+            return
+        if self._stats["ok"] % self.git_push_every != 0:
+            return
+
+        ok = self._stats["ok"]
+        log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
+        try:
+            cwd = str(self.output_dir.resolve())
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=cwd, check=True, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"Crawl progress: {ok} files saved"],
+                cwd=cwd, check=True, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "push"],
+                cwd=cwd, check=True, capture_output=True, timeout=120,
+            )
+            log.info("[GIT] Push OK (%d files)", ok)
+        except subprocess.CalledProcessError as exc:
+            msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
+            log.warning("[GIT] Push failed: %s", msg)
+        except FileNotFoundError:
+            log.warning("[GIT] git not found – disabling periodic push")
+            self.git_push_every = 0
+        except Exception as exc:
+            log.warning("[GIT] Push error: %s", exc)
+
     def _probe_hidden_files(self, url: str, depth: int) -> None:
         """Enqueue hidden/config files for every new directory discovered."""
         parsed = urllib.parse.urlparse(url)
@@ -695,8 +762,10 @@ class Crawler:
             text = content.decode("utf-8", errors="replace")
             protections = self.detect_protection(dict(resp.headers), text)
             if protections:
-                log.info("  [PROTECTION] %s on %s",
-                         ", ".join(protections), url)
+                log.warning("  [PROTECTION] %s on %s – not saving",
+                            ", ".join(protections), url)
+                self._stats["waf"] += 1
+                return
 
             # Soft-404 detection – skip false positives
             if self._is_soft_404(content, url):
@@ -732,6 +801,7 @@ class Crawler:
             save_file(local, content)
             self._save_http_headers(local, resp, url)
             self._stats["ok"] += 1
+            self._maybe_git_push()
 
         # Extract and enqueue links from parseable content
         ct = ct_lower

@@ -3,6 +3,7 @@ Tests for crawler soft-404 detection, WordPress detection, WAF/protection
 detection, header retry, cache bypass, deep WP crawl, and JSON extraction.
 """
 
+import logging
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,6 +11,8 @@ from unittest.mock import MagicMock, patch
 from web_crawler.config import (
     SOFT_404_KEYWORDS,
     SOFT_404_SIZE_RATIO,
+    SOFT_404_STANDALONE_MIN_HITS,
+    SOFT_404_TITLE_KEYWORDS,
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
@@ -79,11 +82,37 @@ class TestSoft404Detection(unittest.TestCase):
         no_kw = b"<html><body><h1>Hi there</h1><p>Welcome to my page</p></body></html>"
         self.assertFalse(crawler._is_soft_404(no_kw, "https://example.com/ok"))
 
-    def test_no_baseline_disables_detection(self):
+    def test_no_baseline_standalone_detection(self):
+        """Standalone keyword detection works even without baseline."""
         crawler = self._make_crawler()
-        # No fingerprint built
+        # No fingerprint built – but body has multiple 404 keywords
         body = b"<html><body><h1>Page not found</h1></body></html>"
+        self.assertTrue(crawler._is_soft_404(body, "https://example.com/x"))
+
+    def test_no_baseline_single_keyword_not_detected(self):
+        """A single keyword hit is not enough for standalone detection."""
+        crawler = self._make_crawler()
+        # Only one keyword ("oops") – below SOFT_404_STANDALONE_MIN_HITS
+        body = b"<html><body><h1>Oops</h1><p>Something went wrong.</p></body></html>"
         self.assertFalse(crawler._is_soft_404(body, "https://example.com/x"))
+
+    def test_title_based_soft_404(self):
+        """Detection by <title> tag containing 404-like keywords."""
+        crawler = self._make_crawler()
+        body = b"<html><head><title>Error 404</title></head><body><p>Welcome to our site</p></body></html>"
+        self.assertTrue(crawler._is_soft_404(body, "https://example.com/missing"))
+
+    def test_title_without_404_not_detected(self):
+        """A normal <title> does not trigger soft-404."""
+        crawler = self._make_crawler()
+        body = b"<html><head><title>Welcome</title></head><body><p>Hello world</p></body></html>"
+        self.assertFalse(crawler._is_soft_404(body, "https://example.com/ok"))
+
+    def test_spanish_soft_404_standalone(self):
+        """Standalone detection with Spanish keywords."""
+        crawler = self._make_crawler()
+        body = b"<html><body><h1>Pagina no encontrada</h1><p>Lo sentimos</p></body></html>"
+        self.assertTrue(crawler._is_soft_404(body, "https://example.com/es/missing"))
 
     def test_soft404_keywords_config(self):
         self.assertIn("page not found", SOFT_404_KEYWORDS)
@@ -95,6 +124,15 @@ class TestSoft404Detection(unittest.TestCase):
         self.assertIsInstance(SOFT_404_SIZE_RATIO, float)
         self.assertGreater(SOFT_404_SIZE_RATIO, 0)
         self.assertLess(SOFT_404_SIZE_RATIO, 1)
+
+    def test_soft404_title_keywords_config(self):
+        self.assertIn("404", SOFT_404_TITLE_KEYWORDS)
+        self.assertIn("not found", SOFT_404_TITLE_KEYWORDS)
+        self.assertIn("no encontrada", SOFT_404_TITLE_KEYWORDS)
+
+    def test_soft404_standalone_min_hits_config(self):
+        self.assertIsInstance(SOFT_404_STANDALONE_MIN_HITS, int)
+        self.assertGreaterEqual(SOFT_404_STANDALONE_MIN_HITS, 2)
 
 
 # ------------------------------------------------------------------ #
@@ -458,6 +496,132 @@ class TestDeepWPCrawl(unittest.TestCase):
         html = '''<script>var wpApiSettings = {"nonce":"abc123def","root":"https:\\/\\/example.com\\/wp-json\\/"};</script>'''
         crawler._extract_wp_nonce(html)
         self.assertEqual(crawler.session.headers.get("X-WP-Nonce"), "abc123def")
+
+
+# ------------------------------------------------------------------ #
+# Git push integration
+# ------------------------------------------------------------------ #
+
+class TestGitPushIntegration(unittest.TestCase):
+    """Test the periodic git push feature."""
+
+    def _make_crawler(self, git_push_every=0):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                git_push_every=git_push_every,
+            )
+        return crawler
+
+    def test_git_push_disabled_by_default(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.git_push_every, 0)
+        # Should not attempt any subprocess calls
+        crawler._stats["ok"] = 100
+        crawler._maybe_git_push()  # no error, does nothing
+
+    def test_git_push_not_triggered_below_threshold(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 50
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            mock_run.assert_not_called()
+
+    def test_git_push_triggered_at_threshold(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 100
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            self.assertEqual(mock_run.call_count, 3)  # add, commit, push
+
+    def test_git_push_triggered_at_multiple(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 200
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            self.assertEqual(mock_run.call_count, 3)
+
+    def test_git_push_not_triggered_off_multiple(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 150
+        with patch("subprocess.run") as mock_run:
+            crawler._maybe_git_push()
+            mock_run.assert_not_called()
+
+    def test_git_not_found_disables_feature(self):
+        crawler = self._make_crawler(git_push_every=100)
+        crawler._stats["ok"] = 100
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            crawler._maybe_git_push()
+        self.assertEqual(crawler.git_push_every, 0)
+
+
+# ------------------------------------------------------------------ #
+# Logging system
+# ------------------------------------------------------------------ #
+
+class TestLogging(unittest.TestCase):
+    """Test the logging configuration."""
+
+    @staticmethod
+    def _cleanup_log(logger):
+        """Close and remove all handlers to avoid ResourceWarning."""
+        for h in list(logger.handlers):
+            h.close()
+            logger.removeHandler(h)
+
+    def test_setup_logging_creates_handler(self):
+        from web_crawler.utils.log import setup_logging, log as _log
+        setup_logging(debug=False)
+        self.assertGreater(len(_log.handlers), 0)
+        self._cleanup_log(_log)
+
+    def test_setup_logging_debug_level(self):
+        from web_crawler.utils.log import setup_logging, log as _log
+        setup_logging(debug=True)
+        self.assertEqual(_log.level, logging.DEBUG)
+        self._cleanup_log(_log)
+
+    def test_setup_logging_info_level(self):
+        from web_crawler.utils.log import setup_logging, log as _log
+        setup_logging(debug=False)
+        self.assertEqual(_log.level, logging.INFO)
+        self._cleanup_log(_log)
+
+    def test_setup_logging_with_file(self):
+        import os
+        import tempfile
+        from web_crawler.utils.log import setup_logging, log as _log
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test.log")
+            setup_logging(debug=False, log_file=log_path)
+            _log.info("test message for file logging")
+            for h in _log.handlers:
+                h.flush()
+            self.assertTrue(os.path.exists(log_path))
+            with open(log_path) as f:
+                content = f.read()
+            self.assertIn("test message for file logging", content)
+            self._cleanup_log(_log)
+
+    def test_file_log_always_debug_level(self):
+        """File handler should always capture DEBUG-level messages."""
+        import os
+        import tempfile
+        from web_crawler.utils.log import setup_logging, log as _log
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test_debug.log")
+            setup_logging(debug=False, log_file=log_path)
+            _log.setLevel(logging.DEBUG)
+            _log.debug("debug detail for file")
+            for h in _log.handlers:
+                h.flush()
+            with open(log_path) as f:
+                content = f.read()
+            self.assertIn("debug detail for file", content)
+            self._cleanup_log(_log)
 
 
 if __name__ == "__main__":
