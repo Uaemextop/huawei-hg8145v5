@@ -103,6 +103,7 @@ jobs:
           # Check if a repo already exists and find next available name
           REPO_NAME="$REPO_BASE"
           COPY=0
+          MAX_COPIES=10
           while true; do
             HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
               -H "Authorization: token $ONT_TOKEN" \
@@ -111,6 +112,10 @@ jobs:
               break
             fi
             COPY=$((COPY + 1))
+            if [ "$COPY" -gt "$MAX_COPIES" ]; then
+              echo "::error::Exceeded maximum of $MAX_COPIES name attempts. Please delete old repos or choose a different name."
+              exit 1
+            fi
             REPO_NAME="${REPO_BASE}-${COPY}"
             echo "Repo exists, trying: $REPO_NAME"
           done
