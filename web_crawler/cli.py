@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from web_crawler.config import DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY, DEFAULT_MAX_PAGES
+from web_crawler.config import DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY
 from web_crawler.core.crawler import Crawler
 from web_crawler.utils.log import setup_logging, log
 
@@ -26,8 +26,8 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generic web crawler – exhaustively downloads all pages "
-                    "and assets from a target website.",
+        description="Generic web crawler – exhaustively downloads ALL pages "
+                    "and assets from a target website with no limits.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -47,10 +47,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--depth", type=int, default=DEFAULT_MAX_DEPTH,
         help=f"Maximum crawl depth (0 = unlimited, default: {DEFAULT_MAX_DEPTH})",
-    )
-    parser.add_argument(
-        "--max-pages", type=int, default=DEFAULT_MAX_PAGES,
-        help=f"Maximum number of pages to download (0 = unlimited, default: {DEFAULT_MAX_PAGES})",
     )
     parser.add_argument(
         "--delay", type=float, default=DEFAULT_DELAY,
@@ -108,7 +104,6 @@ def main() -> None:
         start_url=target_url,
         output_dir=output_dir,
         max_depth=args.depth,
-        max_pages=args.max_pages,
         delay=args.delay,
         verify_ssl=args.verify_ssl,
         respect_robots=args.respect_robots,

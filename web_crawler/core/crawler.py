@@ -1,16 +1,18 @@
 """
 Generic BFS web crawler.
 
-Crawls a target website starting from a seed URL, downloading all reachable
-pages and static assets.  Supports:
+Crawls a target website starting from a seed URL, downloading ALL reachable
+pages and static assets with NO page limit.  Supports:
 
 * robots.txt respect
 * Configurable depth limit
-* Configurable maximum page count
 * Resume from previously downloaded files
 * Deduplication by content hash
+* Saves ALL file types (html, php, asp, js, css, json, xml, txt, images, …)
+* Saves HTTP response headers alongside each downloaded file
 """
 
+import json
 import time
 import urllib.parse
 import urllib.robotparser
@@ -40,8 +42,8 @@ from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 
 class Crawler:
     """
-    Generic BFS web crawler that discovers and downloads all pages from a
-    target website.
+    Generic BFS web crawler.  Downloads every reachable page and asset
+    from a target website with NO page limit.
     """
 
     def __init__(
@@ -49,7 +51,6 @@ class Crawler:
         start_url: str,
         output_dir: Path,
         max_depth: int = 0,
-        max_pages: int = 0,
         delay: float = DEFAULT_DELAY,
         verify_ssl: bool = True,
         respect_robots: bool = True,
@@ -61,7 +62,6 @@ class Crawler:
         self.allowed_host = parsed.netloc
         self.output_dir = output_dir
         self.max_depth = max_depth
-        self.max_pages = max_pages
         self.delay = delay
         self.force = force
         self.session = build_session(verify_ssl=verify_ssl)
@@ -84,10 +84,9 @@ class Crawler:
         log.info("Output directory : %s", self.output_dir.resolve())
         log.info("Target URL       : %s", self.start_url)
         log.info("Allowed host     : %s", self.allowed_host)
+        log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
             log.info("Max depth        : %d", self.max_depth)
-        if self.max_pages:
-            log.info("Max pages        : %d", self.max_pages)
 
         # Resume from disk
         if not self.force:
@@ -104,9 +103,6 @@ class Crawler:
             self._run_with_progress()
         else:
             while self._queue:
-                if self.max_pages and self._stats["ok"] >= self.max_pages:
-                    log.info("Reached max pages limit (%d)", self.max_pages)
-                    break
                 url, depth = self._queue.popleft()
                 self._fetch_and_process(url, depth)
 
@@ -132,9 +128,6 @@ class Crawler:
         bar.total = total_seen
 
         while self._queue:
-            if self.max_pages and self._stats["ok"] >= self.max_pages:
-                log.info("Reached max pages limit (%d)", self.max_pages)
-                break
             url, depth = self._queue.popleft()
             prev_q = len(self._queue)
             self._fetch_and_process(url, depth)
@@ -181,6 +174,7 @@ class Crawler:
         ".htm":  "text/html",
         ".asp":  "text/html",
         ".php":  "text/html",
+        ".txt":  "text/plain",
         ".js":   "application/javascript",
         ".css":  "text/css",
         ".json": "application/json",
@@ -213,6 +207,9 @@ class Crawler:
         for local_path in sorted(self.output_dir.rglob("*")):
             if not local_path.is_file():
                 continue
+            # Skip HTTP header files
+            if local_path.suffix == ".headers":
+                continue
             rel = local_path.relative_to(self.output_dir)
             path_str = "/" + str(rel).replace("\\", "/")
             if path_str == "/index.html":
@@ -241,6 +238,21 @@ class Crawler:
         if self.max_depth and depth > self.max_depth:
             return
         self._queue.append((url, depth))
+
+    @staticmethod
+    def _save_http_headers(local: Path, resp: requests.Response, url: str) -> None:
+        """Save HTTP response headers as a .headers JSON file next to the content."""
+        headers_path = local.parent / (local.name + ".headers")
+        header_data = {
+            "url": url,
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+        }
+        headers_path.parent.mkdir(parents=True, exist_ok=True)
+        headers_path.write_text(
+            json.dumps(header_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _fetch_and_process(self, url: str, depth: int) -> None:
         key = url_key(url)
@@ -295,6 +307,8 @@ class Crawler:
             resp.status_code, content_type, len(content),
         )
 
+        # Always save the file (every type: html, php, js, css, json, xml,
+        # txt, asp, images, fonts, pdf, …)
         ch = content_hash(content)
         if ch in self._hashes:
             log.debug("  Duplicate content for %s – not saving again", url)
@@ -303,11 +317,17 @@ class Crawler:
             self._hashes.add(ch)
             local = smart_local_path(url, self.output_dir, content_type, content_disp)
             save_file(local, content)
+            self._save_http_headers(local, resp, url)
             self._stats["ok"] += 1
 
-        # Extract and enqueue links
+        # Extract and enqueue links from parseable content
         ct = content_type.split(";")[0].strip().lower()
-        if ct in CRAWLABLE_TYPES:
+        path_lower = parsed_url.path.lower()
+        is_parseable_ext = path_lower.endswith(
+            (".asp", ".php", ".html", ".htm", ".js", ".css",
+             ".json", ".xml", ".txt")
+        )
+        if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
             added = 0
             for link in new_links:

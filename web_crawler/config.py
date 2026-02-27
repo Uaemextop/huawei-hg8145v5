@@ -10,7 +10,6 @@ import re
 DEFAULT_OUTPUT = "downloaded_site"
 DEFAULT_MAX_DEPTH = 0          # 0 = unlimited
 DEFAULT_DELAY = 0.25           # seconds between requests
-DEFAULT_MAX_PAGES = 0          # 0 = unlimited
 
 # ---------------------------------------------------------------------------
 # Crawler tuning
@@ -31,6 +30,11 @@ CRAWLABLE_TYPES = {
     "application/json",
     "application/xml",
     "text/xml",
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/x-httpd-php",
+    "text/x-php",
+    "application/php",
 }
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ def extract_links(
     Return a set of absolute URLs found in *content*, parsed according to
     *content_type*.
 
-    ASP files are always treated as HTML regardless of Content-Type.
+    PHP and ASP files are always treated as HTML regardless of Content-Type.
     """
     found: set[str] = set()
     ct = content_type.split(";")[0].strip().lower()
@@ -32,9 +32,12 @@ def extract_links(
         content = content.decode("utf-8", errors="replace")
 
     parsed_url = urllib.parse.urlparse(url)
-    is_asp = parsed_url.path.lower().endswith(".asp")
+    path_lower = parsed_url.path.lower()
+    is_html_ext = path_lower.endswith((".asp", ".php", ".html", ".htm"))
 
-    if ct in ("text/html", "application/xhtml+xml") or is_asp:
+    if ct in ("text/html", "application/xhtml+xml",
+              "application/x-httpd-php", "text/x-php",
+              "application/php") or is_html_ext:
         found |= extract_html_attrs(content, url, base)
         found |= extract_js_paths(content, url, base)
 
@@ -48,7 +51,8 @@ def extract_links(
         found |= extract_json_paths(content, url, base)
         found |= extract_js_paths(content, url, base)
 
-    elif ct in ("text/plain", "text/xml", "application/xml"):
+    elif ct in ("text/plain", "text/xml", "application/xml",
+                "application/rss+xml", "application/atom+xml"):
         found |= extract_js_paths(content, url, base)
 
     return found
