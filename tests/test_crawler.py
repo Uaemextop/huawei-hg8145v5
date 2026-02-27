@@ -531,7 +531,8 @@ class TestLogging(unittest.TestCase):
         self._cleanup_log(_log)
 
     def test_setup_logging_with_file(self):
-        import tempfile, os
+        import os
+        import tempfile
         from web_crawler.utils.log import setup_logging, log as _log
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test.log")
@@ -547,7 +548,8 @@ class TestLogging(unittest.TestCase):
 
     def test_file_log_always_debug_level(self):
         """File handler should always capture DEBUG-level messages."""
-        import tempfile, os
+        import os
+        import tempfile
         from web_crawler.utils.log import setup_logging, log as _log
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test_debug.log")

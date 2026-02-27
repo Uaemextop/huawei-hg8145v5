@@ -261,7 +261,7 @@ class Crawler:
         # --- Layer 1: baseline fingerprint exact match ---
         if self._soft404_hash is not None:
             if content_hash(content) == self._soft404_hash:
-                log.info("  [SOFT-404] Exact baseline match: %s", url)
+                log.debug("  Soft-404 (exact baseline match): %s", url)
                 return True
 
             # --- Layer 2: size similarity + keywords ---
@@ -271,8 +271,8 @@ class Crawler:
                 if ratio <= SOFT_404_SIZE_RATIO:
                     hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
                     if hits >= SOFT_404_MIN_KEYWORD_HITS:
-                        log.info(
-                            "  [SOFT-404] Size+keywords (%d hits): %s",
+                        log.debug(
+                            "  Soft-404 (size+keywords, %d hits): %s",
                             hits, url,
                         )
                         return True
@@ -283,18 +283,16 @@ class Crawler:
             title = title_match.group(1).strip()
             for kw in SOFT_404_TITLE_KEYWORDS:
                 if kw in title:
-                    log.info(
-                        "  [SOFT-404] Title contains '%s': %s (title='%s')",
-                        kw, url, title[:80],
+                    log.debug(
+                        "  Soft-404 (title contains '%s'): %s", kw, url,
                     )
                     return True
 
         # --- Layer 4: standalone keyword check (no baseline needed) ---
         hits = sum(1 for kw in SOFT_404_KEYWORDS if kw in text)
         if hits >= SOFT_404_STANDALONE_MIN_HITS:
-            log.info(
-                "  [SOFT-404] Standalone keyword detection (%d hits): %s",
-                hits, url,
+            log.debug(
+                "  Soft-404 (standalone, %d keyword hits): %s", hits, url,
             )
             return True
 
