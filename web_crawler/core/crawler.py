@@ -785,9 +785,8 @@ class Crawler:
         """If a WP plugin/theme slug is confirmed (its readme.txt or
         style.css was fetched successfully), deep-crawl its internal
         files."""
-        import re as _re
         # Plugin: /wp-content/plugins/<slug>/readme.txt
-        m = _re.match(
+        m = re.match(
             r"/wp-content/plugins/([a-z0-9_-]+)/readme\.txt$",
             path_lower,
         )
@@ -795,7 +794,7 @@ class Crawler:
             self._deep_crawl_wp_plugin(m.group(1), depth)
             return
         # Theme: /wp-content/themes/<slug>/style.css
-        m = _re.match(
+        m = re.match(
             r"/wp-content/themes/([a-z0-9_-]+)/style\.css$",
             path_lower,
         )
