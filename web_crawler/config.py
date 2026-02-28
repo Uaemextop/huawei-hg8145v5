@@ -2,6 +2,7 @@
 Configuration constants for the generic web crawler.
 """
 
+import os
 import re
 
 # ---------------------------------------------------------------------------
@@ -10,6 +11,41 @@ import re
 DEFAULT_OUTPUT = "downloaded_site"
 DEFAULT_MAX_DEPTH = 0          # 0 = unlimited
 DEFAULT_DELAY = 0.25           # seconds between requests
+DEFAULT_CONCURRENCY = 0        # 0 = auto-detect from CPU/RAM
+DEFAULT_DOWNLOAD_EXTENSIONS = "all"
+
+# Limits for auto-concurrency calculation
+_MIN_WORKERS = 2
+_MAX_WORKERS = 32
+_RAM_PER_WORKER_MB = 64        # estimated RSS per worker thread
+
+
+def auto_concurrency() -> int:
+    """Calculate the optimal number of concurrent workers based on
+    available CPU cores and system RAM.
+
+    Heuristic:
+      * Start with ``cpu_count * 2`` (I/O-bound workload).
+      * Cap by available RAM (``free_mb / _RAM_PER_WORKER_MB``).
+      * Clamp between ``_MIN_WORKERS`` and ``_MAX_WORKERS``.
+    """
+    cpus = os.cpu_count() or 2
+    workers = cpus * 2
+
+    # Try to read available memory and cap accordingly
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    mem_kb = int(line.split()[1])
+                    mem_mb = mem_kb // 1024
+                    ram_cap = max(1, mem_mb // _RAM_PER_WORKER_MB)
+                    workers = min(workers, ram_cap)
+                    break
+    except (OSError, ValueError):
+        pass
+
+    return max(_MIN_WORKERS, min(workers, _MAX_WORKERS))
 
 # ---------------------------------------------------------------------------
 # Crawler tuning

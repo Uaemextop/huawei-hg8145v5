@@ -22,10 +22,12 @@ import random
 import re
 import string
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.robotparser
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -42,6 +44,7 @@ from web_crawler.config import (
     BLOCKED_PATH_RE,
     CRAWLABLE_TYPES,
     DEFAULT_DELAY,
+    DEFAULT_CONCURRENCY,
     HEADER_RETRY_MAX,
     HIDDEN_FILE_PROBES,
     PROBE_403_THRESHOLD,
@@ -60,6 +63,7 @@ from web_crawler.config import (
     WP_PLUGIN_PROBES,
     WP_THEME_FILES,
     WP_THEME_PROBES,
+    auto_concurrency,
 )
 from web_crawler.session import (
     build_session, cache_bust_url, is_sg_captcha_response, random_headers,
@@ -88,6 +92,9 @@ class Crawler:
         force: bool = False,
         git_push_every: int = 0,
         skip_captcha_check: bool = False,
+        download_extensions: frozenset[str] | None = None,
+        concurrency: int = DEFAULT_CONCURRENCY,
+        upload_extensions: frozenset[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -99,7 +106,20 @@ class Crawler:
         self.force = force
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
+        self.download_extensions = download_extensions or frozenset()
+        self.upload_extensions = upload_extensions or frozenset()
+        self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
+        self._ext_link_re: re.Pattern | None = None
+        if self.download_extensions:
+            ext_pattern = "|".join(re.escape(e) for e in self.download_extensions)
+            self._ext_link_re = re.compile(
+                r'''(?:href|src|data-src|action)\s*=\s*['"]([^'"]*?(?:'''
+                + ext_pattern
+                + r""")(?:\?[^'"]*)?)['"]\s*""",
+                re.I,
+            )
         self.session = build_session(verify_ssl=verify_ssl)
+        self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
         self._queue: deque[tuple[str, int]] = deque()  # (url, depth)
@@ -140,6 +160,11 @@ class Crawler:
         log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
             log.info("Max depth        : %d", self.max_depth)
+        if self.download_extensions:
+            log.info("Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
+        log.info("Concurrency      : %d workers", self.concurrency)
+        if self.upload_extensions:
+            log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -164,7 +189,9 @@ class Crawler:
 
         log.info("Crawl started. Dynamic discovery begins.")
 
-        if _TQDM_AVAILABLE:
+        if self.concurrency > 1:
+            self._run_concurrent()
+        elif _TQDM_AVAILABLE:
             self._run_with_progress()
         else:
             while self._queue:
@@ -212,6 +239,29 @@ class Crawler:
             )
 
         bar.close()
+
+    def _run_concurrent(self) -> None:
+        """BFS loop with a ThreadPoolExecutor for parallel fetching."""
+        log.info("Concurrent mode: %d workers", self.concurrency)
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            while self._queue:
+                # Drain up to `concurrency` items from the queue
+                batch: list[tuple[str, int]] = []
+                with self._lock:
+                    while self._queue and len(batch) < self.concurrency:
+                        batch.append(self._queue.popleft())
+                if not batch:
+                    break
+                futures = {
+                    pool.submit(self._fetch_and_process, url, depth): url
+                    for url, depth in batch
+                }
+                for fut in as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        log.warning("Worker error for %s: %s",
+                                    futures[fut], exc)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -644,21 +694,28 @@ class Crawler:
 
         When *priority* is ``True`` the URL is pushed to the front of
         the queue so that real-content pages are processed before
-        speculative probe URLs.
+        speculative probe URLs.  URLs matching ``download_extensions``
+        are always prioritized.
         """
         key = url_key(url)
-        if key in self._visited:
-            return
-        # Only crawl URLs on the same host
-        parsed = urllib.parse.urlparse(url)
-        if parsed.netloc != self.allowed_host:
-            return
-        if self.max_depth and depth > self.max_depth:
-            return
-        if priority:
-            self._queue.appendleft((url, depth))
-        else:
-            self._queue.append((url, depth))
+        with self._lock:
+            if key in self._visited:
+                return
+            # Only crawl URLs on the same host
+            parsed = urllib.parse.urlparse(url)
+            if parsed.netloc != self.allowed_host:
+                return
+            if self.max_depth and depth > self.max_depth:
+                return
+            # Auto-prioritize target extension files
+            if not priority and self.download_extensions:
+                path_lower = parsed.path.lower()
+                if any(path_lower.endswith(ext) for ext in self.download_extensions):
+                    priority = True
+            if priority:
+                self._queue.appendleft((url, depth))
+            else:
+                self._queue.append((url, depth))
 
     @staticmethod
     def _save_http_headers(local: Path, resp: requests.Response, url: str) -> None:
@@ -676,7 +733,11 @@ class Crawler:
         )
 
     def _maybe_git_push(self) -> None:
-        """Commit and push progress every *git_push_every* saved files."""
+        """Commit and push progress every *git_push_every* saved files.
+
+        When *upload_extensions* is set, only files matching those
+        extensions (plus README.md and .headers) are staged.
+        """
         if self.git_push_every <= 0:
             return
         if self._stats["ok"] % self.git_push_every != 0:
@@ -686,10 +747,23 @@ class Crawler:
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
         try:
             cwd = str(self.output_dir.resolve())
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=cwd, check=True, capture_output=True, timeout=60,
-            )
+            if self.upload_extensions:
+                # Stage only files matching the upload extensions
+                subprocess.run(
+                    ["git", "add", "README.md"],
+                    cwd=cwd, capture_output=True, timeout=30,
+                )
+                for ext in self.upload_extensions:
+                    # Stage files matching this extension + their .headers
+                    subprocess.run(
+                        ["git", "add", "--", f"*{ext}", f"*{ext}.headers"],
+                        cwd=cwd, capture_output=True, timeout=60,
+                    )
+            else:
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=cwd, check=True, capture_output=True, timeout=60,
+                )
             subprocess.run(
                 ["git", "commit", "-m",
                  f"Crawl progress: {ok} files saved"],
@@ -724,22 +798,25 @@ class Crawler:
         if not dir_path:
             dir_path = "/"
 
-        if dir_path in self._probed_dirs:
-            return
-        self._probed_dirs.add(dir_path)
+        with self._lock:
+            if dir_path in self._probed_dirs:
+                return
+            self._probed_dirs.add(dir_path)
 
         for probe in HIDDEN_FILE_PROBES:
             probe_url = self.base + dir_path + probe
-            self._probe_urls.add(url_key(probe_url))
+            with self._lock:
+                self._probe_urls.add(url_key(probe_url))
             self._enqueue(probe_url, depth + 1)
 
         log.debug("Probed %d hidden files at %s", len(HIDDEN_FILE_PROBES), dir_path)
 
     def _fetch_and_process(self, url: str, depth: int) -> None:
         key = url_key(url)
-        if key in self._visited:
-            return
-        self._visited.add(key)
+        with self._lock:
+            if key in self._visited:
+                return
+            self._visited.add(key)
 
         # Probe hidden/config files at each new directory
         self._probe_hidden_files(url, depth)
@@ -969,16 +1046,21 @@ class Crawler:
 
         # Always save the file (every type)
         ch = content_hash(content)
-        if ch in self._hashes:
-            log.debug("  Duplicate content for %s – not saving again", url)
-            self._stats["dup"] += 1
-        else:
-            self._hashes.add(ch)
+        with self._lock:
+            if ch in self._hashes:
+                log.debug("  Duplicate content for %s – not saving again", url)
+                self._stats["dup"] += 1
+                is_dup = True
+            else:
+                self._hashes.add(ch)
+                is_dup = False
+        if not is_dup:
             local = smart_local_path(url, self.output_dir, content_type,
                                      content_disp)
             save_file(local, content)
             self._save_http_headers(local, resp, url)
-            self._stats["ok"] += 1
+            with self._lock:
+                self._stats["ok"] += 1
             self._maybe_git_push()
 
         # Extract and enqueue links from parseable content
@@ -1000,6 +1082,11 @@ class Crawler:
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
+            # Also scan for links to target download extensions
+            if self.download_extensions:
+                new_links |= self._extract_extension_links(
+                    content, url, self.download_extensions,
+                )
             added = 0
             for link in new_links:
                 k = url_key(link)
@@ -1010,6 +1097,27 @@ class Crawler:
                 log.debug("  +%d new URLs enqueued", added)
 
         time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # Extension-seeking link extraction
+    # ------------------------------------------------------------------
+
+    def _extract_extension_links(
+        self, content: bytes, page_url: str, extensions: frozenset[str],
+    ) -> set[str]:
+        """Scan *content* for href/src attributes pointing to files
+        with any of the target *extensions*.  Returns absolute URLs."""
+        if self._ext_link_re is None:
+            return set()
+        text = content.decode("utf-8", errors="replace")
+        found: set[str] = set()
+        for m in self._ext_link_re.finditer(text):
+            link = m.group(1).strip()
+            if not link:
+                continue
+            link = urllib.parse.urljoin(page_url, link)
+            found.add(link)
+        return found
 
     # ------------------------------------------------------------------
     # WordPress deep-crawl helpers

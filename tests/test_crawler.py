@@ -824,5 +824,318 @@ class TestSiteGroundWAFSignature(unittest.TestCase):
         self.assertIn("siteground", result)
 
 
+# ------------------------------------------------------------------ #
+# Auto-concurrency detection
+# ------------------------------------------------------------------ #
+
+class TestAutoConcurrency(unittest.TestCase):
+    """Test auto_concurrency() CPU/RAM detection."""
+
+    def test_returns_int(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertIsInstance(result, int)
+
+    def test_minimum_is_2(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    def test_maximum_is_32(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertLessEqual(result, 32)
+
+    def test_respects_cpu_count(self):
+        """With known CPU count, result should be at least 2."""
+        from web_crawler.config import auto_concurrency
+        import os
+        cpus = os.cpu_count() or 2
+        result = auto_concurrency()
+        # Should be at least 2 and at most cpu*2 (before RAM cap)
+        self.assertGreaterEqual(result, 2)
+        self.assertLessEqual(result, max(cpus * 2, 2))
+
+    @patch("os.cpu_count", return_value=None)
+    def test_handles_unknown_cpu(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    @patch("os.cpu_count", return_value=1)
+    def test_single_cpu(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    @patch("os.cpu_count", return_value=16)
+    def test_many_cpus_capped(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertLessEqual(result, 32)
+
+
+# ------------------------------------------------------------------ #
+# Download extensions & concurrency
+# ------------------------------------------------------------------ #
+
+class TestDownloadExtensions(unittest.TestCase):
+    """Test download-extension seeking and prioritization."""
+
+    def _make_crawler(self, extensions=None, concurrency=1):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                download_extensions=extensions,
+                concurrency=concurrency,
+            )
+        return crawler
+
+    def test_default_no_extensions(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.download_extensions, frozenset())
+
+    def test_extensions_stored(self):
+        exts = frozenset({".zip", ".rar", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        self.assertEqual(crawler.download_extensions, exts)
+
+    def test_concurrency_stored(self):
+        crawler = self._make_crawler(concurrency=10)
+        self.assertEqual(crawler.concurrency, 10)
+
+    def test_concurrency_auto_when_zero(self):
+        """concurrency=0 triggers auto-detection (always >= 2)."""
+        crawler = self._make_crawler(concurrency=0)
+        self.assertGreaterEqual(crawler.concurrency, 2)
+
+    def test_concurrency_auto_when_negative(self):
+        """Negative concurrency also triggers auto-detection."""
+        crawler = self._make_crawler(concurrency=-5)
+        self.assertGreaterEqual(crawler.concurrency, 2)
+
+    def test_extension_links_prioritized(self):
+        """URLs matching download_extensions should be pushed to front."""
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        # Enqueue a regular URL first
+        crawler._enqueue("https://example.com/page1.html", 0)
+        # Enqueue a .zip URL (should be prioritized)
+        crawler._enqueue("https://example.com/firmware.zip", 0)
+        # The .zip should be at the front of the queue
+        front_url, _ = crawler._queue[0]
+        self.assertTrue(front_url.endswith(".zip"))
+
+    def test_non_extension_link_not_prioritized(self):
+        """URLs NOT matching download_extensions should go to back."""
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        crawler._enqueue("https://example.com/page1.html", 0)
+        crawler._enqueue("https://example.com/page2.html", 0)
+        front_url, _ = crawler._queue[0]
+        self.assertEqual(front_url, "https://example.com/page1.html")
+
+
+class TestExtractExtensionLinks(unittest.TestCase):
+    """Test the extension-seeking link extraction regex."""
+
+    def _make_crawler(self, exts):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                download_extensions=exts,
+            )
+
+    def test_href_zip_found(self):
+        html = b'<a href="/downloads/firmware.zip">Download</a>'
+        exts = frozenset({".zip"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/firmware.zip", links)
+
+    def test_src_bin_found(self):
+        html = b'<img src="/files/image.bin">'
+        exts = frozenset({".bin"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/files/image.bin", links)
+
+    def test_relative_link_resolved(self):
+        html = b'<a href="data/update.7z">Update</a>'
+        exts = frozenset({".7z"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/downloads/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/data/update.7z", links)
+
+    def test_no_match_returns_empty(self):
+        html = b'<a href="/page.html">Page</a>'
+        exts = frozenset({".zip", ".rar"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 0)
+
+    def test_multiple_extensions_found(self):
+        html = (
+            b'<a href="/fw.zip">ZIP</a>'
+            b'<a href="/fw.rar">RAR</a>'
+            b'<a href="/fw.exe">EXE</a>'
+        )
+        exts = frozenset({".zip", ".rar", ".exe"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 3)
+
+    def test_query_string_preserved(self):
+        html = b'<a href="/download/file.zip?v=2&token=abc">Get</a>'
+        exts = frozenset({".zip"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertTrue(any("file.zip" in link for link in links))
+
+    def test_protocol_relative_link(self):
+        html = b'<a href="//cdn.example.com/file.tar.gz">Download</a>'
+        exts = frozenset({".gz"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertTrue(any(l.startswith("https://") for l in links))
+
+    def test_data_src_attribute(self):
+        html = b'<div data-src="/lazy/firmware.bin"></div>'
+        exts = frozenset({".bin"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+
+    def test_no_extensions_returns_empty(self):
+        """Crawler with no download_extensions returns empty set."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        html = b'<a href="/firmware.zip">Download</a>'
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", frozenset(),
+        )
+        self.assertEqual(len(links), 0)
+
+    def test_parent_dir_relative_link(self):
+        """../file.bin should resolve correctly."""
+        html = b'<a href="../files/update.bin">Update</a>'
+        exts = frozenset({".bin"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/downloads/sub/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/files/update.bin", links)
+
+
+# ------------------------------------------------------------------ #
+# Upload-extension filtering
+# ------------------------------------------------------------------ #
+
+class TestUploadExtensions(unittest.TestCase):
+    """Test upload_extensions parameter for git push filtering."""
+
+    def _make_crawler(self, upload_exts=None):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                upload_extensions=upload_exts,
+            )
+
+    def test_default_no_upload_extensions(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.upload_extensions, frozenset())
+
+    def test_upload_extensions_stored(self):
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(upload_exts=exts)
+        self.assertEqual(crawler.upload_extensions, exts)
+
+    def test_upload_extensions_none_gives_empty(self):
+        crawler = self._make_crawler(upload_exts=None)
+        self.assertEqual(crawler.upload_extensions, frozenset())
+
+    def test_git_push_disabled_when_zero(self):
+        """git_push_every=0 should not trigger push regardless of upload_extensions."""
+        crawler = self._make_crawler(upload_exts=frozenset({".zip"}))
+        crawler.git_push_every = 0
+        # Should return immediately without error
+        crawler._maybe_git_push()
+
+    @patch("subprocess.run")
+    def test_filtered_git_push_stages_only_matching(self, mock_run):
+        """When upload_extensions is set, git add should target specific globs."""
+        import subprocess as _sp
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                upload_extensions=frozenset({".zip", ".bin"}),
+                git_push_every=1,
+            )
+        crawler._stats["ok"] = 1
+        crawler._maybe_git_push()
+        # Should have called git add for README, each ext, commit, push
+        calls = mock_run.call_args_list
+        cmds = [c[0][0] for c in calls]
+        # First call: git add README.md
+        self.assertEqual(cmds[0], ["git", "add", "README.md"])
+        # Should have ext-specific git add calls (2 extensions)
+        ext_adds = [c for c in cmds if len(c) >= 4 and c[1] == "add"
+                    and c[2] == "--"]
+        self.assertEqual(len(ext_adds), 2)  # one per extension
+        # Should have commit and push
+        self.assertTrue(any(c[0:2] == ["git", "commit"] for c in cmds))
+        self.assertTrue(any(c == ["git", "push"] for c in cmds))
+
+    @patch("subprocess.run")
+    def test_unfiltered_git_push_uses_add_all(self, mock_run):
+        """Without upload_extensions, git add -A is used."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                git_push_every=1,
+            )
+        crawler._stats["ok"] = 1
+        crawler._maybe_git_push()
+        calls = mock_run.call_args_list
+        cmds = [c[0][0] for c in calls]
+        self.assertTrue(any(c == ["git", "add", "-A"] for c in cmds))
+
+
 if __name__ == "__main__":
     unittest.main()
