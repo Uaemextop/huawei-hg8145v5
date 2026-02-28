@@ -33,6 +33,16 @@ from pathlib import Path
 import requests
 
 try:
+    from curl_cffi.requests.exceptions import RequestException as CfRequestException
+except ImportError:
+    CfRequestException = None  # type: ignore[misc,assignment]
+
+# Network exception tuple that catches both requests and curl_cffi errors
+_NETWORK_ERRORS: tuple[type[Exception], ...] = (requests.RequestException,)
+if CfRequestException is not None:
+    _NETWORK_ERRORS = (requests.RequestException, CfRequestException)
+
+try:
     from tqdm import tqdm as _tqdm
     _TQDM_AVAILABLE = True
 except ImportError:
@@ -66,8 +76,9 @@ from web_crawler.config import (
     auto_concurrency,
 )
 from web_crawler.session import (
-    build_session, cache_bust_url, is_sg_captcha_response, random_headers,
-    solve_sg_captcha,
+    build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
+    is_cf_managed_challenge, is_sg_captcha_response, random_headers,
+    solve_cf_challenge, solve_sg_captcha,
 )
 from web_crawler.core.storage import content_hash, save_file, smart_local_path
 from web_crawler.extraction.links import extract_links
@@ -96,6 +107,7 @@ class Crawler:
         concurrency: int = DEFAULT_CONCURRENCY,
         upload_extensions: frozenset[str] | None = None,
         debug: bool = False,
+        cf_clearance: str = "",
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -121,6 +133,8 @@ class Crawler:
                 re.I,
             )
         self.session = build_session(verify_ssl=verify_ssl)
+        if cf_clearance:
+            inject_cf_clearance(self.session, parsed.netloc, cf_clearance)
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
@@ -178,6 +192,10 @@ class Crawler:
         # Must run before any other HTTP requests so the session cookie
         # is set for robots.txt loading and soft-404 probing.
         self._try_sg_captcha_bypass()
+
+        # Check for Cloudflare Managed Challenge early, before wasting
+        # time on robots.txt and soft-404 probing.
+        self._check_cf_managed_challenge()
 
         # Load robots.txt (uses our session with the captcha cookie)
         if self._respect_robots:
@@ -356,6 +374,92 @@ class Crawler:
         else:
             log.info("No SiteGround CAPTCHA detected (or not solvable)")
 
+    def _check_cf_managed_challenge(self) -> None:
+        """Detect and auto-solve a Cloudflare Managed Challenge.
+
+        If the site returns ``cf-mitigated: challenge``, attempt to
+        solve it by switching to a ``curl_cffi`` session (TLS fingerprint
+        impersonation) or falling back to Playwright.
+        """
+        try:
+            resp = self.session.get(
+                self.start_url, timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+        except _NETWORK_ERRORS:
+            return
+        if not is_cf_managed_challenge(resp):
+            log.info("No Cloudflare challenge detected")
+            return
+
+        log.warning(
+            "Cloudflare Managed Challenge detected on %s",
+            self.start_url,
+        )
+        self._solve_cf_and_inject()
+
+    def _solve_cf_and_inject(self) -> bool:
+        """Switch the session to bypass Cloudflare.
+
+        Uses ``curl_cffi`` TLS impersonation (preferred) or Playwright
+        headless browser (fallback).  When ``curl_cffi`` works, the
+        entire ``self.session`` is replaced with a ``curl_cffi`` session
+        so that all subsequent requests use the same TLS fingerprint.
+
+        Returns ``True`` on success.
+        """
+        cf_session = build_cf_session(verify_ssl=self.session.verify)
+        if cf_session is not None:
+            # Transfer existing cookies to the new session
+            for cookie in self.session.cookies:
+                cf_session.cookies.set(
+                    cookie.name, cookie.value,
+                    domain=cookie.domain, path=cookie.path,
+                )
+            try:
+                check = cf_session.get(
+                    self.start_url, timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if check.ok and "just a moment" not in check.text[:2048].lower():
+                    self.session = cf_session
+                    log.info("[CF] Switched to curl_cffi session – bypass confirmed")
+                    self._cf_bypass_done = True
+                    return True
+            except Exception as exc:
+                log.debug("[CF] curl_cffi direct attempt failed: %s", exc)
+
+        # Fallback: Playwright + cookie injection
+        result = solve_cf_challenge(self.start_url)
+        if not result:
+            log.warning(
+                "[CF] Could not auto-solve. Provide --cf-clearance <cookie> "
+                "obtained from a browser session to bypass it.",
+            )
+            return False
+
+        cookies, browser_ua = result
+        parsed = urllib.parse.urlparse(self.start_url)
+        for name, value in cookies.items():
+            self.session.cookies.set(name, value,
+                                     domain=parsed.netloc, path="/")
+        self.session.headers["User-Agent"] = browser_ua
+        log.info("[CF] %d cookies injected (UA synced) – verifying …",
+                 len(cookies))
+        try:
+            check = self.session.get(
+                self.start_url, timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+            if check.ok and not is_cf_managed_challenge(check):
+                log.info("[CF] Cloudflare bypass confirmed")
+                self._cf_bypass_done = True
+                return True
+        except _NETWORK_ERRORS:
+            pass
+        log.warning("[CF] Cookies did not bypass the challenge")
+        return False
+
     # ------------------------------------------------------------------
     # Soft-404 detection
     # ------------------------------------------------------------------
@@ -369,7 +473,7 @@ class Crawler:
             resp = self.session.get(
                 probe, timeout=REQUEST_TIMEOUT, allow_redirects=True
             )
-        except requests.RequestException:
+        except _NETWORK_ERRORS:
             log.debug("Soft-404 probe failed (request error); detection disabled.")
             return
 
@@ -497,7 +601,7 @@ class Crawler:
                        f"?per_page=100&page={page}")
             try:
                 resp = self.session.get(api_url, timeout=REQUEST_TIMEOUT)
-            except requests.RequestException:
+            except _NETWORK_ERRORS:
                 break
             if resp.status_code != 200:
                 break
@@ -618,7 +722,7 @@ class Crawler:
                     "  [RETRY %d/%d] HTTP %s for %s",
                     attempt, HEADER_RETRY_MAX, resp.status_code, url,
                 )
-            except requests.RequestException:
+            except _NETWORK_ERRORS:
                 pass
             time.sleep(self.delay * attempt)
         return None
@@ -904,14 +1008,16 @@ class Crawler:
         log.debug("[Q:%d OK:%d ERR:%d] GET %s",
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
 
-        # Rotate User-Agent per request
-        self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+        # Rotate User-Agent per request (skip for curl_cffi which
+        # manages its own UA via TLS impersonation)
+        if not self._cf_bypass_done:
+            self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
 
         try:
             resp = self.session.get(
                 url, timeout=REQUEST_TIMEOUT, allow_redirects=True
             )
-        except requests.RequestException as exc:
+        except _NETWORK_ERRORS as exc:
             log.warning("Request failed for %s – %s", url, exc)
             self._stats["err"] += 1
             return
@@ -950,6 +1056,13 @@ class Crawler:
 
         # Handle 403 / 402 – retry with rotated headers + cache busting
         if resp.status_code in RETRY_STATUS_CODES:
+            # Cloudflare Managed Challenge – re-solve with Playwright
+            if is_cf_managed_challenge(resp):
+                log.info("[CF] Challenge on %s – re-solving …", url)
+                if self._solve_cf_and_inject():
+                    self._visited.discard(key)
+                    self._enqueue(url, depth, priority=True)
+                    return
             # Skip expensive retries for speculative probe URLs
             if is_probe:
                 self._probe_403_count += 1
@@ -977,7 +1090,7 @@ class Crawler:
                         retry_resp = self.session.get(
                             url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                         )
-                    except requests.RequestException:
+                    except _NETWORK_ERRORS:
                         retry_resp = None
                     if (retry_resp is not None and retry_resp.ok
                             and not is_sg_captcha_response(retry_resp)):
@@ -1043,7 +1156,7 @@ class Crawler:
                     resp = self.session.get(
                         url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                     )
-                except requests.RequestException:
+                except _NETWORK_ERRORS:
                     self._stats["err"] += 1
                     return
                 if not resp.ok or is_sg_captcha_response(resp):

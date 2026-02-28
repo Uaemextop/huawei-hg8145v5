@@ -1205,5 +1205,81 @@ class TestUploadExtensions(unittest.TestCase):
         self.assertTrue(any(c == ["git", "add", "-A"] for c in cmds))
 
 
+class TestCloudflareDetection(unittest.TestCase):
+    """Test Cloudflare Managed Challenge detection."""
+
+    def test_cf_challenge_detected_by_header(self):
+        """is_cf_managed_challenge returns True when cf-mitigated: challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {"cf-mitigated": "challenge"}
+        resp.status_code = 403
+        resp.text = ""
+        self.assertTrue(is_cf_managed_challenge(resp))
+
+    def test_cf_challenge_detected_by_body(self):
+        """is_cf_managed_challenge returns True on 403 + 'Just a moment' + _cf_chl_opt."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = '<title>Just a moment...</title><script>window._cf_chl_opt = {}</script>'
+        self.assertTrue(is_cf_managed_challenge(resp))
+
+    def test_cf_normal_403_not_detected(self):
+        """Regular 403 without CF markers is not a challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = '<h1>403 Forbidden</h1>'
+        self.assertFalse(is_cf_managed_challenge(resp))
+
+    def test_cf_200_not_detected(self):
+        """Normal 200 response is not a challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 200
+        resp.text = '<html><body>Hello</body></html>'
+        self.assertFalse(is_cf_managed_challenge(resp))
+
+    def test_inject_cf_clearance(self):
+        """inject_cf_clearance sets the cookie on the session."""
+        from web_crawler.session import inject_cf_clearance
+        session = MagicMock()
+        inject_cf_clearance(session, "example.com", "test_cookie_value")
+        session.cookies.set.assert_called_once_with(
+            "cf_clearance", "test_cookie_value",
+            domain="example.com", path="/",
+        )
+
+    def test_crawler_cf_clearance_injected(self):
+        """Crawler injects cf_clearance cookie when provided."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                cf_clearance="my_cf_token",
+            )
+        cf_cookies = [c for c in crawler.session.cookies
+                      if c.name == "cf_clearance"]
+        self.assertEqual(len(cf_cookies), 1)
+        self.assertEqual(cf_cookies[0].value, "my_cf_token")
+
+    def test_crawler_no_cf_clearance_by_default(self):
+        """Crawler does not inject cf_clearance when not provided."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        cf_cookies = [c for c in crawler.session.cookies
+                      if c.name == "cf_clearance"]
+        self.assertEqual(len(cf_cookies), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

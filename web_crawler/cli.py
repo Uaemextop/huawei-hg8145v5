@@ -107,6 +107,12 @@ def parse_args() -> argparse.Namespace:
              "(e.g. zip,bin,rar), or 'all' to upload every file "
              "(default: all)",
     )
+    parser.add_argument(
+        "--cf-clearance", default="", metavar="COOKIE",
+        help="Cloudflare cf_clearance cookie value obtained from a browser "
+             "session. Use this to bypass Cloudflare Managed Challenges "
+             "when Playwright is not available.",
+    )
     return parser.parse_args()
 
 
@@ -193,6 +199,7 @@ def main() -> None:
         concurrency=concurrency,
         upload_extensions=upload_exts,
         debug=args.debug,
+        cf_clearance=args.cf_clearance,
     )
 
     t0 = time.monotonic()
