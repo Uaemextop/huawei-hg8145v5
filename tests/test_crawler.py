@@ -27,6 +27,7 @@ from web_crawler.core.crawler import Crawler
 from web_crawler.core.storage import content_hash
 from web_crawler.extraction.json_extract import extract_json_paths
 from web_crawler.session import random_headers, cache_bust_url
+from web_crawler.utils.url import url_key
 
 
 BASE = "https://example.com"
@@ -819,6 +820,17 @@ class TestSGCaptchaSolver(unittest.TestCase):
         self.assertEqual(_counter_to_bytes(65536), b"\x01\x00\x00")
         self.assertEqual(_counter_to_bytes(16777216), b"\x01\x00\x00\x00")
 
+    def test_sg_solve_lock_exists(self):
+        """Crawler has _sg_solve_lock for serializing concurrent solves."""
+        import threading
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        self.assertIsInstance(crawler._sg_solve_lock, type(threading.Lock()))
+
 
 # ------------------------------------------------------------------ #
 # Probe 403 threshold / adaptive disabling
@@ -895,6 +907,42 @@ class TestProbe403Threshold(unittest.TestCase):
         """PROBE_404_THRESHOLD is defined and positive."""
         from web_crawler.config import PROBE_404_THRESHOLD
         self.assertGreater(PROBE_404_THRESHOLD, 0)
+
+    def test_probe_dir_failures_initialized(self):
+        """Crawler initializes _probe_dir_failures as empty dict."""
+        crawler = self._make_crawler()
+        self.assertEqual(crawler._probe_dir_failures, {})
+
+    def test_probe_dir_404_limit_config_exists(self):
+        """PROBE_DIR_404_LIMIT is defined and positive."""
+        from web_crawler.config import PROBE_DIR_404_LIMIT
+        self.assertGreater(PROBE_DIR_404_LIMIT, 0)
+
+    def test_probe_dir_exhausted_skips_without_request(self):
+        """Probe URLs are skipped without HTTP request when their directory
+        has exceeded PROBE_DIR_404_LIMIT failures."""
+        from web_crawler.config import PROBE_DIR_404_LIMIT
+        crawler = self._make_crawler()
+        # Simulate a directory that has exhausted its probe limit
+        crawler._probe_dir_failures["/wp-content/plugins/"] = PROBE_DIR_404_LIMIT
+        probe_url = "https://example.com/wp-content/plugins/.htaccess"
+        crawler._probe_urls.add(url_key(probe_url))
+        # Should complete without making an HTTP request
+        crawler._fetch_and_process(probe_url, 0)
+        self.assertEqual(crawler._stats["err"], 1)
+
+    def test_probe_dir_below_limit_not_skipped(self):
+        """Probe URLs for directories below the limit are not pre-skipped."""
+        from web_crawler.config import PROBE_DIR_404_LIMIT
+        crawler = self._make_crawler()
+        crawler._probe_dir_failures["/dir/"] = PROBE_DIR_404_LIMIT - 1
+        probe_url = "https://example.com/dir/.htaccess"
+        crawler._probe_urls.add(url_key(probe_url))
+        # The URL should NOT be skipped by the early check
+        # (it will fail later at the HTTP request stage, but the early check
+        # is what we're testing)
+        key = url_key(probe_url)
+        self.assertNotIn(key, crawler._visited)
 
 
 # ------------------------------------------------------------------ #

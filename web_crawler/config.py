@@ -57,6 +57,7 @@ BACKOFF_429_BASE = 2.0         # base seconds for exponential backoff on 429
 BACKOFF_429_MAX = 60.0         # cap for 429 backoff
 PROBE_403_THRESHOLD = 10       # disable hidden-file probing after this many 403s
 PROBE_404_THRESHOLD = 50       # disable hidden-file probing after this many 404s
+PROBE_DIR_404_LIMIT = 10       # skip remaining probes for a directory after this many 404s
 
 # ---------------------------------------------------------------------------
 # User-Agent rotation pool
