@@ -303,7 +303,7 @@ class Crawler:
                         # Update progress after each completed future
                         with self._lock:
                             new_total = len(self._queue) + len(self._visited)
-                        if new_total > (bar.total or 0):
+                        if new_total > bar.total:
                             bar.total = new_total
                         bar.update(1)
                         bar.set_postfix(self._stats_postfix())

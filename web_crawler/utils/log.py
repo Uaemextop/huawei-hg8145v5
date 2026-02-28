@@ -25,7 +25,7 @@ _FILE_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 _LEVEL_ICONS: dict[int, str] = {
     logging.DEBUG:    "🔍",
     logging.INFO:     "✅",
-    logging.WARNING:  "⚠️ ",
+    logging.WARNING:  "⚠️",
     logging.ERROR:    "❌",
     logging.CRITICAL: "💀",
 }
@@ -34,18 +34,18 @@ _LEVEL_ICONS: dict[int, str] = {
 _ANSI_RESET = "\033[0m"
 _CATEGORY_STYLES: dict[str, tuple[str, str]] = {
     # tag: (ansi_colour, icon)
-    "[PROTECTION]": ("\033[1;31m", "🛡️  "),
+    "[PROTECTION]": ("\033[1;31m", "🛡️ "),
     "[SOFT-404]":   ("\033[33m",   "👻 "),
     "[WP]":         ("\033[1;35m", "📦 "),
-    "[WP-MEDIA]":   ("\033[1;35m", "🖼️  "),
+    "[WP-MEDIA]":   ("\033[1;35m", "🖼️ "),
     "[WP-PLUGIN]":  ("\033[1;35m", "🔌 "),
     "[WP-THEME]":   ("\033[1;35m", "🎨 "),
     "[SG-CAPTCHA]": ("\033[1;36m", "🔐 "),
     "[RETRY]":      ("\033[36m",   "🔄 "),
-    "[CF-BYPASS]":  ("\033[36m",   "☁️  "),
+    "[CF-BYPASS]":  ("\033[36m",   "☁️ "),
     "[SAVE]":       ("\033[1;32m", "💾 "),
-    "[SKIP]":       ("\033[90m",   "⏭️  "),
-    "[DUP]":        ("\033[90m",   "♻️  "),
+    "[SKIP]":       ("\033[90m",   "⏭️ "),
+    "[DUP]":        ("\033[90m",   "♻️ "),
     "[ERR]":        ("\033[1;31m", "❌ "),
     "[GIT]":        ("\033[34m",   "📤 "),
     "[QUEUE]":      ("\033[37m",   "📋 "),
