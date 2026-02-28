@@ -12,7 +12,7 @@ DEFAULT_OUTPUT = "downloaded_site"
 DEFAULT_MAX_DEPTH = 0          # 0 = unlimited
 DEFAULT_DELAY = 0.25           # seconds between requests
 DEFAULT_CONCURRENCY = 0        # 0 = auto-detect from CPU/RAM
-DEFAULT_DOWNLOAD_EXTENSIONS = "zip,rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
+DEFAULT_DOWNLOAD_EXTENSIONS = "all"
 
 # Limits for auto-concurrency calculation
 _MIN_WORKERS = 2

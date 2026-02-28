@@ -1057,5 +1057,85 @@ class TestExtractExtensionLinks(unittest.TestCase):
         self.assertIn("https://example.com/downloads/files/update.bin", links)
 
 
+# ------------------------------------------------------------------ #
+# Upload-extension filtering
+# ------------------------------------------------------------------ #
+
+class TestUploadExtensions(unittest.TestCase):
+    """Test upload_extensions parameter for git push filtering."""
+
+    def _make_crawler(self, upload_exts=None):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                upload_extensions=upload_exts,
+            )
+
+    def test_default_no_upload_extensions(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.upload_extensions, frozenset())
+
+    def test_upload_extensions_stored(self):
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(upload_exts=exts)
+        self.assertEqual(crawler.upload_extensions, exts)
+
+    def test_upload_extensions_none_gives_empty(self):
+        crawler = self._make_crawler(upload_exts=None)
+        self.assertEqual(crawler.upload_extensions, frozenset())
+
+    def test_git_push_disabled_when_zero(self):
+        """git_push_every=0 should not trigger push regardless of upload_extensions."""
+        crawler = self._make_crawler(upload_exts=frozenset({".zip"}))
+        crawler.git_push_every = 0
+        # Should return immediately without error
+        crawler._maybe_git_push()
+
+    @patch("subprocess.run")
+    def test_filtered_git_push_stages_only_matching(self, mock_run):
+        """When upload_extensions is set, git add should target specific globs."""
+        import subprocess as _sp
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                upload_extensions=frozenset({".zip", ".bin"}),
+                git_push_every=1,
+            )
+        crawler._stats["ok"] = 1
+        crawler._maybe_git_push()
+        # Should have called git add for README, each ext, commit, push
+        calls = mock_run.call_args_list
+        cmds = [c[0][0] for c in calls]
+        # First call: git add README.md
+        self.assertEqual(cmds[0], ["git", "add", "README.md"])
+        # Should have ext-specific git add calls (2 extensions)
+        ext_adds = [c for c in cmds if len(c) >= 4 and c[1] == "add"
+                    and c[2] == "--"]
+        self.assertEqual(len(ext_adds), 2)  # one per extension
+        # Should have commit and push
+        self.assertTrue(any(c[0:2] == ["git", "commit"] for c in cmds))
+        self.assertTrue(any(c == ["git", "push"] for c in cmds))
+
+    @patch("subprocess.run")
+    def test_unfiltered_git_push_uses_add_all(self, mock_run):
+        """Without upload_extensions, git add -A is used."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                git_push_every=1,
+            )
+        crawler._stats["ok"] = 1
+        crawler._maybe_git_push()
+        calls = mock_run.call_args_list
+        cmds = [c[0][0] for c in calls]
+        self.assertTrue(any(c == ["git", "add", "-A"] for c in cmds))
+
+
 if __name__ == "__main__":
     unittest.main()

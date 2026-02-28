@@ -92,13 +92,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--download-extensions", default=DEFAULT_DOWNLOAD_EXTENSIONS,
         metavar="EXTS",
-        help="Comma-separated file extensions to actively seek and prioritize "
-             f"(default: {DEFAULT_DOWNLOAD_EXTENSIONS})",
+        help="Comma-separated file extensions to actively seek and prioritize, "
+             "or 'all' to download every file type without filtering "
+             "(default: all)",
     )
     parser.add_argument(
         "--concurrency", default="auto", metavar="N",
         help="Number of parallel download workers, or 'auto' to detect "
              "from CPU/RAM (default: auto)",
+    )
+    parser.add_argument(
+        "--upload-extensions", default="all", metavar="EXTS",
+        help="Comma-separated extensions to upload to the git repo "
+             "(e.g. zip,bin,rar), or 'all' to upload every file "
+             "(default: all)",
     )
     return parser.parse_args()
 
@@ -132,14 +139,19 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse download extensions
-    dl_exts = frozenset(
-        f".{e.strip().lstrip('.')}"
-        for e in args.download_extensions.split(",")
-        if e.strip()
-    )
-    if dl_exts:
-        log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
+    # Parse download extensions ("all" = no filtering, download everything)
+    raw_dl = args.download_extensions.strip().lower()
+    if raw_dl in ("all", ""):
+        dl_exts: frozenset[str] = frozenset()
+        log.info("Download mode: ALL file types (no extension filter)")
+    else:
+        dl_exts = frozenset(
+            f".{e.strip().lstrip('.')}"
+            for e in args.download_extensions.split(",")
+            if e.strip()
+        )
+        if dl_exts:
+            log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
 
     # Resolve concurrency (auto or explicit integer)
     raw_conc = args.concurrency.strip().lower()
@@ -154,6 +166,19 @@ def main() -> None:
             log.warning("Invalid --concurrency value '%s', using auto", raw_conc)
             concurrency = auto_concurrency()
 
+    # Parse upload extensions ("all" = push everything to git)
+    raw_up = args.upload_extensions.strip().lower()
+    upload_exts: frozenset[str] = frozenset()
+    if raw_up not in ("all", ""):
+        upload_exts = frozenset(
+            f".{e.strip().lstrip('.')}"
+            for e in args.upload_extensions.split(",")
+            if e.strip()
+        )
+        if upload_exts:
+            log.info("Upload filter: only %s extensions pushed to git",
+                     ", ".join(sorted(upload_exts)))
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -166,6 +191,7 @@ def main() -> None:
         skip_captcha_check=args.skip_captcha_check,
         download_extensions=dl_exts,
         concurrency=concurrency,
+        upload_extensions=upload_exts,
     )
 
     t0 = time.monotonic()

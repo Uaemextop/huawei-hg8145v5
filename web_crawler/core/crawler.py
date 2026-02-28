@@ -94,6 +94,7 @@ class Crawler:
         skip_captcha_check: bool = False,
         download_extensions: frozenset[str] | None = None,
         concurrency: int = DEFAULT_CONCURRENCY,
+        upload_extensions: frozenset[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -106,6 +107,7 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.download_extensions = download_extensions or frozenset()
+        self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
         self._ext_link_re: re.Pattern | None = None
         if self.download_extensions:
@@ -161,6 +163,8 @@ class Crawler:
         if self.download_extensions:
             log.info("Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
         log.info("Concurrency      : %d workers", self.concurrency)
+        if self.upload_extensions:
+            log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -729,7 +733,11 @@ class Crawler:
         )
 
     def _maybe_git_push(self) -> None:
-        """Commit and push progress every *git_push_every* saved files."""
+        """Commit and push progress every *git_push_every* saved files.
+
+        When *upload_extensions* is set, only files matching those
+        extensions (plus README.md and .headers) are staged.
+        """
         if self.git_push_every <= 0:
             return
         if self._stats["ok"] % self.git_push_every != 0:
@@ -739,10 +747,23 @@ class Crawler:
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
         try:
             cwd = str(self.output_dir.resolve())
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=cwd, check=True, capture_output=True, timeout=60,
-            )
+            if self.upload_extensions:
+                # Stage only files matching the upload extensions
+                subprocess.run(
+                    ["git", "add", "README.md"],
+                    cwd=cwd, capture_output=True, timeout=30,
+                )
+                for ext in self.upload_extensions:
+                    # Stage files matching this extension + their .headers
+                    subprocess.run(
+                        ["git", "add", "--", f"*{ext}", f"*{ext}.headers"],
+                        cwd=cwd, capture_output=True, timeout=60,
+                    )
+            else:
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=cwd, check=True, capture_output=True, timeout=60,
+                )
             subprocess.run(
                 ["git", "commit", "-m",
                  f"Crawl progress: {ok} files saved"],

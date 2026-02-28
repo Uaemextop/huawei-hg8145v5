@@ -53,14 +53,19 @@ on:
         default: false
         type: boolean
       download_extensions:
-        description: "Extra file extensions to actively seek (comma-separated, e.g. rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh)"
+        description: "File extensions to actively seek (comma-separated, e.g. zip,rar,bin,7z) or 'all' to download every file type"
         required: false
-        default: "zip,rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
+        default: "all"
         type: string
       concurrency:
         description: "Number of parallel download workers ('auto' = detect from CPU/RAM, or a number)"
         required: false
         default: "auto"
+        type: string
+      upload_extensions:
+        description: "Extensions to upload to the crawl repo (comma-separated, e.g. zip,bin,rar) or 'all' to upload every file"
+        required: false
+        default: "all"
         type: string
 
 permissions:
@@ -205,6 +210,7 @@ jobs:
           - **Depth**: ${{ inputs.depth }}
           - **Delay**: ${{ inputs.delay }}s
           - **Download extensions**: ${{ inputs.download_extensions }}
+          - **Upload extensions**: ${{ inputs.upload_extensions }}
           - **Concurrency**: ${{ inputs.concurrency }} workers
           - **Run**: #${{ github.run_number }}
           - **Status**: 🔄 Crawling in progress…
@@ -244,6 +250,12 @@ jobs:
           fi
           if [ "${{ inputs.force }}" = "true" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --force"
+          fi
+
+          # Upload-extension filtering: pass to crawler for periodic git push
+          if [ "${{ inputs.upload_extensions }}" != "all" ] && [ -n "${{ inputs.upload_extensions }}" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --upload-extensions ${{ inputs.upload_extensions }}"
+            echo "📤 Upload filter: only ${{ inputs.upload_extensions }}"
           fi
 
           echo "🔍 Crawling ${{ inputs.url }} with depth=${{ inputs.depth }}, delay=${{ inputs.delay }}"
@@ -290,8 +302,23 @@ jobs:
           # Update README with completion status
           REPO_FULL="${{ steps.create_repo.outputs.repo_full }}"
           sed -i 's/🔄 Crawling in progress…/✅ Crawl complete/' README.md
+          git add README.md
 
-          git add -A
+          UPLOAD_EXTS="${{ inputs.upload_extensions }}"
+          if [ "$UPLOAD_EXTS" != "all" ] && [ -n "$UPLOAD_EXTS" ]; then
+            # Only stage files matching the upload extensions
+            echo "📤 Filtering upload to extensions: $UPLOAD_EXTS"
+            IFS=',' read -ra EXT_ARRAY <<< "$UPLOAD_EXTS"
+            for ext in "${EXT_ARRAY[@]}"; do
+              ext=$(echo "$ext" | xargs)          # trim whitespace
+              ext="${ext#.}"                       # strip leading dot
+              find . -not -path './.git/*' -iname "*.${ext}" -exec git add {} + 2>/dev/null || true
+              find . -not -path './.git/*' -iname "*.${ext}.headers" -exec git add {} + 2>/dev/null || true
+            done
+          else
+            git add -A
+          fi
+
           git diff --cached --quiet || git commit -m "Crawl complete: ${{ inputs.url }}"
           git push
 
@@ -323,6 +350,7 @@ jobs:
             - **Force re-download**: ${{ inputs.force }}
             - **Skip CAPTCHA check**: ${{ inputs.skip_captcha }}
             - **Download extensions**: ${{ inputs.download_extensions }}
+            - **Upload extensions**: ${{ inputs.upload_extensions }}
             - **Concurrency**: ${{ inputs.concurrency }} workers
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
