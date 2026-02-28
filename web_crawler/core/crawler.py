@@ -165,6 +165,7 @@ class Crawler:
         # WordPress detection
         self._wp_detected: bool = False
         self._wp_probed: bool = False
+        self._wp_nonce: str = ""        # extracted from page HTML (not sent globally)
         self._wp_confirmed_plugins: set[str] = set()
         self._wp_confirmed_themes: set[str] = set()
 
@@ -1620,13 +1621,20 @@ class Crawler:
     )
 
     def _extract_wp_nonce(self, html: str) -> None:
-        """Extract a WP REST nonce from page HTML and set it on the session
-        so subsequent REST API calls are authenticated."""
+        """Extract a WP REST nonce from page HTML.
+
+        NOTE: The nonce is intentionally NOT added to the session's default
+        headers.  Sending ``X-WP-Nonce`` on every request tells WordPress to
+        treat the request as authenticated; when the nonce is not tied to a
+        logged-in user (which is always the case for a crawler) WordPress
+        returns **403 Forbidden** on every REST endpoint instead of the
+        normal anonymous 200 response.  We store it only so sub-classes can
+        use it selectively if needed.
+        """
         m = self._WP_NONCE_RE.search(html)
         if m:
-            nonce = m.group(1)
-            self.session.headers["X-WP-Nonce"] = nonce
-            log.debug("  WP nonce extracted: %s", nonce)
+            self._wp_nonce = m.group(1)
+            log.debug("  WP nonce extracted: %s", self._wp_nonce)
 
     def _check_wp_deep_crawl(self, path_lower: str, depth: int) -> None:
         """If a WP plugin/theme slug is confirmed (its readme.txt or

@@ -498,9 +498,27 @@ CRAWLABLE_TYPES = {
 # Blocked URL patterns (dangerous / non-crawlable endpoints)
 # ---------------------------------------------------------------------------
 BLOCKED_PATH_RE = re.compile(
-    r"(logout|signout|delete|remove|unsubscribe)\b",
+    r"(logout|signout|delete|remove|unsubscribe)\b"
+    # WP REST API routes that require API-key / admin authentication
+    # (always return 401 without WooCommerce API keys or WP app passwords).
+    # Crawling them wastes requests and fills the queue with guaranteed errors.
+    # NOTE: wp/v2/product*, product_cat, product_tag are PUBLIC (return 200)
+    # and must NOT be blocked.
+    r"|/wp-json/(?:"
+    r"wc/(?:v[1-9]|gla|analytics)/|"      # WC REST v1–9, GLA, Analytics (401)
+    r"wc-admin/|"                           # WC Admin (401)
+    r"wc-analytics/|"                       # WC Analytics (401)
+    r"jetpack/|my-jetpack/v\d+/(?!$)|"     # Jetpack (401), keep root index
+    r"elementor(?:-pro)?/v\d+/(?!$)|"      # Elementor/Pro (401), keep root index
+    r"siteground-optimizer/|"              # SiteGround Optimizer (404/401)
+    r"code-snippets/|"                     # Code Snippets (401)
+    r"flexible-checkout-fields/|"          # Flexible Checkout Fields (401)
+    r"wp-site-health/|"                    # WP Site Health (401)
+    r"oceanwp/v\d+/(?!$)"                  # OceanWP (401), keep root index
+    r")",
     re.IGNORECASE,
 )
+
 
 # ---------------------------------------------------------------------------
 # Hidden / sensitive files to probe at every discovered directory

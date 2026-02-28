@@ -525,7 +525,11 @@ class TestDeepWPCrawl(unittest.TestCase):
         crawler._wp_detected = True
         html = '''<script>var wpApiSettings = {"nonce":"abc123def","root":"https:\\/\\/example.com\\/wp-json\\/"};</script>'''
         crawler._extract_wp_nonce(html)
-        self.assertEqual(crawler.session.headers.get("X-WP-Nonce"), "abc123def")
+        # Nonce must be stored on the crawler but NOT injected into the
+        # session headers – sending X-WP-Nonce globally causes WordPress to
+        # treat every request as an authentication attempt and return 403.
+        self.assertEqual(crawler._wp_nonce, "abc123def")
+        self.assertNotIn("X-WP-Nonce", crawler.session.headers)
 
 
 # ------------------------------------------------------------------ #
