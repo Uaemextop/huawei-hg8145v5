@@ -55,7 +55,7 @@ on:
       download_extensions:
         description: "Extra file extensions to actively seek (comma-separated, e.g. rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh)"
         required: false
-        default: "rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
+        default: "rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh,zip"
         type: string
 
 permissions:
@@ -247,6 +247,7 @@ jobs:
             --depth "${{ inputs.depth }}" \
             --delay "${{ inputs.delay }}" \
             --output downloaded_site \
+            --download-extensions "${{ inputs.download_extensions }}" \
             $EXTRA_ARGS \
             $GIT_PUSH_ARG
 
