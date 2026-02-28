@@ -950,6 +950,14 @@ class Crawler:
         except Exception as exc:
             log.warning("[GIT] Push error: %s", exc)
 
+    @staticmethod
+    def _dir_from_url(url: str) -> str:
+        """Derive the directory path from a URL for probe tracking."""
+        path = urllib.parse.urlparse(url).path
+        if path.endswith("/"):
+            return path
+        return path.rsplit("/", 1)[0] + "/" or "/"
+
     def _probe_hidden_files(self, url: str, depth: int) -> None:
         """Enqueue hidden/config files for every new directory discovered."""
         if self._probing_disabled:
@@ -988,8 +996,7 @@ class Crawler:
         # Early skip for probe URLs whose directory already exhausted
         is_probe_early = key in self._probe_urls
         if is_probe_early:
-            parsed_check = urllib.parse.urlparse(url)
-            probe_dir = parsed_check.path.rsplit("/", 1)[0] + "/"
+            probe_dir = self._dir_from_url(url)
             with self._lock:
                 dir_fails = self._probe_dir_failures.get(probe_dir, 0)
             if dir_fails >= PROBE_DIR_404_LIMIT:
@@ -1085,8 +1092,7 @@ class Crawler:
             if is_probe:
                 self._probe_403_count += 1
                 # Track per-directory failures
-                probe_parsed = urllib.parse.urlparse(url)
-                probe_dir = probe_parsed.path.rsplit("/", 1)[0] + "/"
+                probe_dir = self._dir_from_url(url)
                 with self._lock:
                     self._probe_dir_failures[probe_dir] = (
                         self._probe_dir_failures.get(probe_dir, 0) + 1
@@ -1158,8 +1164,7 @@ class Crawler:
                 self._probe_404_count += 1
                 # Track per-directory failures so remaining probes for this
                 # directory can be skipped without making HTTP requests.
-                probe_parsed = urllib.parse.urlparse(url)
-                probe_dir = probe_parsed.path.rsplit("/", 1)[0] + "/"
+                probe_dir = self._dir_from_url(url)
                 with self._lock:
                     self._probe_dir_failures[probe_dir] = (
                         self._probe_dir_failures.get(probe_dir, 0) + 1
@@ -1188,8 +1193,7 @@ class Crawler:
             if is_probe:
                 self._probe_403_count += 1
                 # Track per-directory failures
-                probe_parsed = urllib.parse.urlparse(url)
-                probe_dir = probe_parsed.path.rsplit("/", 1)[0] + "/"
+                probe_dir = self._dir_from_url(url)
                 with self._lock:
                     self._probe_dir_failures[probe_dir] = (
                         self._probe_dir_failures.get(probe_dir, 0) + 1

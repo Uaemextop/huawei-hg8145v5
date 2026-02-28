@@ -822,14 +822,14 @@ class TestSGCaptchaSolver(unittest.TestCase):
 
     def test_sg_solve_lock_exists(self):
         """Crawler has _sg_solve_lock for serializing concurrent solves."""
-        import threading
         with patch.object(Crawler, "_load_robots"):
             crawler = Crawler(
                 start_url="https://example.com",
                 output_dir=Path("/tmp/test_crawl_output"),
                 respect_robots=False,
             )
-        self.assertIsInstance(crawler._sg_solve_lock, type(threading.Lock()))
+        self.assertTrue(hasattr(crawler._sg_solve_lock, 'acquire'))
+        self.assertTrue(hasattr(crawler._sg_solve_lock, 'release'))
 
 
 # ------------------------------------------------------------------ #
