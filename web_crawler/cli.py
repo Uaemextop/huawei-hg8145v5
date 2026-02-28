@@ -4,6 +4,7 @@ Command-line interface for the generic web crawler.
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 from web_crawler.config import (
     DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY,
     DEFAULT_CONCURRENCY, DEFAULT_DOWNLOAD_EXTENSIONS,
+    auto_concurrency,
 )
 from web_crawler.core.crawler import Crawler
 from web_crawler.utils.log import setup_logging, log
@@ -94,9 +96,9 @@ def parse_args() -> argparse.Namespace:
              f"(default: {DEFAULT_DOWNLOAD_EXTENSIONS})",
     )
     parser.add_argument(
-        "--concurrency", type=int, default=DEFAULT_CONCURRENCY,
-        metavar="N",
-        help=f"Number of parallel download workers (default: {DEFAULT_CONCURRENCY})",
+        "--concurrency", default="auto", metavar="N",
+        help="Number of parallel download workers, or 'auto' to detect "
+             "from CPU/RAM (default: auto)",
     )
     return parser.parse_args()
 
@@ -139,6 +141,19 @@ def main() -> None:
     if dl_exts:
         log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
 
+    # Resolve concurrency (auto or explicit integer)
+    raw_conc = args.concurrency.strip().lower()
+    if raw_conc in ("auto", "0", ""):
+        concurrency = auto_concurrency()
+        log.info("Auto-detected concurrency: %d workers (CPU: %s, RAM-aware)",
+                 concurrency, os.cpu_count())
+    else:
+        try:
+            concurrency = int(raw_conc)
+        except ValueError:
+            log.warning("Invalid --concurrency value '%s', using auto", raw_conc)
+            concurrency = auto_concurrency()
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -150,7 +165,7 @@ def main() -> None:
         git_push_every=args.git_push_every,
         skip_captcha_check=args.skip_captcha_check,
         download_extensions=dl_exts,
-        concurrency=args.concurrency,
+        concurrency=concurrency,
     )
 
     t0 = time.monotonic()

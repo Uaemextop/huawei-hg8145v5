@@ -58,9 +58,9 @@ on:
         default: "zip,rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
         type: string
       concurrency:
-        description: "Number of parallel download workers (1 = sequential)"
+        description: "Number of parallel download workers ('auto' = detect from CPU/RAM, or a number)"
         required: false
-        default: "5"
+        default: "auto"
         type: string
 
 permissions:

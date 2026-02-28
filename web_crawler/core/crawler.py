@@ -63,6 +63,7 @@ from web_crawler.config import (
     WP_PLUGIN_PROBES,
     WP_THEME_FILES,
     WP_THEME_PROBES,
+    auto_concurrency,
 )
 from web_crawler.session import (
     build_session, cache_bust_url, is_sg_captcha_response, random_headers,
@@ -105,7 +106,16 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.download_extensions = download_extensions or frozenset()
-        self.concurrency = max(1, concurrency)
+        self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
+        self._ext_link_re: re.Pattern | None = None
+        if self.download_extensions:
+            ext_pattern = "|".join(re.escape(e) for e in self.download_extensions)
+            self._ext_link_re = re.compile(
+                r'''(?:href|src|data-src|action)\s*=\s*['"]([^'"]*?(?:'''
+                + ext_pattern
+                + r""")(?:\?[^'"]*)?)['"]\s*""",
+                re.I,
+            )
         self.session = build_session(verify_ssl=verify_ssl)
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
@@ -1071,35 +1081,20 @@ class Crawler:
     # Extension-seeking link extraction
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _extract_extension_links(
-        content: bytes, page_url: str, extensions: frozenset[str],
+        self, content: bytes, page_url: str, extensions: frozenset[str],
     ) -> set[str]:
         """Scan *content* for href/src attributes pointing to files
         with any of the target *extensions*.  Returns absolute URLs."""
-        text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+        if self._ext_link_re is None:
+            return set()
+        text = content.decode("utf-8", errors="replace")
         found: set[str] = set()
-        ext_pattern = "|".join(re.escape(e) for e in extensions)
-        pattern = re.compile(
-            r'''(?:href|src|data-src|action)\s*=\s*['"]([^'"]*?(?:'''
-            + ext_pattern
-            + r""")(?:\?[^'"]*)?)['"]\s*""",
-            re.I,
-        )
-        parsed_page = urllib.parse.urlparse(page_url)
-        base = f"{parsed_page.scheme}://{parsed_page.netloc}"
-        for m in pattern.finditer(text):
+        for m in self._ext_link_re.finditer(text):
             link = m.group(1).strip()
             if not link:
                 continue
-            if link.startswith("//"):
-                link = parsed_page.scheme + ":" + link
-            elif link.startswith("/"):
-                link = base + link
-            elif not link.startswith(("http://", "https://")):
-                # relative path
-                parent = page_url.rsplit("/", 1)[0]
-                link = parent + "/" + link
+            link = urllib.parse.urljoin(page_url, link)
             found.add(link)
         return found
 

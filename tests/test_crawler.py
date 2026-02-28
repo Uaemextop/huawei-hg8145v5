@@ -825,6 +825,57 @@ class TestSiteGroundWAFSignature(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
+# Auto-concurrency detection
+# ------------------------------------------------------------------ #
+
+class TestAutoConcurrency(unittest.TestCase):
+    """Test auto_concurrency() CPU/RAM detection."""
+
+    def test_returns_int(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertIsInstance(result, int)
+
+    def test_minimum_is_2(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    def test_maximum_is_32(self):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertLessEqual(result, 32)
+
+    def test_respects_cpu_count(self):
+        """With known CPU count, result should be at least 2."""
+        from web_crawler.config import auto_concurrency
+        import os
+        cpus = os.cpu_count() or 2
+        result = auto_concurrency()
+        # Should be at least 2 and at most cpu*2 (before RAM cap)
+        self.assertGreaterEqual(result, 2)
+        self.assertLessEqual(result, max(cpus * 2, 2))
+
+    @patch("os.cpu_count", return_value=None)
+    def test_handles_unknown_cpu(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    @patch("os.cpu_count", return_value=1)
+    def test_single_cpu(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertGreaterEqual(result, 2)
+
+    @patch("os.cpu_count", return_value=16)
+    def test_many_cpus_capped(self, _mock):
+        from web_crawler.config import auto_concurrency
+        result = auto_concurrency()
+        self.assertLessEqual(result, 32)
+
+
+# ------------------------------------------------------------------ #
 # Download extensions & concurrency
 # ------------------------------------------------------------------ #
 
@@ -855,11 +906,15 @@ class TestDownloadExtensions(unittest.TestCase):
         crawler = self._make_crawler(concurrency=10)
         self.assertEqual(crawler.concurrency, 10)
 
-    def test_concurrency_minimum_is_1(self):
+    def test_concurrency_auto_when_zero(self):
+        """concurrency=0 triggers auto-detection (always >= 2)."""
         crawler = self._make_crawler(concurrency=0)
-        self.assertEqual(crawler.concurrency, 1)
-        crawler2 = self._make_crawler(concurrency=-5)
-        self.assertEqual(crawler2.concurrency, 1)
+        self.assertGreaterEqual(crawler.concurrency, 2)
+
+    def test_concurrency_auto_when_negative(self):
+        """Negative concurrency also triggers auto-detection."""
+        crawler = self._make_crawler(concurrency=-5)
+        self.assertGreaterEqual(crawler.concurrency, 2)
 
     def test_extension_links_prioritized(self):
         """URLs matching download_extensions should be pushed to front."""
@@ -886,10 +941,20 @@ class TestDownloadExtensions(unittest.TestCase):
 class TestExtractExtensionLinks(unittest.TestCase):
     """Test the extension-seeking link extraction regex."""
 
+    def _make_crawler(self, exts):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                download_extensions=exts,
+            )
+
     def test_href_zip_found(self):
         html = b'<a href="/downloads/firmware.zip">Download</a>'
         exts = frozenset({".zip"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 1)
@@ -898,7 +963,8 @@ class TestExtractExtensionLinks(unittest.TestCase):
     def test_src_bin_found(self):
         html = b'<img src="/files/image.bin">'
         exts = frozenset({".bin"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 1)
@@ -907,7 +973,8 @@ class TestExtractExtensionLinks(unittest.TestCase):
     def test_relative_link_resolved(self):
         html = b'<a href="data/update.7z">Update</a>'
         exts = frozenset({".7z"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/downloads/page.html", exts,
         )
         self.assertEqual(len(links), 1)
@@ -916,7 +983,8 @@ class TestExtractExtensionLinks(unittest.TestCase):
     def test_no_match_returns_empty(self):
         html = b'<a href="/page.html">Page</a>'
         exts = frozenset({".zip", ".rar"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 0)
@@ -928,7 +996,8 @@ class TestExtractExtensionLinks(unittest.TestCase):
             b'<a href="/fw.exe">EXE</a>'
         )
         exts = frozenset({".zip", ".rar", ".exe"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 3)
@@ -936,29 +1005,56 @@ class TestExtractExtensionLinks(unittest.TestCase):
     def test_query_string_preserved(self):
         html = b'<a href="/download/file.zip?v=2&token=abc">Get</a>'
         exts = frozenset({".zip"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 1)
-        link = list(links)[0]
-        self.assertIn("file.zip", link)
+        self.assertTrue(any("file.zip" in link for link in links))
 
     def test_protocol_relative_link(self):
         html = b'<a href="//cdn.example.com/file.tar.gz">Download</a>'
         exts = frozenset({".gz"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 1)
-        self.assertTrue(list(links)[0].startswith("https://"))
+        self.assertTrue(any(l.startswith("https://") for l in links))
 
     def test_data_src_attribute(self):
         html = b'<div data-src="/lazy/firmware.bin"></div>'
         exts = frozenset({".bin"})
-        links = Crawler._extract_extension_links(
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
             html, "https://example.com/page.html", exts,
         )
         self.assertEqual(len(links), 1)
+
+    def test_no_extensions_returns_empty(self):
+        """Crawler with no download_extensions returns empty set."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        html = b'<a href="/firmware.zip">Download</a>'
+        links = crawler._extract_extension_links(
+            html, "https://example.com/page.html", frozenset(),
+        )
+        self.assertEqual(len(links), 0)
+
+    def test_parent_dir_relative_link(self):
+        """../file.bin should resolve correctly."""
+        html = b'<a href="../files/update.bin">Update</a>'
+        exts = frozenset({".bin"})
+        crawler = self._make_crawler(exts)
+        links = crawler._extract_extension_links(
+            html, "https://example.com/downloads/sub/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/files/update.bin", links)
 
 
 if __name__ == "__main__":
