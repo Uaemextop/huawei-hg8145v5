@@ -95,6 +95,7 @@ class Crawler:
         download_extensions: frozenset[str] | None = None,
         concurrency: int = DEFAULT_CONCURRENCY,
         upload_extensions: frozenset[str] | None = None,
+        debug: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -104,6 +105,7 @@ class Crawler:
         self.max_depth = max_depth
         self.delay = delay
         self.force = force
+        self.debug = debug
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.download_extensions = download_extensions or frozenset()
@@ -165,6 +167,8 @@ class Crawler:
         if self.download_extensions:
             log.info("Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
         log.info("Concurrency      : %d workers", self.concurrency)
+        if self.debug:
+            log.info("Debug mode       : ON (headers saved, verbose logging)")
         if self.upload_extensions:
             log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -513,7 +517,7 @@ class Crawler:
             page += 1
             time.sleep(self.delay)
         if total:
-            log.info("  [WP-MEDIA] Discovered %d media files via REST API",
+            log.debug("  [WP-MEDIA] Discovered %d media files via REST API",
                      total)
 
     def _deep_crawl_wp_plugin(self, slug: str, depth: int) -> None:
@@ -524,7 +528,7 @@ class Crawler:
         base_path = f"/wp-content/plugins/{slug}/"
         for f in WP_PLUGIN_FILES:
             self._enqueue(self.base + base_path + f, depth + 1)
-        log.info("  [WP-PLUGIN] Deep-crawling plugin '%s' (%d files)",
+        log.debug("  [WP-PLUGIN] Deep-crawling plugin '%s' (%d files)",
                  slug, len(WP_PLUGIN_FILES))
 
     def _deep_crawl_wp_theme(self, slug: str, depth: int) -> None:
@@ -535,7 +539,7 @@ class Crawler:
         base_path = f"/wp-content/themes/{slug}/"
         for f in WP_THEME_FILES:
             self._enqueue(self.base + base_path + f, depth + 1)
-        log.info("  [WP-THEME] Deep-crawling theme '%s' (%d files)",
+        log.debug("  [WP-THEME] Deep-crawling theme '%s' (%d files)",
                  slug, len(WP_THEME_FILES))
 
     # ------------------------------------------------------------------
@@ -584,7 +588,7 @@ class Crawler:
                     headers=hdrs,
                 )
                 if resp.ok and not is_sg_captcha_response(resp):
-                    log.info(
+                    log.debug(
                         "  [RETRY %d/%d] OK for %s (UA: %s…)",
                         attempt, HEADER_RETRY_MAX, url,
                         hdrs["User-Agent"][:40],
@@ -608,7 +612,7 @@ class Crawler:
                         )
                         if resp2.ok:
                             self._stats["retry_ok"] += 1
-                            log.info("  [CF-BYPASS] Succeeded for %s", url)
+                            log.debug("  [CF-BYPASS] Succeeded for %s", url)
                             return resp2
                 log.debug(
                     "  [RETRY %d/%d] HTTP %s for %s",
@@ -787,7 +791,8 @@ class Crawler:
         """Commit and push progress every *git_push_every* saved files.
 
         When *upload_extensions* is set, only files matching those
-        extensions (plus README.md and .headers) are staged.
+        extensions (plus README.md) are staged.  When debug mode is
+        active, ``.headers`` files are included too.
         """
         if self.git_push_every <= 0:
             return
@@ -805,9 +810,11 @@ class Crawler:
                     cwd=cwd, capture_output=True, timeout=30,
                 )
                 for ext in self.upload_extensions:
-                    # Stage files matching this extension + their .headers
+                    args = ["git", "add", "--", f"*{ext}"]
+                    if self.debug:
+                        args.append(f"*{ext}.headers")
                     subprocess.run(
-                        ["git", "add", "--", f"*{ext}", f"*{ext}.headers"],
+                        args,
                         cwd=cwd, capture_output=True, timeout=60,
                     )
             else:
@@ -887,14 +894,14 @@ class Crawler:
 
         # Skip already-downloaded files
         if not self.force and local.exists() and local.stat().st_size > 0:
-            log.info("[SKIP] Already on disk: %s", url)
+            log.debug("[SKIP] Already on disk: %s", url)
             self._stats["skip"] += 1
             added = self._parse_local_file(local, url)
             if added:
                 log.debug("  +%d new URLs from cached %s", added, local.name)
             return
 
-        log.info("[Q:%d OK:%d ERR:%d] GET %s",
+        log.debug("[Q:%d OK:%d ERR:%d] GET %s",
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
 
         # Rotate User-Agent per request
@@ -958,7 +965,7 @@ class Crawler:
                 self._stats["err"] += 1
                 return
 
-            log.info("  [%d] Blocked – retrying with rotated headers: %s",
+            log.debug("  [%d] Blocked – retrying with rotated headers: %s",
                      resp.status_code, url)
             retry_resp = self._retry_with_headers(url)
             if retry_resp is not None:
@@ -974,7 +981,7 @@ class Crawler:
                         retry_resp = None
                     if (retry_resp is not None and retry_resp.ok
                             and not is_sg_captcha_response(retry_resp)):
-                        log.info("  [SG-CAPTCHA] Solved 403 for %s", url)
+                        log.debug("  [SG-CAPTCHA] Solved 403 for %s", url)
                         resp = retry_resp
                     else:
                         self._stats["err"] += 1
@@ -1026,7 +1033,7 @@ class Crawler:
                 self._stats["err"] += 1
                 return
 
-            log.info("  [SG-CAPTCHA] Challenge for %s – solving PoW …", url)
+            log.debug("  [SG-CAPTCHA] Challenge for %s – solving PoW …", url)
             solved = solve_sg_captcha(self.session, self.base, parsed_url.path)
             self._sg_captcha_solves += 1
             if solved:
@@ -1044,7 +1051,7 @@ class Crawler:
                                 "HTTP %s for %s", resp.status_code, url)
                     self._stats["err"] += 1
                     return
-                log.info("  [SG-CAPTCHA] Solved – got HTTP %s for %s",
+                log.debug("  [SG-CAPTCHA] Solved – got HTTP %s for %s",
                          resp.status_code, url)
                 # Successful solve: reset the counter
                 self._sg_captcha_solves = 0
@@ -1077,7 +1084,7 @@ class Crawler:
             # Soft-404 detection – skip false positives
             if self._is_soft_404(content, url):
                 self._stats["soft404"] += 1
-                log.info("  [SOFT-404] %s – not saving", url)
+                log.debug("  [SOFT-404] %s – not saving", url)
                 return
 
             # WordPress detection on first HTML page
@@ -1110,7 +1117,8 @@ class Crawler:
             local = smart_local_path(url, self.output_dir, content_type,
                                      content_disp)
             save_file(local, content)
-            self._save_http_headers(local, resp, url)
+            if self.debug:
+                self._save_http_headers(local, resp, url)
             with self._lock:
                 self._stats["ok"] += 1
             self._maybe_git_push()

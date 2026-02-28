@@ -192,6 +192,7 @@ def main() -> None:
         download_extensions=dl_exts,
         concurrency=concurrency,
         upload_extensions=upload_exts,
+        debug=args.debug,
     )
 
     t0 = time.monotonic()
