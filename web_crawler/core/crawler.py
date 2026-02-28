@@ -869,6 +869,11 @@ class Crawler:
             parsed = urllib.parse.urlparse(url)
             if parsed.netloc != self.allowed_host:
                 return
+            # Reject glob/wildcard patterns (e.g. extracted from
+            # <script type="speculationrules"> exclusion lists).
+            # '*' is not a valid character in an HTTP request path.
+            if "*" in parsed.path:
+                return
             # Enforce the base scheme (upgrade http → https when base is https)
             # so every request uses the protocol the server expects and the
             # session cookie (e.g. SG-CAPTCHA bypass) is always included.

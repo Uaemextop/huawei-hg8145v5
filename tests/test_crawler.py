@@ -861,8 +861,47 @@ class TestSGCaptchaSolver(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ #
-# Probe 403 threshold / adaptive disabling
+# Wildcard / speculation-rules URL filtering
 # ------------------------------------------------------------------ #
+
+class TestWildcardUrlFiltering(unittest.TestCase):
+    """Wildcard glob patterns from <script type=speculationrules> must
+    not be enqueued as real URLs."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+
+    def test_wildcard_path_not_enqueued(self):
+        """URL with * in path must be silently dropped by _enqueue."""
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/wp-admin/*", 0)
+        self.assertNotIn(
+            "https://example.com/wp-admin/*",
+            [u for u, _ in crawler._queue],
+        )
+
+    def test_wildcard_glob_php_not_enqueued(self):
+        """URL like /wp-*.php (speculationrules exclusion) must be dropped."""
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/wp-*.php", 0)
+        self.assertNotIn(
+            "https://example.com/wp-*.php",
+            [u for u, _ in crawler._queue],
+        )
+
+    def test_normal_url_still_enqueued(self):
+        """Normal URL without * is still added to the queue."""
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/wp-admin/admin.php", 0)
+        urls = [u for u, _ in crawler._queue]
+        self.assertIn("https://example.com/wp-admin/admin.php", urls)
+
+
 
 class TestProbe403Threshold(unittest.TestCase):
     """Tests for the adaptive probe disabling on consecutive 403 errors."""
