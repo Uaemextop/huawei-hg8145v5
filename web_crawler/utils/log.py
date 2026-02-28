@@ -3,9 +3,11 @@ Logging configuration for the crawler.
 
 Provides a clean logging system with:
 * ANSI colour highlights for ``[CATEGORY]`` tags (works with or without ``colorlog``)
+* GitHub Actions CI support (``::warning::``, ``::error::``, ``::group::``)
 """
 
 import logging
+import os
 from pathlib import Path
 
 try:
@@ -18,6 +20,9 @@ log = logging.getLogger("web-crawler")
 
 _FILE_LOG_FMT = "%(asctime)s [%(levelname)s] %(message)s"
 _FILE_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+# True when running inside GitHub Actions
+_CI: bool = os.environ.get("GITHUB_ACTIONS") == "true"
 
 # ── Category colours ───────────────────────────────────────────────
 _ANSI_RESET = "\033[0m"
@@ -52,6 +57,22 @@ def _apply_category_styles(msg: str) -> str:
     return msg
 
 
+# ── GitHub Actions helpers ─────────────────────────────────────────
+
+def ci_group(title: str) -> None:
+    """Emit ``::group::`` when running in GitHub Actions (no-op otherwise)."""
+    if _CI:
+        print(f"::group::{title}", flush=True)
+
+
+def ci_endgroup() -> None:
+    """Emit ``::endgroup::`` when running in GitHub Actions (no-op otherwise)."""
+    if _CI:
+        print("::endgroup::", flush=True)
+
+
+# ── Formatters ─────────────────────────────────────────────────────
+
 class _CategoryFormatter(logging.Formatter):
     """Formatter that highlights known ``[CATEGORY]`` tags with
     ANSI colours."""
@@ -71,9 +92,31 @@ class _ColorlogCategoryFormatter(colorlog.ColoredFormatter if _COLORLOG_AVAILABL
         return _apply_category_styles(super().format(record))
 
 
+class _CIFormatter(logging.Formatter):
+    """Formatter for GitHub Actions CI environments.
+
+    Emits ``::warning::`` / ``::error::`` workflow commands so that
+    warnings and errors appear as annotations in the Actions UI.
+    Regular messages keep ANSI category-tag colours.
+    """
+
+    _CI_COMMANDS: dict[int, str] = {
+        logging.WARNING:  "::warning::",
+        logging.ERROR:    "::error::",
+        logging.CRITICAL: "::error::",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = _apply_category_styles(super().format(record))
+        prefix = self._CI_COMMANDS.get(record.levelno, "")
+        if prefix:
+            return f"{prefix}{formatted}"
+        return formatted
+
+
 def setup_logging(debug: bool = False, log_file: str | None = None) -> None:
-    """Configure the module-level logger with optional colour support
-    and optional file output.
+    """Configure the module-level logger with optional colour support,
+    optional file output, and GitHub Actions CI awareness.
 
     Parameters
     ----------
@@ -87,7 +130,12 @@ def setup_logging(debug: bool = False, log_file: str | None = None) -> None:
     log.handlers.clear()
 
     # -- Console handler --
-    if _COLORLOG_AVAILABLE:
+    if _CI:
+        handler = logging.StreamHandler()
+        handler.setFormatter(_CIFormatter(
+            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+        ))
+    elif _COLORLOG_AVAILABLE:
         handler = colorlog.StreamHandler()
         handler.setFormatter(_ColorlogCategoryFormatter(
             "%(log_color)s%(asctime)s [%(levelname)s]%(reset)s %(message)s",

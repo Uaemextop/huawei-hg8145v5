@@ -71,7 +71,7 @@ from web_crawler.session import (
 )
 from web_crawler.core.storage import content_hash, save_file, smart_local_path
 from web_crawler.extraction.links import extract_links
-from web_crawler.utils.log import log
+from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 
 
@@ -154,6 +154,7 @@ class Crawler:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        ci_group("Crawl configuration")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Output directory : %s", self.output_dir.resolve())
         log.info("Target URL       : %s", self.start_url)
@@ -167,6 +168,7 @@ class Crawler:
         if self.upload_extensions:
             log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        ci_endgroup()
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -208,6 +210,7 @@ class Crawler:
         total = s["ok"] + s["skip"] + s["dup"] + s["err"] + s["soft404"] + s["waf"]
         pct_ok = (s["ok"] / total * 100) if total else 0
         pct_err = (s["err"] / total * 100) if total else 0
+        ci_group("Crawl results")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Crawl complete!")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -222,6 +225,7 @@ class Crawler:
         log.info("Captcha     : %d solves", self._sg_captcha_solves)
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Files saved in: %s", self.output_dir.resolve())
+        ci_endgroup()
 
     def _stats_postfix(self) -> dict[str, object]:
         """Return a dict suitable for tqdm ``set_postfix``."""

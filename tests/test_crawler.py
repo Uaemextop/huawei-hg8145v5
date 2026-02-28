@@ -677,6 +677,74 @@ class TestLogging(unittest.TestCase):
         output = formatter.format(record)
         self.assertEqual(output, "simple message")
 
+    def test_ci_formatter_warning(self):
+        """_CIFormatter prepends ::warning:: for WARNING level."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.WARNING, pathname="", lineno=0,
+            msg="something went wrong", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertTrue(output.startswith("::warning::"))
+        self.assertIn("something went wrong", output)
+
+    def test_ci_formatter_error(self):
+        """_CIFormatter prepends ::error:: for ERROR level."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.ERROR, pathname="", lineno=0,
+            msg="fatal failure", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertTrue(output.startswith("::error::"))
+        self.assertIn("fatal failure", output)
+
+    def test_ci_formatter_info_no_prefix(self):
+        """_CIFormatter does NOT prepend a workflow command for INFO."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="normal info", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertFalse(output.startswith("::"))
+        self.assertEqual(output, "normal info")
+
+    def test_ci_group_helpers_noop_outside_ci(self):
+        """ci_group / ci_endgroup are no-ops when GITHUB_ACTIONS is unset."""
+        import sys, io, contextlib
+        log_mod = sys.modules["web_crawler.utils.log"]
+        old = log_mod._CI
+        try:
+            log_mod._CI = False
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                log_mod.ci_group("Test group")
+                log_mod.ci_endgroup()
+            self.assertEqual(buf.getvalue(), "")
+        finally:
+            log_mod._CI = old
+
+    def test_ci_group_helpers_emit_in_ci(self):
+        """ci_group / ci_endgroup emit workflow commands when _CI is True."""
+        import sys, io, contextlib
+        log_mod = sys.modules["web_crawler.utils.log"]
+        old = log_mod._CI
+        try:
+            log_mod._CI = True
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                log_mod.ci_group("Test group")
+                log_mod.ci_endgroup()
+            output = buf.getvalue()
+            self.assertIn("::group::Test group", output)
+            self.assertIn("::endgroup::", output)
+        finally:
+            log_mod._CI = old
+
 
 # ------------------------------------------------------------------ #
 # SiteGround CAPTCHA (PoW) solver
