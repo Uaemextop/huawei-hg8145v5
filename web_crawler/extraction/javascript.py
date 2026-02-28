@@ -47,6 +47,7 @@ _REL_EXT_PATH_RE = re.compile(
     r"woff2?|ttf|eot|otf|"
     r"pdf|doc|docx|xls|xlsx|ppt|pptx|odt|ods|"
     r"zip|tar|gz|tgz|bz2|rar|7z|"
+    r"bin|exe|cmd|"
     r"mp3|mp4|ogg|wav|webm|avi|mov|flv|"
     r"env|log|sql|md|rst|txt|csv|tsv|"
     r"swf|swp|bak|old|orig|save|tmp|"

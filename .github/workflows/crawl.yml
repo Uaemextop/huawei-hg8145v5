@@ -10,7 +10,7 @@ on:
       depth:
         description: "Maximum crawl depth (0 = unlimited)"
         required: false
-        default: "1000000"
+        default: "0"
         type: string
       delay:
         description: "Delay between requests in seconds"
@@ -19,6 +19,16 @@ on:
         type: string
       no_robots:
         description: "Ignore robots.txt restrictions"
+        required: false
+        default: false
+        type: boolean
+      no_verify_ssl:
+        description: "Disable TLS certificate verification"
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: "Re-download files even if they already exist on disk"
         required: false
         default: false
         type: boolean
@@ -42,6 +52,11 @@ on:
         required: false
         default: false
         type: boolean
+      download_extensions:
+        description: "Extra file extensions to actively seek (comma-separated, e.g. rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh)"
+        required: false
+        default: "rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
+        type: string
 
 permissions:
   contents: write
@@ -175,13 +190,19 @@ jobs:
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
           git checkout -b main
 
+          # Allow pushing large binary firmware files (up to 500 MB)
+          git config http.postBuffer 524288000
+
           # Initial commit so push works
-          echo "# Crawl of ${{ inputs.url }}" > README.md
-          echo "" >> README.md
-          echo "- **Depth**: ${{ inputs.depth }}" >> README.md
-          echo "- **Delay**: ${{ inputs.delay }}s" >> README.md
-          echo "- **Run**: #${{ github.run_number }}" >> README.md
-          echo "- **Status**: 🔄 Crawling in progress…" >> README.md
+          cat > README.md <<EOF
+          # Crawl of ${{ inputs.url }}
+
+          - **Depth**: ${{ inputs.depth }}
+          - **Delay**: ${{ inputs.delay }}s
+          - **Download extensions**: ${{ inputs.download_extensions }}
+          - **Run**: #${{ github.run_number }}
+          - **Status**: 🔄 Crawling in progress…
+          EOF
           git add -A
           git commit -m "Initial commit – crawl starting"
           git push -u origin main
@@ -205,13 +226,50 @@ jobs:
             GIT_PUSH_ARG="--git-push-every ${{ inputs.git_push_every }}"
           fi
 
+          EXTRA_ARGS=""
+          if [ "${{ inputs.no_robots }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --no-robots"
+          fi
+          if [ "${{ inputs.skip_captcha }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --no-check-captcha"
+          fi
+          if [ "${{ inputs.no_verify_ssl }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --no-verify-ssl"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --force"
+          fi
+
+          echo "🔍 Crawling ${{ inputs.url }} with depth=${{ inputs.depth }}, delay=${{ inputs.delay }}"
+          echo "📦 Download extensions: ${{ inputs.download_extensions }}"
+
           python -m web_crawler "${{ inputs.url }}" \
             --depth "${{ inputs.depth }}" \
             --delay "${{ inputs.delay }}" \
             --output downloaded_site \
-            ${{ inputs.no_robots && '--no-robots' || '' }} \
-            ${{ inputs.skip_captcha && '--no-check-captcha' || '' }} \
+            $EXTRA_ARGS \
             $GIT_PUSH_ARG
+
+      - name: Show download summary
+        if: always()
+        run: |
+          echo "📊 Download Summary"
+          echo "==================="
+          if [ -d downloaded_site ]; then
+            echo "Total files: $(find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | wc -l)"
+            echo ""
+            echo "Files by extension:"
+            find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | awk -F. '{if (NF>1) print $NF; else print "(no extension)"}' | sort | uniq -c | sort -rn | head -20
+            echo ""
+            echo "Binary/firmware files:"
+            find downloaded_site -type f -not -path '*/\.git/*' \
+              \( -name '*.rar' -o -name '*.bin' -o -name '*.7z' -o -name '*.tar' \
+                 -o -name '*.gz' -o -name '*.exe' -o -name '*.bat' -o -name '*.cmd' \
+                 -o -name '*.ps1' -o -name '*.sh' -o -name '*.zip' \) \
+              -exec echo "  {}" \; 2>/dev/null || echo "  (none found)"
+          else
+            echo "No downloaded files found."
+          fi
 
       - name: Final push of remaining files
         if: inputs.create_repo == true && steps.create_repo.outputs.repo_ready == 'true'
@@ -253,7 +311,10 @@ jobs:
             - **Depth**: ${{ inputs.depth }}
             - **Delay**: ${{ inputs.delay }}s
             - **robots.txt ignored**: ${{ inputs.no_robots }}
+            - **SSL verification disabled**: ${{ inputs.no_verify_ssl }}
+            - **Force re-download**: ${{ inputs.force }}
             - **Skip CAPTCHA check**: ${{ inputs.skip_captcha }}
+            - **Download extensions**: ${{ inputs.download_extensions }}
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
           files: "crawl-${{ steps.reponame.outputs.name }}.zip"
