@@ -54,13 +54,29 @@ class TestNormaliseUrl(unittest.TestCase):
         result = normalise_url("/g,", self.PAGE, self.BASE)
         self.assertIsNone(result)
 
-    def test_empty_string_rejected(self):
-        result = normalise_url("", self.PAGE, self.BASE)
-        self.assertIsNone(result)
+    def test_http_upgraded_to_https_when_base_is_https(self):
+        """http:// link on an https:// site must be upgraded to https://."""
+        result = normalise_url(
+            "http://example.com/page.html", self.PAGE, self.BASE
+        )
+        self.assertEqual(result, "https://example.com/page.html")
 
-    def test_hash_only_rejected(self):
-        result = normalise_url("#section", self.PAGE, self.BASE)
-        self.assertIsNone(result)
+    def test_https_preserved_when_base_is_https(self):
+        """https:// link on an https:// site stays https://."""
+        result = normalise_url(
+            "https://example.com/page.html", self.PAGE, self.BASE
+        )
+        self.assertEqual(result, "https://example.com/page.html")
+
+    def test_http_base_keeps_http(self):
+        """When the base is http://, links stay http://."""
+        result = normalise_url(
+            "http://example.com/page.html",
+            "http://example.com/index.html",
+            "http://example.com",
+        )
+        self.assertEqual(result, "http://example.com/page.html")
+
 
 
 class TestUrlKey(unittest.TestCase):

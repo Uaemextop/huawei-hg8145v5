@@ -91,6 +91,37 @@ _OBJ_PROP_PATH_RE = re.compile(
     re.I,
 )
 
+# Babel/webpack transpiler helper module names extracted as relative paths.
+# These look like  ./classExtractFieldDescriptor.js  or  ./setPrototypeOf.js
+# and are internal webpack chunk references, NOT real server files.
+# Pattern: purely alphabetic camelCase/PascalCase stems >= 16 chars with
+# a .js/.css extension – these are never real content paths.
+_WEBPACK_HELPER_RE = re.compile(
+    r"^[a-zA-Z]{16,}\.(js|mjs|cjs|css)$",
+)
+
+
+def _is_garbage_path(raw: str) -> bool:
+    """Return True if *raw* looks like a webpack/Babel internal module
+    reference rather than a real server path.
+
+    Filters:
+    * Pure-alpha camelCase filenames >= 16 chars (transpiler helpers)
+    * Natural-language phrases used as path segments (e.g. error messages
+      accidentally extracted from JS strings)
+    """
+    # Get the last path segment (filename)
+    segment = raw.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+    # Strip extension
+    stem = segment.rsplit(".", 1)[0] if "." in segment else segment
+    # Pure alphabetic camelCase >= 16 chars → webpack helper
+    if _WEBPACK_HELPER_RE.match(segment):
+        return True
+    # Path segments with spaces are natural-language strings, not paths
+    if " " in raw:
+        return True
+    return False
+
 
 def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
     """
@@ -100,6 +131,8 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
 
     def _add(raw: str) -> None:
         if "${" in raw or "'" in raw or '"' in raw:
+            return
+        if _is_garbage_path(raw):
             return
         n = normalise_url(raw.strip(), page_url, base)
         if n:

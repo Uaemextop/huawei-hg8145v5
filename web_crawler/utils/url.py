@@ -14,6 +14,10 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     Strips cache-buster query strings (pure numeric / hex tokens) but keeps
     meaningful query strings so dynamic endpoints are not broken.
 
+    Enforces the same scheme as *base* (e.g. upgrades ``http://`` to
+    ``https://`` when the base URL uses HTTPS) so that session cookies
+    and TLS settings are applied consistently to every request.
+
     Returns ``None`` for external, ``data:``, ``javascript:``, ``mailto:`` URLs.
     """
     raw = raw.strip()
@@ -26,7 +30,8 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
         raw = urllib.parse.urljoin(page_url, raw)
         parsed = urllib.parse.urlparse(raw)
 
-    host = urllib.parse.urlparse(base).netloc
+    base_parsed = urllib.parse.urlparse(base)
+    host = base_parsed.netloc
     if parsed.netloc and parsed.netloc != host:
         return None
 
@@ -37,8 +42,14 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     if parsed.path.endswith((",", ";")):
         return None
 
+    # Enforce the base URL's scheme so every request uses the same
+    # protocol (e.g. always HTTPS when the site is HTTPS-only).
+    # This prevents the SG-CAPTCHA session cookie, which is tied to
+    # the HTTPS scheme, from being omitted on plain-HTTP requests.
+    scheme = base_parsed.scheme if base_parsed.scheme else parsed.scheme
+
     canonical = urllib.parse.urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, "", qs, "")
+        (scheme, parsed.netloc, parsed.path, "", qs, "")
     )
     return canonical
 
