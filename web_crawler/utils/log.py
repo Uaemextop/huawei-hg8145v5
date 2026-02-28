@@ -1,10 +1,8 @@
 """
 Logging configuration for the crawler.
 
-Provides a modern logging system with:
-* Unicode icons for each log category
-* ANSI colour engine (works with or without ``colorlog``)
-* Level-specific icons (✓ INFO, ⚠ WARNING, ✗ ERROR, …)
+Provides a clean logging system with:
+* ANSI colour highlights for ``[CATEGORY]`` tags (works with or without ``colorlog``)
 """
 
 import logging
@@ -21,75 +19,56 @@ log = logging.getLogger("web-crawler")
 _FILE_LOG_FMT = "%(asctime)s [%(levelname)s] %(message)s"
 _FILE_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
-# ── Unicode icons for level indicators ──────────────────────────────
-_LEVEL_ICONS: dict[int, str] = {
-    logging.DEBUG:    "🔍",
-    logging.INFO:     "✅",
-    logging.WARNING:  "⚠️",
-    logging.ERROR:    "❌",
-    logging.CRITICAL: "💀",
-}
-
-# ── Category icons + colours ────────────────────────────────────────
+# ── Category colours ───────────────────────────────────────────────
 _ANSI_RESET = "\033[0m"
-_CATEGORY_STYLES: dict[str, tuple[str, str]] = {
-    # tag: (ansi_colour, icon)
-    "[PROTECTION]": ("\033[1;31m", "🛡️ "),
-    "[SOFT-404]":   ("\033[33m",   "👻 "),
-    "[WP]":         ("\033[1;35m", "📦 "),
-    "[WP-MEDIA]":   ("\033[1;35m", "🖼️ "),
-    "[WP-PLUGIN]":  ("\033[1;35m", "🔌 "),
-    "[WP-THEME]":   ("\033[1;35m", "🎨 "),
-    "[SG-CAPTCHA]": ("\033[1;36m", "🔐 "),
-    "[RETRY]":      ("\033[36m",   "🔄 "),
-    "[CF-BYPASS]":  ("\033[36m",   "☁️ "),
-    "[SAVE]":       ("\033[1;32m", "💾 "),
-    "[SKIP]":       ("\033[90m",   "⏭️ "),
-    "[DUP]":        ("\033[90m",   "♻️ "),
-    "[ERR]":        ("\033[1;31m", "❌ "),
-    "[GIT]":        ("\033[34m",   "📤 "),
-    "[QUEUE]":      ("\033[37m",   "📋 "),
-    "[PROBE]":      ("\033[90m",   "🔎 "),
-    "[WAF]":        ("\033[1;31m", "🚫 "),
-    "[429]":        ("\033[33m",   "⏳ "),
+_CATEGORY_STYLES: dict[str, str] = {
+    # tag: ansi_colour
+    "[PROTECTION]": "\033[1;31m",
+    "[SOFT-404]":   "\033[33m",
+    "[WP]":         "\033[1;35m",
+    "[WP-MEDIA]":   "\033[1;35m",
+    "[WP-PLUGIN]":  "\033[1;35m",
+    "[WP-THEME]":   "\033[1;35m",
+    "[SG-CAPTCHA]": "\033[1;36m",
+    "[RETRY]":      "\033[36m",
+    "[CF-BYPASS]":  "\033[36m",
+    "[SAVE]":       "\033[1;32m",
+    "[SKIP]":       "\033[90m",
+    "[DUP]":        "\033[90m",
+    "[ERR]":        "\033[1;31m",
+    "[GIT]":        "\033[34m",
+    "[QUEUE]":      "\033[37m",
+    "[PROBE]":      "\033[90m",
+    "[WAF]":        "\033[1;31m",
+    "[429]":        "\033[33m",
 }
 
 
 def _apply_category_styles(msg: str) -> str:
-    """Inject ANSI colours and Unicode icons for known ``[CATEGORY]``
-    tags in *msg*."""
-    for tag, (style, icon) in _CATEGORY_STYLES.items():
+    """Inject ANSI colours for known ``[CATEGORY]`` tags in *msg*."""
+    for tag, style in _CATEGORY_STYLES.items():
         if tag in msg:
-            msg = msg.replace(tag, f"{style}{icon}{tag}{_ANSI_RESET}")
+            msg = msg.replace(tag, f"{style}{tag}{_ANSI_RESET}")
     return msg
 
 
 class _CategoryFormatter(logging.Formatter):
-    """Formatter that adds level icons and highlights known
-    ``[CATEGORY]`` tags with colours and Unicode icons."""
+    """Formatter that highlights known ``[CATEGORY]`` tags with
+    ANSI colours."""
 
     def __init__(self, fmt: str, datefmt: str | None = None) -> None:
         super().__init__(fmt, datefmt=datefmt)
 
     def format(self, record: logging.LogRecord) -> str:
-        icon = _LEVEL_ICONS.get(record.levelno, "")
-        formatted = super().format(record)
-        # Prepend level icon
-        if icon:
-            formatted = f"{icon} {formatted}"
-        return _apply_category_styles(formatted)
+        return _apply_category_styles(super().format(record))
 
 
 class _ColorlogCategoryFormatter(colorlog.ColoredFormatter if _COLORLOG_AVAILABLE else logging.Formatter):  # type: ignore[misc]
     """Extends ``colorlog.ColoredFormatter`` to also highlight inline
-    ``[CATEGORY]`` tags and prepend level icons."""
+    ``[CATEGORY]`` tags."""
 
     def format(self, record: logging.LogRecord) -> str:
-        icon = _LEVEL_ICONS.get(record.levelno, "")
-        formatted = super().format(record)
-        if icon:
-            formatted = f"{icon} {formatted}"
-        return _apply_category_styles(formatted)
+        return _apply_category_styles(super().format(record))
 
 
 def setup_logging(debug: bool = False, log_file: str | None = None) -> None:
