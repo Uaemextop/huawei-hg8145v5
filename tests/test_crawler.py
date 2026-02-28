@@ -663,19 +663,20 @@ class TestLogging(unittest.TestCase):
             args=(), exc_info=None,
         )
         output = formatter.format(record)
-        style = _CATEGORY_STYLES["[PROTECTION]"]
-        self.assertIn(f"{style}[PROTECTION]{_ANSI_RESET}", output)
+        style, icon = _CATEGORY_STYLES["[PROTECTION]"]
+        self.assertIn(f"{style}{icon}[PROTECTION]{_ANSI_RESET}", output)
 
     def test_category_formatter_no_tag(self):
-        """Messages without known tags are unchanged."""
-        from web_crawler.utils.log import _CategoryFormatter
+        """Messages without known tags get level icon prepended."""
+        from web_crawler.utils.log import _CategoryFormatter, _LEVEL_ICONS
         formatter = _CategoryFormatter("%(message)s")
         record = logging.LogRecord(
             name="test", level=logging.INFO, pathname="", lineno=0,
             msg="simple message", args=(), exc_info=None,
         )
         output = formatter.format(record)
-        self.assertEqual(output, "simple message")
+        icon = _LEVEL_ICONS[logging.INFO]
+        self.assertEqual(output, f"{icon} simple message")
 
 
 # ------------------------------------------------------------------ #

@@ -157,8 +157,7 @@ def solve_sg_captcha(
 
     Returns ``True`` if the captcha was solved and the cookie was set.
     """
-    import logging
-    log = logging.getLogger("web_crawler")
+    from web_crawler.utils.log import log
 
     quoted_path = requests.utils.quote(target_path, safe="")
     captcha_url = (
@@ -191,7 +190,7 @@ def solve_sg_captcha(
 
     solution, counter = result
     elapsed_ms = int((time.time() - t0) * 1000)
-    log.info("[SG-CAPTCHA] Solved in %d ms (counter=%d)", elapsed_ms, counter)
+    log.info("[SG-CAPTCHA] Solved in %d ms (counter=%d) ✓", elapsed_ms, counter)
 
     submit_url = f"{base_url}{submit_path}"
     sep = "&" if "?" in submit_url else "?"
@@ -206,7 +205,7 @@ def solve_sg_captcha(
 
     has_cookie = any("_I_" in c.name for c in session.cookies)
     if has_cookie:
-        log.info("[SG-CAPTCHA] Bypass cookie obtained")
+        log.info("[SG-CAPTCHA] Bypass cookie obtained ✓")
     return has_cookie
 
 
