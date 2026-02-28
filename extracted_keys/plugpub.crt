@@ -1,0 +1,31 @@
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 2 (0x2)
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: CN=HuaWei ONT CA, ST=Guangdong, C=CN/emailAddress=support@huawei.com, O=Root CA of HuaWei ONT
+        Validity
+            Not Before: Dec 21 16:06:02 2017 GMT
+            Not After : Dec  9 16:06:02 2067 GMT
+        Subject: CN=ont.huawei.com, ST=HB, C=CH/emailAddress=support@huawei.com, O=HuaWei, OU=Ont
+-----BEGIN CERTIFICATE-----
+MIIDezCCAmOgAwIBAgIBAjANBgkqhkiG9w0BAQsFADB8MRYwFAYDVQQDEw1IdWFX
+ZWkgT05UIENBMRIwEAYDVQQIEwlHdWFuZ2RvbmcxCzAJBgNVBAYTAkNOMSEwHwYJ
+KoZIhvcNAQkBFhJzdXBwb3J0QGh1YXdlaS5jb20xHjAcBgNVBAoTFVJvb3QgQ0Eg
+b2YgSHVhV2VpIE9OVDAgFw0xNzEyMjExNjA2MDJaGA8yMDY3MTIwOTE2MDYwMlow
+dTEXMBUGA1UEAxMOb250Lmh1YXdlaS5jb20xCzAJBgNVBAgTAkhCMQswCQYDVQQG
+EwJDSDEhMB8GCSqGSIb3DQEJARYSc3VwcG9ydEBodWF3ZWkuY29tMQ8wDQYDVQQK
+EwZIdWFXZWkxDDAKBgNVBAsTA09udDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC
+AQoCggEBAL1FVbl12gvvvUS33FwyX+4VcOx9cS0mPQv7rxRnYqRygHdpXKGN0sMG
+Sjm9Gidhmv5zdOlSjcJm0MUywiCttV5JHFo7A2DVALVI+sXo4WUb2H4i6lcpkASl
+a2KZ9cTPVZewQV+IM3tDWngpKk+2c/QoR/8I4NqNt6je3PUCWQjjVNeie1cMTfoY
+571lUx+twqT0W5SW0g4N79oh+eMcqYvj9P0RScCh+JJulrYWyX64oQHeqj+QtzUX
+H99rPLXG0Xuuefq68S8gtKKYjmO1hbV32qVc/at7Qe8fIZW/sFaH83bzYs1x0ptQ
+KdJqurgMi8YYZXwGGsrj6Sld7fLoAxECAwEAAaMNMAswCQYDVR0TBAIwADANBgkq
+hkiG9w0BAQsFAAOCAQEAJzS2PszIMQLJyNBC6kKTB8U1JAZ55TCHY9qGHufLg6x/
+t+ZsIgwMBP71cSmeMleVR+sgL07gCJurEsPH5Il0Zbc5sqqKDqcEuIb+h/YxGsvS
+7osMbqoC+txinvoUYcUCAu2PyO2lVQraCSYI3sqbG5X4tWueyE5EZ8QwWqwFoI3c
+d1MiOoQob2tCzkCBTg5LW9KQ5pRFC6Hvu4AxzTIT7D9lU5KvwOzCw+VGxy06FMxW
+Avbc1ytOFxfeAX6DdhsOlEn6P9Rjh2sRYUsZVFlX6nHgSydvsIAthtrprRPmvXcR
+3jqidSlpdbaagTM5/anxAUnWkPJ78RcXF8juDrBn9A==
+-----END CERTIFICATE-----
