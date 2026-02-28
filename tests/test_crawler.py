@@ -831,6 +831,34 @@ class TestSGCaptchaSolver(unittest.TestCase):
         self.assertTrue(hasattr(crawler._sg_solve_lock, 'acquire'))
         self.assertTrue(hasattr(crawler._sg_solve_lock, 'release'))
 
+    def test_sg_captcha_404_not_treated_as_blocked(self):
+        """After a successful CAPTCHA solve, a 404 response should NOT log
+        'Still blocked' – the captcha was solved; the resource just doesn't exist."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.headers = {}
+        resp.text = "Not Found"
+        # is_sg_captcha_response must be False for a plain 404
+        self.assertFalse(is_sg_captcha_response(resp))
+
+    def test_sg_captcha_recheck_not_captcha_means_bypass(self):
+        """A non-CAPTCHA response after acquiring the lock (regardless of
+        status code) means the captcha was already bypassed – no re-solve needed."""
+        from web_crawler.session import is_sg_captcha_response
+        # 404 is NOT a captcha response
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+        resp_404.headers = {}
+        resp_404.text = "Not Found"
+        self.assertFalse(is_sg_captcha_response(resp_404))
+        # 200 with normal body is NOT a captcha response
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.headers = {}
+        resp_200.text = "<html>Normal page</html>"
+        self.assertFalse(is_sg_captcha_response(resp_200))
+
 
 # ------------------------------------------------------------------ #
 # Probe 403 threshold / adaptive disabling

@@ -869,6 +869,17 @@ class Crawler:
             parsed = urllib.parse.urlparse(url)
             if parsed.netloc != self.allowed_host:
                 return
+            # Enforce the base scheme (upgrade http → https when base is https)
+            # so every request uses the protocol the server expects and the
+            # session cookie (e.g. SG-CAPTCHA bypass) is always included.
+            base_parsed = urllib.parse.urlparse(self.base)
+            if parsed.scheme != base_parsed.scheme:
+                url = urllib.parse.urlunparse(
+                    (base_parsed.scheme,) + urllib.parse.urlparse(url)[1:]
+                )
+                key = url_key(url)
+                if key in self._visited:
+                    return
             if self.max_depth and depth > self.max_depth:
                 return
             # Auto-prioritize target extension files
@@ -1224,7 +1235,7 @@ class Crawler:
                 except _NETWORK_ERRORS:
                     self._stats["err"] += 1
                     return
-                if resp.ok and not is_sg_captcha_response(resp):
+                if not is_sg_captcha_response(resp):
                     log.debug("  [SG-CAPTCHA] Bypassed via shared cookie: %s",
                               url)
                     # Fall through to normal processing below
@@ -1245,7 +1256,7 @@ class Crawler:
                         except _NETWORK_ERRORS:
                             self._stats["err"] += 1
                             return
-                        if not resp.ok or is_sg_captcha_response(resp):
+                        if is_sg_captcha_response(resp):
                             log.warning(
                                 "  [SG-CAPTCHA] Still blocked after solve: "
                                 "HTTP %s for %s", resp.status_code, url)

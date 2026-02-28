@@ -184,7 +184,7 @@ def solve_sg_captcha(
     """
     from web_crawler.utils.log import log
 
-    quoted_path = requests.utils.quote(target_path, safe="")
+    quoted_path = requests.utils.quote(target_path, safe="/")
     captcha_url = (
         f"{base_url}/.well-known/sgcaptcha/"
         f"?r={quoted_path}&y=pow"
