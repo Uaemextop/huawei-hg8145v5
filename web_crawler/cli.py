@@ -8,7 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-from web_crawler.config import DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY
+from web_crawler.config import (
+    DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY,
+    DEFAULT_CONCURRENCY, DEFAULT_DOWNLOAD_EXTENSIONS,
+)
 from web_crawler.core.crawler import Crawler
 from web_crawler.utils.log import setup_logging, log
 
@@ -84,6 +87,17 @@ def parse_args() -> argparse.Namespace:
         help="Disable WAF/CAPTCHA protection detection – save pages even if "
              "captcha or WAF signatures are found",
     )
+    parser.add_argument(
+        "--download-extensions", default=DEFAULT_DOWNLOAD_EXTENSIONS,
+        metavar="EXTS",
+        help="Comma-separated file extensions to actively seek and prioritize "
+             f"(default: {DEFAULT_DOWNLOAD_EXTENSIONS})",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=DEFAULT_CONCURRENCY,
+        metavar="N",
+        help=f"Number of parallel download workers (default: {DEFAULT_CONCURRENCY})",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +130,15 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Parse download extensions
+    dl_exts = frozenset(
+        f".{e.strip().lstrip('.')}"
+        for e in args.download_extensions.split(",")
+        if e.strip()
+    )
+    if dl_exts:
+        log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -126,6 +149,8 @@ def main() -> None:
         force=args.force,
         git_push_every=args.git_push_every,
         skip_captcha_check=args.skip_captcha_check,
+        download_extensions=dl_exts,
+        concurrency=args.concurrency,
     )
 
     t0 = time.monotonic()

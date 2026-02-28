@@ -824,5 +824,142 @@ class TestSiteGroundWAFSignature(unittest.TestCase):
         self.assertIn("siteground", result)
 
 
+# ------------------------------------------------------------------ #
+# Download extensions & concurrency
+# ------------------------------------------------------------------ #
+
+class TestDownloadExtensions(unittest.TestCase):
+    """Test download-extension seeking and prioritization."""
+
+    def _make_crawler(self, extensions=None, concurrency=1):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                download_extensions=extensions,
+                concurrency=concurrency,
+            )
+        return crawler
+
+    def test_default_no_extensions(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler.download_extensions, frozenset())
+
+    def test_extensions_stored(self):
+        exts = frozenset({".zip", ".rar", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        self.assertEqual(crawler.download_extensions, exts)
+
+    def test_concurrency_stored(self):
+        crawler = self._make_crawler(concurrency=10)
+        self.assertEqual(crawler.concurrency, 10)
+
+    def test_concurrency_minimum_is_1(self):
+        crawler = self._make_crawler(concurrency=0)
+        self.assertEqual(crawler.concurrency, 1)
+        crawler2 = self._make_crawler(concurrency=-5)
+        self.assertEqual(crawler2.concurrency, 1)
+
+    def test_extension_links_prioritized(self):
+        """URLs matching download_extensions should be pushed to front."""
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        # Enqueue a regular URL first
+        crawler._enqueue("https://example.com/page1.html", 0)
+        # Enqueue a .zip URL (should be prioritized)
+        crawler._enqueue("https://example.com/firmware.zip", 0)
+        # The .zip should be at the front of the queue
+        front_url, _ = crawler._queue[0]
+        self.assertTrue(front_url.endswith(".zip"))
+
+    def test_non_extension_link_not_prioritized(self):
+        """URLs NOT matching download_extensions should go to back."""
+        exts = frozenset({".zip", ".bin"})
+        crawler = self._make_crawler(extensions=exts)
+        crawler._enqueue("https://example.com/page1.html", 0)
+        crawler._enqueue("https://example.com/page2.html", 0)
+        front_url, _ = crawler._queue[0]
+        self.assertEqual(front_url, "https://example.com/page1.html")
+
+
+class TestExtractExtensionLinks(unittest.TestCase):
+    """Test the extension-seeking link extraction regex."""
+
+    def test_href_zip_found(self):
+        html = b'<a href="/downloads/firmware.zip">Download</a>'
+        exts = frozenset({".zip"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/firmware.zip", links)
+
+    def test_src_bin_found(self):
+        html = b'<img src="/files/image.bin">'
+        exts = frozenset({".bin"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/files/image.bin", links)
+
+    def test_relative_link_resolved(self):
+        html = b'<a href="data/update.7z">Update</a>'
+        exts = frozenset({".7z"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/downloads/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertIn("https://example.com/downloads/data/update.7z", links)
+
+    def test_no_match_returns_empty(self):
+        html = b'<a href="/page.html">Page</a>'
+        exts = frozenset({".zip", ".rar"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 0)
+
+    def test_multiple_extensions_found(self):
+        html = (
+            b'<a href="/fw.zip">ZIP</a>'
+            b'<a href="/fw.rar">RAR</a>'
+            b'<a href="/fw.exe">EXE</a>'
+        )
+        exts = frozenset({".zip", ".rar", ".exe"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 3)
+
+    def test_query_string_preserved(self):
+        html = b'<a href="/download/file.zip?v=2&token=abc">Get</a>'
+        exts = frozenset({".zip"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        link = list(links)[0]
+        self.assertIn("file.zip", link)
+
+    def test_protocol_relative_link(self):
+        html = b'<a href="//cdn.example.com/file.tar.gz">Download</a>'
+        exts = frozenset({".gz"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+        self.assertTrue(list(links)[0].startswith("https://"))
+
+    def test_data_src_attribute(self):
+        html = b'<div data-src="/lazy/firmware.bin"></div>'
+        exts = frozenset({".bin"})
+        links = Crawler._extract_extension_links(
+            html, "https://example.com/page.html", exts,
+        )
+        self.assertEqual(len(links), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

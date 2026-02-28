@@ -10,6 +10,8 @@ import re
 DEFAULT_OUTPUT = "downloaded_site"
 DEFAULT_MAX_DEPTH = 0          # 0 = unlimited
 DEFAULT_DELAY = 0.25           # seconds between requests
+DEFAULT_CONCURRENCY = 5        # parallel download workers
+DEFAULT_DOWNLOAD_EXTENSIONS = "zip,rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh"
 
 # ---------------------------------------------------------------------------
 # Crawler tuning

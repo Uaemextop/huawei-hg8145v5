@@ -32,7 +32,11 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
         backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504],
     )
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=20,
+        pool_maxsize=20,
+    )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
