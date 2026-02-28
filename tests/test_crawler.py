@@ -801,6 +801,31 @@ class TestSGCaptchaSolver(unittest.TestCase):
         resp.text = '<html><meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=%2F.env"></html>'
         self.assertTrue(is_sg_captcha_response(resp))
 
+    def test_is_sg_captcha_403_with_challenge_body(self):
+        """Detect SG-Captcha even on HTTP 403 when body contains captcha markers."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = (
+            '<html><noscript><meta http-equiv="refresh" '
+            'content="0;/.well-known/captcha/?r=%2Fdownload"></noscript>'
+            '<script>const sgcaptcha="20:abc:def:ghi:"</script></html>'
+        )
+        self.assertTrue(is_sg_captcha_response(resp))
+
+    def test_nginx_403_not_detected_as_sg_captcha(self):
+        """A plain nginx 403 Forbidden page must NOT be detected as SG-Captcha."""
+        from web_crawler.session import is_sg_captcha_response
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = (
+            '<!DOCTYPE html><html><head><title>403 - Forbidden</title></head>'
+            '<body><h1>Forbidden</h1><p>You do not have permission.</p></body></html>'
+        )
+        self.assertFalse(is_sg_captcha_response(resp))
+
     def test_not_sg_captcha_normal_200(self):
         """Normal 200 page is not detected as captcha."""
         from web_crawler.session import is_sg_captcha_response
@@ -1424,5 +1449,205 @@ class TestCloudflareDetection(unittest.TestCase):
         self.assertEqual(len(cf_cookies), 0)
 
 
+# ------------------------------------------------------------------ #
+# Content-Disposition filename parsing
+# ------------------------------------------------------------------ #
+
+class TestContentDispositionParsing(unittest.TestCase):
+    """smart_local_path must correctly extract filenames from a variety
+    of Content-Disposition header formats."""
+
+    def _path(self, url, ct, cd):
+        from web_crawler.core.storage import smart_local_path
+        return smart_local_path(url, Path("/out"), ct, cd)
+
+    def test_plain_quoted(self):
+        p = self._path(
+            "https://example.com/?download_file=1",
+            "application/zip",
+            'attachment; filename="firmware HG8145V5.zip"',
+        )
+        self.assertEqual(p.name, "firmware HG8145V5.zip")
+
+    def test_rfc5987_encoded(self):
+        p = self._path(
+            "https://example.com/download",
+            "application/zip",
+            "attachment; filename*=UTF-8''firmware%20HG8145V5.zip",
+        )
+        self.assertEqual(p.name, "firmware HG8145V5.zip")
+
+    def test_unquoted(self):
+        p = self._path(
+            "https://example.com/file",
+            "application/zip",
+            "attachment; filename=firmware.zip",
+        )
+        self.assertEqual(p.name, "firmware.zip")
+
+    def test_path_traversal_sanitised(self):
+        """Path traversal in filename must be stripped."""
+        p = self._path(
+            "https://example.com/file",
+            "application/zip",
+            'attachment; filename="../../evil.zip"',
+        )
+        # Only the basename is kept
+        self.assertEqual(p.name, "evil.zip")
+
+    def test_no_disposition_falls_back_to_url(self):
+        """Without Content-Disposition the URL path is used."""
+        p = self._path(
+            "https://example.com/wp-content/uploads/2025/01/fw.zip",
+            "application/zip",
+            "",
+        )
+        self.assertEqual(p.name, "fw.zip")
+
+
+# ------------------------------------------------------------------ #
+# Streaming / binary download helpers
+# ------------------------------------------------------------------ #
+
+class TestStreamToFile(unittest.TestCase):
+    """stream_to_file must write all chunks and return total bytes."""
+
+    def test_writes_chunks(self):
+        import tempfile
+        from web_crawler.core.storage import stream_to_file
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "sub" / "test.zip"
+            chunks = [b"ABCD", b"EFGH", b"IJKL"]
+            total = stream_to_file(out, iter(chunks))
+            self.assertEqual(total, 12)
+            self.assertEqual(out.read_bytes(), b"ABCDEFGHIJKL")
+
+    def test_creates_parent_dirs(self):
+        import tempfile
+        from web_crawler.core.storage import stream_to_file
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "a" / "b" / "c" / "file.bin"
+            stream_to_file(out, iter([b"data"]))
+            self.assertTrue(out.exists())
+
+    def test_empty_chunks_skipped(self):
+        import tempfile
+        from web_crawler.core.storage import stream_to_file
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "empty.bin"
+            total = stream_to_file(out, iter([b"", b"hi", b""]))
+            self.assertEqual(total, 2)
+
+
+# ------------------------------------------------------------------ #
+# SiteGround blocked extensions skipped in _enqueue
+# ------------------------------------------------------------------ #
+
+class TestSiteGroundBlockedExtensions(unittest.TestCase):
+    """URLs whose extension is in SITEGROUND_BLOCKED_EXTENSIONS must be
+    silently dropped by _enqueue to avoid futile 403 requests."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+
+    def test_env_file_not_enqueued(self):
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/.env", 0)
+        urls = [u for u, _ in crawler._queue]
+        self.assertNotIn("https://example.com/.env", urls)
+
+    def test_sql_file_not_enqueued(self):
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/backup.sql", 0)
+        self.assertNotIn(
+            "https://example.com/backup.sql",
+            [u for u, _ in crawler._queue],
+        )
+
+    def test_zip_file_is_enqueued(self):
+        """ZIP files are not blocked and should be enqueued normally."""
+        crawler = self._make_crawler()
+        crawler._enqueue("https://example.com/firmware.zip", 0)
+        self.assertIn(
+            "https://example.com/firmware.zip",
+            [u for u, _ in crawler._queue],
+        )
+
+
+# ------------------------------------------------------------------ #
+# WooCommerce product discovery
+# ------------------------------------------------------------------ #
+
+class TestWooCommerceDiscovery(unittest.TestCase):
+    """_discover_wc_products must enqueue product pages and archive links."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+
+    def test_product_permalinks_enqueued(self):
+        crawler = self._make_crawler()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"permalink": "https://example.com/producto/fw1/",
+             "images": [], "description": "", "short_description": ""},
+            {"permalink": "https://example.com/producto/fw2/",
+             "images": [], "description": "", "short_description": ""},
+        ]
+        # Second call returns empty list to stop pagination
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.json.return_value = []
+        crawler.session.get = MagicMock(side_effect=[mock_resp, mock_resp2])
+        crawler._discover_wc_products()
+        urls = [u for u, _ in crawler._queue]
+        self.assertIn("https://example.com/producto/fw1/", urls)
+        self.assertIn("https://example.com/producto/fw2/", urls)
+
+    def test_archive_links_in_description_enqueued(self):
+        """Archive URLs embedded in product description are enqueued."""
+        crawler = self._make_crawler()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {
+                "permalink": "https://example.com/producto/fw1/",
+                "images": [],
+                "description": (
+                    '<p>Download: <a href="https://example.com/fw/hg8145.zip">'
+                    "firmware</a></p>"
+                ),
+                "short_description": "",
+            },
+        ]
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.json.return_value = []
+        crawler.session.get = MagicMock(side_effect=[mock_resp, mock_resp2])
+        crawler._discover_wc_products()
+        urls = [u for u, _ in crawler._queue]
+        self.assertIn("https://example.com/fw/hg8145.zip", urls)
+
+    def test_wc_api_unavailable_does_not_crash(self):
+        """If WC API returns 404, discovery exits cleanly."""
+        crawler = self._make_crawler()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        crawler.session.get = MagicMock(return_value=mock_resp)
+        # Should not raise
+        crawler._discover_wc_products()
+
+
 if __name__ == "__main__":
     unittest.main()
+

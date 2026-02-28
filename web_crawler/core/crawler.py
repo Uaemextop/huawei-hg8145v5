@@ -51,6 +51,7 @@ except ImportError:
 from web_crawler.config import (
     BACKOFF_429_BASE,
     BACKOFF_429_MAX,
+    BINARY_CONTENT_TYPES,
     BLOCKED_PATH_RE,
     CRAWLABLE_TYPES,
     DEFAULT_DELAY,
@@ -68,6 +69,7 @@ from web_crawler.config import (
     SOFT_404_SIZE_RATIO,
     SOFT_404_STANDALONE_MIN_HITS,
     SOFT_404_TITLE_KEYWORDS,
+    STREAM_SIZE_THRESHOLD,
     USER_AGENTS,
     WAF_SIGNATURES,
     WP_DISCOVERY_PATHS,
@@ -82,7 +84,10 @@ from web_crawler.session import (
     is_cf_managed_challenge, is_sg_captcha_response, random_headers,
     solve_cf_challenge, solve_sg_captcha,
 )
-from web_crawler.core.storage import content_hash, save_file, smart_local_path
+from web_crawler.core.storage import (
+    content_hash, file_content_hash, save_file, smart_local_path,
+    stream_to_file,
+)
 from web_crawler.extraction.links import extract_links
 from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
@@ -595,6 +600,8 @@ class Crawler:
 
         # Discover media file URLs (images, ZIPs) via REST API
         self._discover_wp_media()
+        # Discover WooCommerce product pages and any linked files
+        self._discover_wc_products()
 
     def _discover_wp_media(self) -> None:
         """Use the WP REST API to discover downloadable media files
@@ -628,6 +635,119 @@ class Crawler:
         if total:
             log.debug("  [WP-MEDIA] Discovered %d media files via REST API",
                      total)
+
+    def _discover_wc_products(self) -> None:
+        """Enumerate WooCommerce products via the Store API and enqueue:
+        * every product permalink (HTML product page)
+        * every image / thumbnail URL
+        * any archive/binary files linked in the product description
+
+        Also probes the WooCommerce uploads directory with common
+        year/month sub-paths when *download_extensions* is set.
+        """
+        import re as _re
+        page = 1
+        product_total = 0
+        file_total = 0
+        # Archive extension pattern for scanning product descriptions
+        _arch_re = _re.compile(
+            r'https?://[^\s"\'<>]+\.(?:zip|rar|7z|tar|gz|bz2|xz|bin|exe'
+            r'|img|iso|hwnp|fwu|pkg)(?:\?[^\s"\'<>]*)?',
+            _re.I,
+        )
+        while page <= 50:  # WC sites rarely have >5000 products (100/page)
+            api_url = (f"{self.base}/wp-json/wc/store/v1/products"
+                       f"?per_page=100&page={page}")
+            try:
+                resp = self.session.get(api_url, timeout=REQUEST_TIMEOUT)
+            except _NETWORK_ERRORS:
+                break
+            if resp.status_code != 200:
+                break
+            try:
+                items = resp.json()
+            except ValueError:
+                break
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                # Product page
+                permalink = item.get("permalink", "")
+                if permalink and self.allowed_host in permalink:
+                    self._enqueue(permalink, 1)
+                    product_total += 1
+                # Product images
+                for img in item.get("images", []):
+                    src = img.get("src", "")
+                    if src and self.allowed_host in src:
+                        self._enqueue(src, 0)
+                # Archive files embedded in description HTML
+                desc = item.get("description", "") + item.get("short_description", "")
+                for m in _arch_re.finditer(desc):
+                    link = m.group(0)
+                    if self.allowed_host in link:
+                        self._enqueue(link, 0, priority=True)
+                        file_total += 1
+            if len(items) < 100:
+                break
+            page += 1
+            time.sleep(self.delay)
+
+        if product_total:
+            log.info("[WC] Discovered %d product pages, %d archive links",
+                     product_total, file_total)
+
+        # Probe WooCommerce uploads sub-directories for archive files.
+        # woocommerce_uploads/ is protected by robots.txt but we probe it
+        # when robots is disabled or when download_extensions is set.
+        if self.download_extensions:
+            self._probe_wc_uploads()
+
+    def _probe_wc_uploads(self) -> None:
+        """Probe wp-content/uploads/woocommerce_uploads/ with recent
+        year/month paths to discover directly accessible firmware ZIPs."""
+        import datetime as _dt
+        now = _dt.datetime.now()
+        # Probe the last 18 months
+        paths_to_probe: list[str] = []
+        for delta in range(18):
+            month = (now.month - delta - 1) % 12 + 1
+            year = now.year - ((now.month - delta - 1) // 12)
+            for base_dir in (
+                f"/wp-content/uploads/woocommerce_uploads/{year}/{month:02d}/",
+                f"/wp-content/uploads/{year}/{month:02d}/",
+            ):
+                paths_to_probe.append(base_dir)
+
+        probed = 0
+        for path in paths_to_probe:
+            try:
+                r = self.session.get(
+                    self.base + path,
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+            except _NETWORK_ERRORS:
+                continue
+            if not r.ok:
+                continue
+            # Extract archive links from directory listing HTML
+            import re as _re2
+            ct = r.headers.get("Content-Type", "")
+            if "html" not in ct.lower():
+                continue
+            for m in _re2.finditer(
+                r'href=["\']([^"\']*\.(?:zip|rar|7z|bin|tar\.gz|tar|gz|bz2'
+                r'|xz|exe|img|iso|hwnp|fwu|pkg))["\']',
+                r.text, _re2.I,
+            ):
+                link = urllib.parse.urljoin(self.base + path, m.group(1))
+                if self.allowed_host in link:
+                    self._enqueue(link, 0, priority=True)
+                    probed += 1
+        if probed:
+            log.info("[WC-UPLOADS] Found %d archive files in uploads dirs",
+                     probed)
 
     def _deep_crawl_wp_plugin(self, slug: str, depth: int) -> None:
         """Enqueue internal files for a confirmed WordPress plugin."""
@@ -874,6 +994,12 @@ class Crawler:
             # '*' is not a valid character in an HTTP request path.
             if "*" in parsed.path:
                 return
+            # Skip extensions that SiteGround's WAF always blocks with 403.
+            # Probing these wastes requests and inflates error counters.
+            path_lower_eq = parsed.path.lower()
+            if any(path_lower_eq.endswith(ext)
+                   for ext in SITEGROUND_BLOCKED_EXTENSIONS):
+                return
             # Enforce the base scheme (upgrade http → https when base is https)
             # so every request uses the protocol the server expects and the
             # session cookie (e.g. SG-CAPTCHA bypass) is always included.
@@ -1054,9 +1180,20 @@ class Crawler:
         if not self._cf_bypass_done:
             self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
 
+        # Use streaming mode for URLs that look like large binary files so we
+        # don't buffer the entire response in RAM before saving to disk.
+        _path_lower_pre = urllib.parse.urlparse(url).path.lower()
+        _use_stream = any(
+            _path_lower_pre.endswith(ext)
+            for ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2",
+                        ".xz", ".bin", ".exe", ".img", ".iso",
+                        ".hwnp", ".fwu", ".pkg")
+        )
+
         try:
             resp = self.session.get(
-                url, timeout=REQUEST_TIMEOUT, allow_redirects=True
+                url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                stream=_use_stream,
             )
         except _NETWORK_ERRORS as exc:
             log.warning("Request failed for %s – %s", url, exc)
@@ -1131,42 +1268,54 @@ class Crawler:
             if retry_resp is not None:
                 resp = retry_resp
             else:
-                # Try SG-Captcha solve as fallback for 403.
-                # Serialize to avoid concurrent PoW solves.
-                with self._sg_solve_lock:
-                    if solve_sg_captcha(self.session, self.base,
-                                        parsed_url.path):
-                        try:
-                            retry_resp = self.session.get(
-                                url, timeout=REQUEST_TIMEOUT,
-                                allow_redirects=True,
-                            )
-                        except _NETWORK_ERRORS:
-                            retry_resp = None
-                        if (retry_resp is not None and retry_resp.ok
-                                and not is_sg_captcha_response(retry_resp)):
-                            log.debug("  [SG-CAPTCHA] Solved 403 for %s", url)
-                            resp = retry_resp
+                # Only attempt SG-CAPTCHA solve when the 403 response body
+                # contains actual CAPTCHA markers.  Calling solve_sg_captcha
+                # unconditionally is wrong because it hits the CAPTCHA endpoint
+                # directly, which ALWAYS returns a challenge – causing the
+                # crawler to waste 20 s solving a useless PoW for every plain
+                # nginx 403 (e.g. woocommerce_uploads/ directory block).
+                body_text = resp.content.decode("utf-8", errors="replace")
+                if is_sg_captcha_response(resp):
+                    # Serialize to avoid concurrent PoW solves.
+                    with self._sg_solve_lock:
+                        if solve_sg_captcha(self.session, self.base,
+                                            parsed_url.path):
+                            try:
+                                retry_resp = self.session.get(
+                                    url, timeout=REQUEST_TIMEOUT,
+                                    allow_redirects=True,
+                                )
+                            except _NETWORK_ERRORS:
+                                retry_resp = None
+                            if (retry_resp is not None and retry_resp.ok
+                                    and not is_sg_captcha_response(retry_resp)):
+                                log.debug("  [SG-CAPTCHA] Solved 403 for %s",
+                                          url)
+                                resp = retry_resp
+                            else:
+                                self._stats["err"] += 1
+                                return
                         else:
+                            log.warning("  [SG-CAPTCHA] Failed to solve for %s",
+                                        url)
                             self._stats["err"] += 1
                             return
-                    else:
-                        # Detect WAF / protection on the original blocked response
-                        body_text = resp.content.decode("utf-8", errors="replace")
-                        protections = self.detect_protection(
-                            dict(resp.headers), body_text
+                else:
+                    # Regular WAF / nginx 403 – detect protection type and skip
+                    protections = self.detect_protection(
+                        dict(resp.headers), body_text
+                    )
+                    if protections:
+                        self._stats["waf"] += 1
+                        log.warning(
+                            "  [WAF] %s detected on %s",
+                            ", ".join(protections), url,
                         )
-                        if protections:
-                            self._stats["waf"] += 1
-                            log.warning(
-                                "  [WAF] %s detected on %s",
-                                ", ".join(protections), url,
-                            )
-                        else:
-                            log.warning("HTTP %s for %s – skipping",
-                                        resp.status_code, url)
-                        self._stats["err"] += 1
-                        return
+                    else:
+                        log.warning("HTTP %s for %s – skipping",
+                                    resp.status_code, url)
+                    self._stats["err"] += 1
+                    return
 
         # Reset probe 403/404 streak on any successful probe response
         if is_probe and resp.ok:
@@ -1278,8 +1427,74 @@ class Crawler:
 
         content_type = resp.headers.get("Content-Type", "application/octet-stream")
         content_disp = resp.headers.get("Content-Disposition", "")
-        content = resp.content
         ct_lower = content_type.split(";")[0].strip().lower()
+
+        # Decide whether to stream this response or buffer it.
+        # Stream when: Content-Type is a known binary type, or the server
+        # sent Content-Disposition: attachment (explicit download signal),
+        # or the request was already made in stream mode.
+        _is_binary = (
+            ct_lower in BINARY_CONTENT_TYPES
+            or content_disp.lower().startswith("attachment")
+        )
+        if _use_stream or _is_binary:
+            # Streaming path: write chunks directly to disk, read first chunk
+            # only for WAF/SG-CAPTCHA checks on unexpected HTML responses.
+            local_stream = smart_local_path(url, self.output_dir,
+                                            content_type, content_disp)
+            try:
+                chunks = resp.iter_content(chunk_size=524288)
+                first_chunk = next(chunks, b"")
+            except _NETWORK_ERRORS as exc:
+                log.warning("  Stream error for %s – %s", url, exc)
+                self._stats["err"] += 1
+                return
+
+            # If the first chunk looks like HTML (unexpected WAF/CAPTCHA page),
+            # fall back to in-memory handling so protection checks can run.
+            if ct_lower in ("text/html", "application/xhtml+xml"):
+                remaining = b"".join(chunks)
+                content: bytes = first_chunk + remaining
+            else:
+                # Pure binary – deduplicate using on-disk streaming hash
+                content_size_hint = int(
+                    resp.headers.get("Content-Length", "0") or "0"
+                )
+                _size_mb = (content_size_hint or len(first_chunk)) / (1024 * 1024)
+                with self._lock:
+                    # Optimistic lock: skip dup check for now, verify after write
+                    pass
+                local_stream.parent.mkdir(parents=True, exist_ok=True)
+                written = len(first_chunk)
+                with local_stream.open("wb") as fh:
+                    fh.write(first_chunk)
+                    for chunk in chunks:
+                        if chunk:
+                            fh.write(chunk)
+                            written += len(chunk)
+                ch = file_content_hash(local_stream)
+                with self._lock:
+                    if ch in self._hashes:
+                        log.debug(
+                            "  Duplicate binary for %s – removing extra copy",
+                            url,
+                        )
+                        local_stream.unlink(missing_ok=True)
+                        self._stats["dup"] += 1
+                    else:
+                        self._hashes.add(ch)
+                        log.info(
+                            "  [DOWNLOAD] %s → %s (%.1f MiB)",
+                            url, local_stream.name, written / (1024 * 1024),
+                        )
+                        self._stats["ok"] += 1
+                        if self.debug:
+                            self._save_http_headers(local_stream, resp, url)
+                        self._maybe_git_push()
+                time.sleep(self.delay)
+                return
+        else:
+            content = resp.content
 
         log.debug(
             "  ← HTTP %s  CT: %s  %d bytes",

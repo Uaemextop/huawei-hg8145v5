@@ -235,13 +235,26 @@ def solve_sg_captcha(
 
 
 def is_sg_captcha_response(resp: requests.Response) -> bool:
-    """Return ``True`` if *resp* is a SiteGround CAPTCHA challenge page."""
+    """Return ``True`` if *resp* is a SiteGround CAPTCHA challenge page.
+
+    Detects three variants:
+    * ``SG-Captcha: challenge`` response header (canonical marker)
+    * HTTP 202 with ``sgcaptcha`` in the first 500 bytes (inline challenge)
+    * Any status with ``/.well-known/captcha/`` or ``sgcaptcha`` in the
+      first 2 KB (SiteGround redirects / WAF-level block with CAPTCHA body)
+    """
     if resp.headers.get("SG-Captcha") == "challenge":
         return True
-    if resp.status_code == 202 and "sgcaptcha" in resp.text[:500]:
+    # Avoid buffering large binary responses – only inspect small bodies
+    ct = resp.headers.get("Content-Type", "")
+    if "html" not in ct.lower() and resp.status_code not in (202, 403):
+        return False
+    snippet = resp.text[:2000].lower()
+    if "sgcaptcha" in snippet:
+        return True
+    if "/.well-known/captcha/" in snippet or "/.well-known/sgcaptcha/" in snippet:
         return True
     return False
-
 
 # ---------------------------------------------------------------------------
 # Cloudflare Managed Challenge detection

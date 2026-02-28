@@ -7,8 +7,12 @@ import logging
 import re
 import urllib.parse
 from pathlib import Path
+from typing import Iterator
 
 log = logging.getLogger("web-crawler")
+
+# Chunk size for streaming large binary files to disk (512 KiB)
+_STREAM_CHUNK = 524288
 
 
 def save_file(local_path: Path, content: bytes) -> None:
@@ -18,9 +22,76 @@ def save_file(local_path: Path, content: bytes) -> None:
     log.debug("Saved → %s (%d bytes)", local_path, len(content))
 
 
+def stream_to_file(local_path: Path, chunks: Iterator[bytes]) -> int:
+    """Write streaming *chunks* to *local_path*.
+
+    Returns the total number of bytes written.  Creates parent
+    directories as needed.
+    """
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    with local_path.open("wb") as fh:
+        for chunk in chunks:
+            if chunk:
+                fh.write(chunk)
+                total += len(chunk)
+    log.debug("Streamed → %s (%d bytes)", local_path, total)
+    return total
+
+
 def content_hash(data: bytes) -> str:
     """Return a short SHA-256 hex digest for deduplication."""
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def file_content_hash(path: Path) -> str:
+    """Return a short SHA-256 hex digest for a file already on disk."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(_STREAM_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+def _filename_from_disposition(header: str) -> str:
+    """Extract the filename from a Content-Disposition header.
+
+    Handles (in priority order):
+    1. RFC 5987 extended notation:  ``filename*=UTF-8''my%20file.zip``
+    2. Quoted value with spaces:    ``filename="my file.zip"``
+    3. Unquoted value:              ``filename=myfile.zip``
+
+    Returns an empty string when no usable filename is found.
+    """
+    if not header:
+        return ""
+
+    # RFC 5987 – charset'language'percent-encoded (highest priority)
+    m = re.search(
+        r"filename\*\s*=\s*([^']+)''([^;,\s]+)",
+        header, re.I,
+    )
+    if m:
+        charset = m.group(1).strip() or "utf-8"
+        try:
+            return urllib.parse.unquote(m.group(2), encoding=charset)
+        except Exception:
+            pass
+
+    # Quoted filename (may contain spaces)
+    m = re.search(r'filename\s*=\s*"([^"\\]*(?:\\.[^"\\]*)*)"', header, re.I)
+    if m:
+        # Unescape backslash sequences
+        fname = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        # Percent-decode if the server also encoded within quotes
+        return urllib.parse.unquote(fname)
+
+    # Unquoted filename (no spaces, no semicolons)
+    m = re.search(r"filename\s*=\s*([^\s;,\"']+)", header, re.I)
+    if m:
+        return urllib.parse.unquote(m.group(1).strip())
+
+    return ""
 
 
 def smart_local_path(
@@ -33,15 +104,16 @@ def smart_local_path(
     Determine the local save path for a response.
 
     Priority:
-      1. filename= from Content-Disposition header
+      1. filename= from Content-Disposition header (RFC 5987 + RFC 6266)
       2. filename from URL path
       3. If URL path has no extension but Content-Type suggests one, append it
       4. Extensionless URLs become ``<name>.html`` when CT is text/html
     """
     if content_disposition:
-        m = re.search(r'filename\s*=\s*["\']?([^\s"\']+)', content_disposition, re.I)
-        if m:
-            fname = m.group(1).strip()
+        fname = _filename_from_disposition(content_disposition)
+        if fname:
+            # Sanitise: strip any path traversal characters
+            fname = Path(fname).name
             parsed = urllib.parse.urlparse(url)
             dir_part = Path(parsed.path.lstrip("/")).parent
             return output_dir / dir_part / fname
