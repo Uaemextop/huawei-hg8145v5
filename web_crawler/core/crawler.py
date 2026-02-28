@@ -33,6 +33,16 @@ from pathlib import Path
 import requests
 
 try:
+    from curl_cffi.requests.exceptions import RequestException as CfRequestException
+except ImportError:
+    CfRequestException = None  # type: ignore[misc,assignment]
+
+# Network exception tuple that catches both requests and curl_cffi errors
+_NETWORK_ERRORS: tuple[type[Exception], ...] = (requests.RequestException,)
+if CfRequestException is not None:
+    _NETWORK_ERRORS = (requests.RequestException, CfRequestException)
+
+try:
     from tqdm import tqdm as _tqdm
     _TQDM_AVAILABLE = True
 except ImportError:
@@ -66,12 +76,13 @@ from web_crawler.config import (
     auto_concurrency,
 )
 from web_crawler.session import (
-    build_session, cache_bust_url, is_sg_captcha_response, random_headers,
-    solve_sg_captcha,
+    build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
+    is_cf_managed_challenge, is_sg_captcha_response, random_headers,
+    solve_cf_challenge, solve_sg_captcha,
 )
 from web_crawler.core.storage import content_hash, save_file, smart_local_path
 from web_crawler.extraction.links import extract_links
-from web_crawler.utils.log import log
+from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 
 
@@ -95,6 +106,8 @@ class Crawler:
         download_extensions: frozenset[str] | None = None,
         concurrency: int = DEFAULT_CONCURRENCY,
         upload_extensions: frozenset[str] | None = None,
+        debug: bool = False,
+        cf_clearance: str = "",
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -104,6 +117,7 @@ class Crawler:
         self.max_depth = max_depth
         self.delay = delay
         self.force = force
+        self.debug = debug
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.download_extensions = download_extensions or frozenset()
@@ -119,6 +133,8 @@ class Crawler:
                 re.I,
             )
         self.session = build_session(verify_ssl=verify_ssl)
+        if cf_clearance:
+            inject_cf_clearance(self.session, parsed.netloc, cf_clearance)
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
@@ -154,24 +170,32 @@ class Crawler:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        ci_group("Crawl configuration")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        log.info("🌐 Output directory : %s", self.output_dir.resolve())
-        log.info("🎯 Target URL       : %s", self.start_url)
-        log.info("🏠 Allowed host     : %s", self.allowed_host)
-        log.info("📊 Page limit       : NONE (exhaustive)")
+        log.info("Output directory : %s", self.output_dir.resolve())
+        log.info("Target URL       : %s", self.start_url)
+        log.info("Allowed host     : %s", self.allowed_host)
+        log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
-            log.info("📏 Max depth        : %d", self.max_depth)
+            log.info("Max depth        : %d", self.max_depth)
         if self.download_extensions:
-            log.info("📥 Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
-        log.info("⚡ Concurrency      : %d workers", self.concurrency)
+            log.info("Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
+        log.info("Concurrency      : %d workers", self.concurrency)
+        if self.debug:
+            log.info("Debug mode       : ON (headers saved, verbose logging)")
         if self.upload_extensions:
-            log.info("📤 Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
+            log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        ci_endgroup()
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
         # is set for robots.txt loading and soft-404 probing.
         self._try_sg_captcha_bypass()
+
+        # Check for Cloudflare Managed Challenge early, before wasting
+        # time on robots.txt and soft-404 probing.
+        self._check_cf_managed_challenge()
 
         # Load robots.txt (uses our session with the captcha cookie)
         if self._respect_robots:
@@ -184,12 +208,12 @@ class Crawler:
         if not self.force:
             n = self._resume_from_disk()
             if n:
-                log.info("♻️  Resume: %d existing file(s) loaded from disk.", n)
+                log.info("Resume: %d existing file(s) loaded from disk.", n)
 
         # Seed the queue
         self._enqueue(self.start_url, 0)
 
-        log.info("🚀 Crawl started. Dynamic discovery begins.")
+        log.info("Crawl started. Dynamic discovery begins.")
 
         if self.concurrency > 1:
             self._run_concurrent()
@@ -208,37 +232,38 @@ class Crawler:
         total = s["ok"] + s["skip"] + s["dup"] + s["err"] + s["soft404"] + s["waf"]
         pct_ok = (s["ok"] / total * 100) if total else 0
         pct_err = (s["err"] / total * 100) if total else 0
+        ci_group("Crawl results")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        log.info("🏁 Crawl complete!")
+        log.info("Crawl complete!")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        log.info("📊 Visited     : %d URLs", len(self._visited))
-        log.info("💾 Saved (OK)  : %d  (%.1f%%)", s["ok"], pct_ok)
-        log.info("⏭️  Skipped     : %d", s["skip"])
-        log.info("♻️  Duplicates  : %d", s["dup"])
-        log.info("👻 Soft-404    : %d", s["soft404"])
-        log.info("🚫 WAF blocked : %d", s["waf"])
-        log.info("🔄 Retry OK    : %d", s["retry_ok"])
-        log.info("❌ Errors      : %d  (%.1f%%)", s["err"], pct_err)
-        log.info("🔐 Captcha     : %d solves", self._sg_captcha_solves)
+        log.info("Visited     : %d URLs", len(self._visited))
+        log.info("Saved (OK)  : %d  (%.1f%%)", s["ok"], pct_ok)
+        log.info("Skipped     : %d", s["skip"])
+        log.info("Duplicates  : %d", s["dup"])
+        log.info("Soft-404    : %d", s["soft404"])
+        log.info("WAF blocked : %d", s["waf"])
+        log.info("Retry OK    : %d", s["retry_ok"])
+        log.info("Errors      : %d  (%.1f%%)", s["err"], pct_err)
+        log.info("Captcha     : %d solves", self._sg_captcha_solves)
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        log.info("📂 Files saved in: %s", self.output_dir.resolve())
+        log.info("Files saved in: %s", self.output_dir.resolve())
+        ci_endgroup()
 
     def _stats_postfix(self) -> dict[str, object]:
         """Return a dict suitable for tqdm ``set_postfix``."""
         return {
             "Q": len(self._queue),
-            "✓": self._stats["ok"],
-            "✗": self._stats["err"],
-            "⏭": self._stats["skip"],
-            "♻": self._stats["dup"],
-            "👻": self._stats["soft404"],
-            "🔐": self._sg_captcha_solves,
+            "OK": self._stats["ok"],
+            "ERR": self._stats["err"],
+            "SKIP": self._stats["skip"],
+            "DUP": self._stats["dup"],
+            "S404": self._stats["soft404"],
         }
 
     def _run_with_progress(self) -> None:
         """BFS loop with a tqdm progress bar."""
         bar = _tqdm(
-            desc="🌐 Crawling",
+            desc="Crawling",
             unit="URL",
             dynamic_ncols=True,
             bar_format=(
@@ -264,13 +289,13 @@ class Crawler:
 
     def _run_concurrent(self) -> None:
         """BFS loop with a ThreadPoolExecutor and live progress bar."""
-        log.info("⚡ Concurrent mode: %d workers", self.concurrency)
+        log.info("Concurrent mode: %d workers", self.concurrency)
         use_bar = _TQDM_AVAILABLE
 
         bar = None
         if use_bar:
             bar = _tqdm(
-                desc="🌐 Crawling",
+                desc="Crawling",
                 unit="URL",
                 dynamic_ncols=True,
                 bar_format=(
@@ -322,7 +347,7 @@ class Crawler:
         self._robots.set_url(robots_url)
         try:
             self._robots.read()
-            log.info("🤖 Loaded robots.txt from %s", robots_url)
+            log.info("Loaded robots.txt from %s", robots_url)
         except Exception as exc:
             log.debug("Could not load robots.txt: %s", exc)
             self._robots = None
@@ -339,15 +364,101 @@ class Crawler:
     def _try_sg_captcha_bypass(self) -> None:
         """If the target uses SiteGround CAPTCHA, solve the PoW
         challenge once so the session cookie is set."""
-        log.info("🔐 Checking for SiteGround CAPTCHA …")
+        log.info("Checking for SiteGround CAPTCHA …")
         solved = solve_sg_captcha(self.session, self.base, "/")
         if solved:
             # The server's meta-refresh suggests a 1-second wait
             # before the cookie is fully active.
             time.sleep(1)
-            log.info("[SG-CAPTCHA] Solved – session cookie set ✓")
+            log.info("[SG-CAPTCHA] Solved – session cookie set")
         else:
-            log.info("🔐 No SiteGround CAPTCHA detected (or not solvable)")
+            log.info("No SiteGround CAPTCHA detected (or not solvable)")
+
+    def _check_cf_managed_challenge(self) -> None:
+        """Detect and auto-solve a Cloudflare Managed Challenge.
+
+        If the site returns ``cf-mitigated: challenge``, attempt to
+        solve it by switching to a ``curl_cffi`` session (TLS fingerprint
+        impersonation) or falling back to Playwright.
+        """
+        try:
+            resp = self.session.get(
+                self.start_url, timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+        except _NETWORK_ERRORS:
+            return
+        if not is_cf_managed_challenge(resp):
+            log.info("No Cloudflare challenge detected")
+            return
+
+        log.warning(
+            "Cloudflare Managed Challenge detected on %s",
+            self.start_url,
+        )
+        self._solve_cf_and_inject()
+
+    def _solve_cf_and_inject(self) -> bool:
+        """Switch the session to bypass Cloudflare.
+
+        Uses ``curl_cffi`` TLS impersonation (preferred) or Playwright
+        headless browser (fallback).  When ``curl_cffi`` works, the
+        entire ``self.session`` is replaced with a ``curl_cffi`` session
+        so that all subsequent requests use the same TLS fingerprint.
+
+        Returns ``True`` on success.
+        """
+        cf_session = build_cf_session(verify_ssl=self.session.verify)
+        if cf_session is not None:
+            # Transfer existing cookies to the new session
+            for cookie in self.session.cookies:
+                cf_session.cookies.set(
+                    cookie.name, cookie.value,
+                    domain=cookie.domain, path=cookie.path,
+                )
+            try:
+                check = cf_session.get(
+                    self.start_url, timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if check.ok and "just a moment" not in check.text[:2048].lower():
+                    self.session = cf_session
+                    log.info("[CF] Switched to curl_cffi session – bypass confirmed")
+                    self._cf_bypass_done = True
+                    return True
+            except Exception as exc:
+                log.debug("[CF] curl_cffi direct attempt failed: %s", exc)
+
+        # Fallback: Playwright + cookie injection
+        result = solve_cf_challenge(self.start_url)
+        if not result:
+            log.warning(
+                "[CF] Could not auto-solve. Provide --cf-clearance <cookie> "
+                "obtained from a browser session to bypass it.",
+            )
+            return False
+
+        cookies, browser_ua = result
+        parsed = urllib.parse.urlparse(self.start_url)
+        for name, value in cookies.items():
+            self.session.cookies.set(name, value,
+                                     domain=parsed.netloc, path="/")
+        self.session.headers["User-Agent"] = browser_ua
+        log.info("[CF] %d cookies injected (UA synced) – verifying …",
+                 len(cookies))
+        try:
+            check = self.session.get(
+                self.start_url, timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+            if check.ok and not is_cf_managed_challenge(check):
+                log.info("[CF] Cloudflare bypass confirmed")
+                self._cf_bypass_done = True
+                return True
+        except _NETWORK_ERRORS:
+            pass
+        log.warning("[CF] Cookies did not bypass the challenge")
+        return False
 
     # ------------------------------------------------------------------
     # Soft-404 detection
@@ -362,7 +473,7 @@ class Crawler:
             resp = self.session.get(
                 probe, timeout=REQUEST_TIMEOUT, allow_redirects=True
             )
-        except requests.RequestException:
+        except _NETWORK_ERRORS:
             log.debug("Soft-404 probe failed (request error); detection disabled.")
             return
 
@@ -375,7 +486,7 @@ class Crawler:
         body = resp.content
         self._soft404_size = len(body)
         self._soft404_hash = content_hash(body)
-        log.info("🔍 Soft-404 baseline: %d bytes, hash=%s (server returns 200 for missing pages)",
+        log.info("Soft-404 baseline: %d bytes, hash=%s (server returns 200 for missing pages)",
             self._soft404_size, self._soft404_hash,
         )
 
@@ -475,7 +586,7 @@ class Crawler:
             self._enqueue(wp_url, 0)
         total = (len(WP_DISCOVERY_PATHS) + len(WP_PLUGIN_PROBES)
                  + len(WP_THEME_PROBES) + 10)
-        log.info("📦 WordPress detected – enqueued %d discovery URLs", total)
+        log.info("[WP] WordPress detected – enqueued %d discovery URLs", total)
 
         # Discover media file URLs (images, ZIPs) via REST API
         self._discover_wp_media()
@@ -490,7 +601,7 @@ class Crawler:
                        f"?per_page=100&page={page}")
             try:
                 resp = self.session.get(api_url, timeout=REQUEST_TIMEOUT)
-            except requests.RequestException:
+            except _NETWORK_ERRORS:
                 break
             if resp.status_code != 200:
                 break
@@ -510,7 +621,7 @@ class Crawler:
             page += 1
             time.sleep(self.delay)
         if total:
-            log.info("  [WP-MEDIA] Discovered %d media files via REST API",
+            log.debug("  [WP-MEDIA] Discovered %d media files via REST API",
                      total)
 
     def _deep_crawl_wp_plugin(self, slug: str, depth: int) -> None:
@@ -521,7 +632,7 @@ class Crawler:
         base_path = f"/wp-content/plugins/{slug}/"
         for f in WP_PLUGIN_FILES:
             self._enqueue(self.base + base_path + f, depth + 1)
-        log.info("  [WP-PLUGIN] Deep-crawling plugin '%s' (%d files)",
+        log.debug("  [WP-PLUGIN] Deep-crawling plugin '%s' (%d files)",
                  slug, len(WP_PLUGIN_FILES))
 
     def _deep_crawl_wp_theme(self, slug: str, depth: int) -> None:
@@ -532,7 +643,7 @@ class Crawler:
         base_path = f"/wp-content/themes/{slug}/"
         for f in WP_THEME_FILES:
             self._enqueue(self.base + base_path + f, depth + 1)
-        log.info("  [WP-THEME] Deep-crawling theme '%s' (%d files)",
+        log.debug("  [WP-THEME] Deep-crawling theme '%s' (%d files)",
                  slug, len(WP_THEME_FILES))
 
     # ------------------------------------------------------------------
@@ -581,7 +692,7 @@ class Crawler:
                     headers=hdrs,
                 )
                 if resp.ok and not is_sg_captcha_response(resp):
-                    log.info(
+                    log.debug(
                         "  [RETRY %d/%d] OK for %s (UA: %s…)",
                         attempt, HEADER_RETRY_MAX, url,
                         hdrs["User-Agent"][:40],
@@ -605,13 +716,13 @@ class Crawler:
                         )
                         if resp2.ok:
                             self._stats["retry_ok"] += 1
-                            log.info("  [CF-BYPASS] Succeeded for %s", url)
+                            log.debug("  [CF-BYPASS] Succeeded for %s", url)
                             return resp2
                 log.debug(
                     "  [RETRY %d/%d] HTTP %s for %s",
                     attempt, HEADER_RETRY_MAX, resp.status_code, url,
                 )
-            except requests.RequestException:
+            except _NETWORK_ERRORS:
                 pass
             time.sleep(self.delay * attempt)
         return None
@@ -784,7 +895,8 @@ class Crawler:
         """Commit and push progress every *git_push_every* saved files.
 
         When *upload_extensions* is set, only files matching those
-        extensions (plus README.md and .headers) are staged.
+        extensions (plus README.md) are staged.  When debug mode is
+        active, ``.headers`` files are included too.
         """
         if self.git_push_every <= 0:
             return
@@ -802,9 +914,11 @@ class Crawler:
                     cwd=cwd, capture_output=True, timeout=30,
                 )
                 for ext in self.upload_extensions:
-                    # Stage files matching this extension + their .headers
+                    args = ["git", "add", "--", f"*{ext}"]
+                    if self.debug:
+                        args.append(f"*{ext}.headers")
                     subprocess.run(
-                        ["git", "add", "--", f"*{ext}", f"*{ext}.headers"],
+                        args,
                         cwd=cwd, capture_output=True, timeout=60,
                     )
             else:
@@ -884,24 +998,26 @@ class Crawler:
 
         # Skip already-downloaded files
         if not self.force and local.exists() and local.stat().st_size > 0:
-            log.info("[SKIP] Already on disk: %s", url)
+            log.debug("[SKIP] Already on disk: %s", url)
             self._stats["skip"] += 1
             added = self._parse_local_file(local, url)
             if added:
                 log.debug("  +%d new URLs from cached %s", added, local.name)
             return
 
-        log.info("[📋 %d queued | 💾 %d ok | ❌ %d err] GET %s",
+        log.debug("[Q:%d OK:%d ERR:%d] GET %s",
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
 
-        # Rotate User-Agent per request
-        self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+        # Rotate User-Agent per request (skip for curl_cffi which
+        # manages its own UA via TLS impersonation)
+        if not self._cf_bypass_done:
+            self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
 
         try:
             resp = self.session.get(
                 url, timeout=REQUEST_TIMEOUT, allow_redirects=True
             )
-        except requests.RequestException as exc:
+        except _NETWORK_ERRORS as exc:
             log.warning("Request failed for %s – %s", url, exc)
             self._stats["err"] += 1
             return
@@ -940,6 +1056,13 @@ class Crawler:
 
         # Handle 403 / 402 – retry with rotated headers + cache busting
         if resp.status_code in RETRY_STATUS_CODES:
+            # Cloudflare Managed Challenge – re-solve with Playwright
+            if is_cf_managed_challenge(resp):
+                log.info("[CF] Challenge on %s – re-solving …", url)
+                if self._solve_cf_and_inject():
+                    self._visited.discard(key)
+                    self._enqueue(url, depth, priority=True)
+                    return
             # Skip expensive retries for speculative probe URLs
             if is_probe:
                 self._probe_403_count += 1
@@ -955,7 +1078,7 @@ class Crawler:
                 self._stats["err"] += 1
                 return
 
-            log.info("  [%d] Blocked – retrying with rotated headers: %s",
+            log.debug("  [%d] Blocked – retrying with rotated headers: %s",
                      resp.status_code, url)
             retry_resp = self._retry_with_headers(url)
             if retry_resp is not None:
@@ -967,11 +1090,11 @@ class Crawler:
                         retry_resp = self.session.get(
                             url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                         )
-                    except requests.RequestException:
+                    except _NETWORK_ERRORS:
                         retry_resp = None
                     if (retry_resp is not None and retry_resp.ok
                             and not is_sg_captcha_response(retry_resp)):
-                        log.info("  [SG-CAPTCHA] Solved 403 for %s", url)
+                        log.debug("  [SG-CAPTCHA] Solved 403 for %s", url)
                         resp = retry_resp
                     else:
                         self._stats["err"] += 1
@@ -1023,7 +1146,7 @@ class Crawler:
                 self._stats["err"] += 1
                 return
 
-            log.info("  [SG-CAPTCHA] Challenge for %s – solving PoW …", url)
+            log.debug("  [SG-CAPTCHA] Challenge for %s – solving PoW …", url)
             solved = solve_sg_captcha(self.session, self.base, parsed_url.path)
             self._sg_captcha_solves += 1
             if solved:
@@ -1033,7 +1156,7 @@ class Crawler:
                     resp = self.session.get(
                         url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                     )
-                except requests.RequestException:
+                except _NETWORK_ERRORS:
                     self._stats["err"] += 1
                     return
                 if not resp.ok or is_sg_captcha_response(resp):
@@ -1041,7 +1164,7 @@ class Crawler:
                                 "HTTP %s for %s", resp.status_code, url)
                     self._stats["err"] += 1
                     return
-                log.info("  [SG-CAPTCHA] Solved – got HTTP %s for %s",
+                log.debug("  [SG-CAPTCHA] Solved – got HTTP %s for %s",
                          resp.status_code, url)
                 # Successful solve: reset the counter
                 self._sg_captcha_solves = 0
@@ -1074,7 +1197,7 @@ class Crawler:
             # Soft-404 detection – skip false positives
             if self._is_soft_404(content, url):
                 self._stats["soft404"] += 1
-                log.info("  [SOFT-404] %s – not saving", url)
+                log.debug("  [SOFT-404] %s – not saving", url)
                 return
 
             # WordPress detection on first HTML page
@@ -1107,7 +1230,8 @@ class Crawler:
             local = smart_local_path(url, self.output_dir, content_type,
                                      content_disp)
             save_file(local, content)
-            self._save_http_headers(local, resp, url)
+            if self.debug:
+                self._save_http_headers(local, resp, url)
             with self._lock:
                 self._stats["ok"] += 1
             self._maybe_git_push()

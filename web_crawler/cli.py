@@ -107,6 +107,12 @@ def parse_args() -> argparse.Namespace:
              "(e.g. zip,bin,rar), or 'all' to upload every file "
              "(default: all)",
     )
+    parser.add_argument(
+        "--cf-clearance", default="", metavar="COOKIE",
+        help="Cloudflare cf_clearance cookie value obtained from a browser "
+             "session. Use this to bypass Cloudflare Managed Challenges "
+             "when Playwright is not available.",
+    )
     return parser.parse_args()
 
 
@@ -127,9 +133,9 @@ def main() -> None:
         log.warning("TLS certificate verification is DISABLED (--no-verify-ssl)")
 
     if not _TQDM_AVAILABLE:
-        log.info("💡 Tip: install tqdm for a live progress bar  (pip install tqdm)")
+        log.info("Tip: install tqdm for a live progress bar  (pip install tqdm)")
     if not _COLORLOG_AVAILABLE:
-        log.info("💡 Tip: install colorlog for colored output   (pip install colorlog)")
+        log.info("Tip: install colorlog for colored output   (pip install colorlog)")
 
     # Normalise the target URL
     target_url = args.url
@@ -192,12 +198,14 @@ def main() -> None:
         download_extensions=dl_exts,
         concurrency=concurrency,
         upload_extensions=upload_exts,
+        debug=args.debug,
+        cf_clearance=args.cf_clearance,
     )
 
     t0 = time.monotonic()
     crawler.run()
     elapsed = time.monotonic() - t0
-    log.info("⏱️  Total elapsed time: %.1f s", elapsed)
+    log.info("Total elapsed time: %.1f s", elapsed)
 
 
 if __name__ == "__main__":

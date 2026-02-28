@@ -67,6 +67,11 @@ on:
         required: false
         default: "all"
         type: string
+      debug:
+        description: "Enable debug mode: verbose logging and upload HTTP response headers (.headers files) to the repo"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -86,7 +91,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install curl_cffi playwright
+          playwright install --with-deps chromium
 
       - name: Generate normalized repo name
         id: reponame
@@ -251,6 +259,9 @@ jobs:
           if [ "${{ inputs.force }}" = "true" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --force"
           fi
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --debug"
+          fi
 
           # Upload-extension filtering: pass to crawler for periodic git push
           if [ "${{ inputs.upload_extensions }}" != "all" ] && [ -n "${{ inputs.upload_extensions }}" ]; then
@@ -306,8 +317,8 @@ jobs:
 
           UPLOAD_EXTS="${{ inputs.upload_extensions }}"
           if [ "$UPLOAD_EXTS" != "all" ] && [ -n "$UPLOAD_EXTS" ]; then
+            echo "Filtering upload to extensions: $UPLOAD_EXTS"
             # Build a single find command with -o clauses for all extensions
-            echo "📤 Filtering upload to extensions: $UPLOAD_EXTS"
             IFS=',' read -ra EXT_ARRAY <<< "$UPLOAD_EXTS"
             FIND_ARGS=()
             for ext in "${EXT_ARRAY[@]}"; do
@@ -316,11 +327,19 @@ jobs:
               if [ ${#FIND_ARGS[@]} -gt 0 ]; then
                 FIND_ARGS+=("-o")
               fi
-              FIND_ARGS+=("-iname" "*.${ext}" "-o" "-iname" "*.${ext}.headers")
+              FIND_ARGS+=("-iname" "*.${ext}")
+              if [ "${{ inputs.debug }}" = "true" ]; then
+                FIND_ARGS+=("-o" "-iname" "*.${ext}.headers")
+              fi
             done
             find . -not -path './.git/*' \( "${FIND_ARGS[@]}" \) -exec git add {} + 2>/dev/null || true
           else
-            git add -A
+            if [ "${{ inputs.debug }}" = "true" ]; then
+              git add -A
+            else
+              # Exclude .headers files when debug is off
+              find . -not -path './.git/*' -not -name '*.headers' -type f -exec git add {} + 2>/dev/null || true
+            fi
           fi
 
           git diff --cached --quiet || git commit -m "Crawl complete: ${{ inputs.url }}"
@@ -356,6 +375,7 @@ jobs:
             - **Download extensions**: ${{ inputs.download_extensions }}
             - **Upload extensions**: ${{ inputs.upload_extensions }}
             - **Concurrency**: ${{ inputs.concurrency }} workers
+            - **Debug mode**: ${{ inputs.debug }}
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
           files: "crawl-${{ steps.reponame.outputs.name }}.zip"

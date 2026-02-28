@@ -663,20 +663,87 @@ class TestLogging(unittest.TestCase):
             args=(), exc_info=None,
         )
         output = formatter.format(record)
-        style, icon = _CATEGORY_STYLES["[PROTECTION]"]
-        self.assertIn(f"{style}{icon}[PROTECTION]{_ANSI_RESET}", output)
+        style = _CATEGORY_STYLES["[PROTECTION]"]
+        self.assertIn(f"{style}[PROTECTION]{_ANSI_RESET}", output)
 
     def test_category_formatter_no_tag(self):
-        """Messages without known tags get level icon prepended."""
-        from web_crawler.utils.log import _CategoryFormatter, _LEVEL_ICONS
+        """Messages without known tags pass through unchanged."""
+        from web_crawler.utils.log import _CategoryFormatter
         formatter = _CategoryFormatter("%(message)s")
         record = logging.LogRecord(
             name="test", level=logging.INFO, pathname="", lineno=0,
             msg="simple message", args=(), exc_info=None,
         )
         output = formatter.format(record)
-        icon = _LEVEL_ICONS[logging.INFO]
-        self.assertEqual(output, f"{icon} simple message")
+        self.assertEqual(output, "simple message")
+
+    def test_ci_formatter_warning(self):
+        """_CIFormatter prepends ::warning:: for WARNING level."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.WARNING, pathname="", lineno=0,
+            msg="something went wrong", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertTrue(output.startswith("::warning::"))
+        self.assertIn("something went wrong", output)
+
+    def test_ci_formatter_error(self):
+        """_CIFormatter prepends ::error:: for ERROR level."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.ERROR, pathname="", lineno=0,
+            msg="fatal failure", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertTrue(output.startswith("::error::"))
+        self.assertIn("fatal failure", output)
+
+    def test_ci_formatter_info_no_prefix(self):
+        """_CIFormatter does NOT prepend a workflow command for INFO."""
+        from web_crawler.utils.log import _CIFormatter
+        formatter = _CIFormatter("%(message)s")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="normal info", args=(), exc_info=None,
+        )
+        output = formatter.format(record)
+        self.assertFalse(output.startswith("::"))
+        self.assertEqual(output, "normal info")
+
+    def test_ci_group_helpers_noop_outside_ci(self):
+        """ci_group / ci_endgroup are no-ops when GITHUB_ACTIONS is unset."""
+        import sys, io, contextlib
+        log_mod = sys.modules["web_crawler.utils.log"]
+        old = log_mod._CI
+        try:
+            log_mod._CI = False
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                log_mod.ci_group("Test group")
+                log_mod.ci_endgroup()
+            self.assertEqual(buf.getvalue(), "")
+        finally:
+            log_mod._CI = old
+
+    def test_ci_group_helpers_emit_in_ci(self):
+        """ci_group / ci_endgroup emit workflow commands when _CI is True."""
+        import sys, io, contextlib
+        log_mod = sys.modules["web_crawler.utils.log"]
+        old = log_mod._CI
+        try:
+            log_mod._CI = True
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                log_mod.ci_group("Test group")
+                log_mod.ci_endgroup()
+            output = buf.getvalue()
+            self.assertIn("::group::Test group", output)
+            self.assertIn("::endgroup::", output)
+        finally:
+            log_mod._CI = old
 
 
 # ------------------------------------------------------------------ #
@@ -1136,6 +1203,82 @@ class TestUploadExtensions(unittest.TestCase):
         calls = mock_run.call_args_list
         cmds = [c[0][0] for c in calls]
         self.assertTrue(any(c == ["git", "add", "-A"] for c in cmds))
+
+
+class TestCloudflareDetection(unittest.TestCase):
+    """Test Cloudflare Managed Challenge detection."""
+
+    def test_cf_challenge_detected_by_header(self):
+        """is_cf_managed_challenge returns True when cf-mitigated: challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {"cf-mitigated": "challenge"}
+        resp.status_code = 403
+        resp.text = ""
+        self.assertTrue(is_cf_managed_challenge(resp))
+
+    def test_cf_challenge_detected_by_body(self):
+        """is_cf_managed_challenge returns True on 403 + 'Just a moment' + _cf_chl_opt."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = '<title>Just a moment...</title><script>window._cf_chl_opt = {}</script>'
+        self.assertTrue(is_cf_managed_challenge(resp))
+
+    def test_cf_normal_403_not_detected(self):
+        """Regular 403 without CF markers is not a challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 403
+        resp.text = '<h1>403 Forbidden</h1>'
+        self.assertFalse(is_cf_managed_challenge(resp))
+
+    def test_cf_200_not_detected(self):
+        """Normal 200 response is not a challenge."""
+        from web_crawler.session import is_cf_managed_challenge
+        resp = MagicMock()
+        resp.headers = {}
+        resp.status_code = 200
+        resp.text = '<html><body>Hello</body></html>'
+        self.assertFalse(is_cf_managed_challenge(resp))
+
+    def test_inject_cf_clearance(self):
+        """inject_cf_clearance sets the cookie on the session."""
+        from web_crawler.session import inject_cf_clearance
+        session = MagicMock()
+        inject_cf_clearance(session, "example.com", "test_cookie_value")
+        session.cookies.set.assert_called_once_with(
+            "cf_clearance", "test_cookie_value",
+            domain="example.com", path="/",
+        )
+
+    def test_crawler_cf_clearance_injected(self):
+        """Crawler injects cf_clearance cookie when provided."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                cf_clearance="my_cf_token",
+            )
+        cf_cookies = [c for c in crawler.session.cookies
+                      if c.name == "cf_clearance"]
+        self.assertEqual(len(cf_cookies), 1)
+        self.assertEqual(cf_cookies[0].value, "my_cf_token")
+
+    def test_crawler_no_cf_clearance_by_default(self):
+        """Crawler does not inject cf_clearance when not provided."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+            )
+        cf_cookies = [c for c in crawler.session.cookies
+                      if c.name == "cf_clearance"]
+        self.assertEqual(len(cf_cookies), 0)
 
 
 if __name__ == "__main__":
