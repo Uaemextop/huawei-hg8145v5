@@ -154,17 +154,19 @@ class Crawler:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        log.info("Output directory : %s", self.output_dir.resolve())
-        log.info("Target URL       : %s", self.start_url)
-        log.info("Allowed host     : %s", self.allowed_host)
-        log.info("Page limit       : NONE (exhaustive)")
+        log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        log.info("🌐 Output directory : %s", self.output_dir.resolve())
+        log.info("🎯 Target URL       : %s", self.start_url)
+        log.info("🏠 Allowed host     : %s", self.allowed_host)
+        log.info("📊 Page limit       : NONE (exhaustive)")
         if self.max_depth:
-            log.info("Max depth        : %d", self.max_depth)
+            log.info("📏 Max depth        : %d", self.max_depth)
         if self.download_extensions:
-            log.info("Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
-        log.info("Concurrency      : %d workers", self.concurrency)
+            log.info("📥 Seek extensions  : %s", ", ".join(sorted(self.download_extensions)))
+        log.info("⚡ Concurrency      : %d workers", self.concurrency)
         if self.upload_extensions:
-            log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
+            log.info("📤 Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
+        log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -182,12 +184,12 @@ class Crawler:
         if not self.force:
             n = self._resume_from_disk()
             if n:
-                log.info("Resume: %d existing file(s) loaded from disk.", n)
+                log.info("♻️  Resume: %d existing file(s) loaded from disk.", n)
 
         # Seed the queue
         self._enqueue(self.start_url, 0)
 
-        log.info("Crawl started. Dynamic discovery begins.")
+        log.info("🚀 Crawl started. Dynamic discovery begins.")
 
         if self.concurrency > 1:
             self._run_concurrent()
@@ -198,27 +200,51 @@ class Crawler:
                 url, depth = self._queue.popleft()
                 self._fetch_and_process(url, depth)
 
-        log.info(
-            "Crawl complete. visited=%d  ok=%d  skip=%d  dup=%d  "
-            "soft404=%d  waf=%d  retry_ok=%d  err=%d",
-            len(self._visited),
-            self._stats["ok"],
-            self._stats["skip"],
-            self._stats["dup"],
-            self._stats["soft404"],
-            self._stats["waf"],
-            self._stats["retry_ok"],
-            self._stats["err"],
-        )
-        log.info("Files saved in: %s", self.output_dir.resolve())
+        self._log_final_stats()
+
+    def _log_final_stats(self) -> None:
+        """Print a summary table with final crawl statistics."""
+        s = self._stats
+        total = s["ok"] + s["skip"] + s["dup"] + s["err"] + s["soft404"] + s["waf"]
+        pct_ok = (s["ok"] / total * 100) if total else 0
+        pct_err = (s["err"] / total * 100) if total else 0
+        log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        log.info("🏁 Crawl complete!")
+        log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        log.info("📊 Visited     : %d URLs", len(self._visited))
+        log.info("💾 Saved (OK)  : %d  (%.1f%%)", s["ok"], pct_ok)
+        log.info("⏭️  Skipped     : %d", s["skip"])
+        log.info("♻️  Duplicates  : %d", s["dup"])
+        log.info("👻 Soft-404    : %d", s["soft404"])
+        log.info("🚫 WAF blocked : %d", s["waf"])
+        log.info("🔄 Retry OK    : %d", s["retry_ok"])
+        log.info("❌ Errors      : %d  (%.1f%%)", s["err"], pct_err)
+        log.info("🔐 Captcha     : %d solves", self._sg_captcha_solves)
+        log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        log.info("📂 Files saved in: %s", self.output_dir.resolve())
+
+    def _stats_postfix(self) -> dict[str, object]:
+        """Return a dict suitable for tqdm ``set_postfix``."""
+        return {
+            "Q": len(self._queue),
+            "✓": self._stats["ok"],
+            "✗": self._stats["err"],
+            "⏭": self._stats["skip"],
+            "♻": self._stats["dup"],
+            "👻": self._stats["soft404"],
+            "🔐": self._sg_captcha_solves,
+        }
 
     def _run_with_progress(self) -> None:
         """BFS loop with a tqdm progress bar."""
         bar = _tqdm(
-            desc="Crawling",
+            desc="🌐 Crawling",
             unit="URL",
             dynamic_ncols=True,
-            bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}] {postfix}",
+            bar_format=(
+                "{l_bar}{bar}| {n_fmt}/{total_fmt} "
+                "[{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+            ),
         )
         total_seen = len(self._queue) + len(self._visited)
         bar.total = total_seen
@@ -232,17 +258,28 @@ class Crawler:
                 bar.total += new_items
                 total_seen += new_items
             bar.update(1)
-            bar.set_postfix(
-                queued=len(self._queue),
-                ok=self._stats["ok"],
-                err=self._stats["err"],
-            )
+            bar.set_postfix(self._stats_postfix())
 
         bar.close()
 
     def _run_concurrent(self) -> None:
-        """BFS loop with a ThreadPoolExecutor for parallel fetching."""
-        log.info("Concurrent mode: %d workers", self.concurrency)
+        """BFS loop with a ThreadPoolExecutor and live progress bar."""
+        log.info("⚡ Concurrent mode: %d workers", self.concurrency)
+        use_bar = _TQDM_AVAILABLE
+
+        bar = None
+        if use_bar:
+            bar = _tqdm(
+                desc="🌐 Crawling",
+                unit="URL",
+                dynamic_ncols=True,
+                bar_format=(
+                    "{l_bar}{bar}| {n_fmt}/{total_fmt} "
+                    "[{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+                ),
+                total=len(self._queue) + len(self._visited),
+            )
+
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             while self._queue:
                 # Drain up to `concurrency` items from the queue
@@ -262,6 +299,17 @@ class Crawler:
                     except Exception as exc:
                         log.warning("Worker error for %s: %s",
                                     futures[fut], exc)
+                    if bar is not None:
+                        # Update progress after each completed future
+                        with self._lock:
+                            new_total = len(self._queue) + len(self._visited)
+                        if new_total > (bar.total or 0):
+                            bar.total = new_total
+                        bar.update(1)
+                        bar.set_postfix(self._stats_postfix())
+
+        if bar is not None:
+            bar.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -274,7 +322,7 @@ class Crawler:
         self._robots.set_url(robots_url)
         try:
             self._robots.read()
-            log.info("Loaded robots.txt from %s", robots_url)
+            log.info("🤖 Loaded robots.txt from %s", robots_url)
         except Exception as exc:
             log.debug("Could not load robots.txt: %s", exc)
             self._robots = None
@@ -291,14 +339,15 @@ class Crawler:
     def _try_sg_captcha_bypass(self) -> None:
         """If the target uses SiteGround CAPTCHA, solve the PoW
         challenge once so the session cookie is set."""
+        log.info("🔐 Checking for SiteGround CAPTCHA …")
         solved = solve_sg_captcha(self.session, self.base, "/")
         if solved:
             # The server's meta-refresh suggests a 1-second wait
             # before the cookie is fully active.
             time.sleep(1)
-            log.info("SiteGround CAPTCHA solved – session cookie set")
+            log.info("[SG-CAPTCHA] Solved – session cookie set ✓")
         else:
-            log.debug("No SiteGround CAPTCHA detected (or not solvable)")
+            log.info("🔐 No SiteGround CAPTCHA detected (or not solvable)")
 
     # ------------------------------------------------------------------
     # Soft-404 detection
@@ -326,8 +375,7 @@ class Crawler:
         body = resp.content
         self._soft404_size = len(body)
         self._soft404_hash = content_hash(body)
-        log.info(
-            "Soft-404 baseline: %d bytes, hash=%s (server returns 200 for missing pages)",
+        log.info("🔍 Soft-404 baseline: %d bytes, hash=%s (server returns 200 for missing pages)",
             self._soft404_size, self._soft404_hash,
         )
 
@@ -427,7 +475,7 @@ class Crawler:
             self._enqueue(wp_url, 0)
         total = (len(WP_DISCOVERY_PATHS) + len(WP_PLUGIN_PROBES)
                  + len(WP_THEME_PROBES) + 10)
-        log.info("WordPress detected – enqueued %d discovery URLs", total)
+        log.info("📦 WordPress detected – enqueued %d discovery URLs", total)
 
         # Discover media file URLs (images, ZIPs) via REST API
         self._discover_wp_media()
@@ -843,7 +891,8 @@ class Crawler:
                 log.debug("  +%d new URLs from cached %s", added, local.name)
             return
 
-        log.info("[%d queued] GET %s", len(self._queue), url)
+        log.info("[📋 %d queued | 💾 %d ok | ❌ %d err] GET %s",
+                 len(self._queue), self._stats["ok"], self._stats["err"], url)
 
         # Rotate User-Agent per request
         self.session.headers["User-Agent"] = random.choice(USER_AGENTS)

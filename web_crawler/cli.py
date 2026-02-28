@@ -127,9 +127,9 @@ def main() -> None:
         log.warning("TLS certificate verification is DISABLED (--no-verify-ssl)")
 
     if not _TQDM_AVAILABLE:
-        log.info("Tip: install tqdm for a live progress bar  (pip install tqdm)")
+        log.info("💡 Tip: install tqdm for a live progress bar  (pip install tqdm)")
     if not _COLORLOG_AVAILABLE:
-        log.info("Tip: install colorlog for colored output   (pip install colorlog)")
+        log.info("💡 Tip: install colorlog for colored output   (pip install colorlog)")
 
     # Normalise the target URL
     target_url = args.url
@@ -197,7 +197,7 @@ def main() -> None:
     t0 = time.monotonic()
     crawler.run()
     elapsed = time.monotonic() - t0
-    log.info("Total elapsed time: %.1f s", elapsed)
+    log.info("⏱️  Total elapsed time: %.1f s", elapsed)
 
 
 if __name__ == "__main__":
