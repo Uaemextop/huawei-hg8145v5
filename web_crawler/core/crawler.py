@@ -88,6 +88,7 @@ class Crawler:
         force: bool = False,
         git_push_every: int = 0,
         skip_captcha_check: bool = False,
+        download_extensions: list[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -99,6 +100,7 @@ class Crawler:
         self.force = force
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
+        self.download_extensions = download_extensions or []
         self.session = build_session(verify_ssl=verify_ssl)
 
         self._visited: set[str] = set()
@@ -140,6 +142,8 @@ class Crawler:
         log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
             log.info("Max depth        : %d", self.max_depth)
+        if self.download_extensions:
+            log.info("Download exts    : %s", ", ".join(self.download_extensions))
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -735,6 +739,61 @@ class Crawler:
 
         log.debug("Probed %d hidden files at %s", len(HIDDEN_FILE_PROBES), dir_path)
 
+    def _probe_download_extensions(self, url: str, depth: int) -> None:
+        """Actively probe for files with specified download extensions in each directory."""
+        if self._probing_disabled or not self.download_extensions:
+            return
+
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path
+
+        # Derive directory: strip filename if path doesn't end with /
+        if path.endswith("/"):
+            dir_path = path
+            # For directory URLs, try common firmware/archive filenames
+            base_names = [
+                "firmware", "update", "upgrade", "download", "file",
+                "backup", "archive", "data", "export", "package",
+                "latest", "release", "version", "build", "dist",
+                # Common product/model patterns
+                "HG8145V5", "HG8245", "HG8247", "router", "modem",
+                "ont", "onu", "device", "product",
+            ]
+        else:
+            dir_path = path.rsplit("/", 1)[0] + "/"
+            # Extract filename without extension to use as base for probing
+            filename = path.rsplit("/", 1)[-1]
+            name_without_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+            # If we found a file, probe for alternative extensions with same base name
+            base_names = [name_without_ext] if name_without_ext else []
+
+            # Also try common variations
+            if name_without_ext and len(name_without_ext) > 3:
+                # Add version variations (e.g., firmware-v1, firmware-v2)
+                for suffix in ["", "-v1", "-v2", "-latest", "-new", "-old"]:
+                    variant = name_without_ext + suffix
+                    if variant not in base_names:
+                        base_names.append(variant)
+
+        if not dir_path:
+            dir_path = "/"
+
+        # Generate probe URLs for each extension
+        probed_count = 0
+        for ext in self.download_extensions:
+            for base_name in base_names:
+                probe_url = self.base + dir_path + base_name + ext
+                probe_key = url_key(probe_url)
+                if probe_key not in self._probe_urls and probe_key not in self._visited:
+                    self._probe_urls.add(probe_key)
+                    self._enqueue(probe_url, depth + 1)
+                    probed_count += 1
+
+        if probed_count > 0:
+            log.debug("Probed %d download extension combinations at %s",
+                     probed_count, dir_path)
+
     def _fetch_and_process(self, url: str, depth: int) -> None:
         key = url_key(url)
         if key in self._visited:
@@ -743,6 +802,9 @@ class Crawler:
 
         # Probe hidden/config files at each new directory
         self._probe_hidden_files(url, depth)
+
+        # Probe for download extensions at each new directory
+        self._probe_download_extensions(url, depth)
 
         # Blocked patterns
         parsed_url = urllib.parse.urlparse(url)
@@ -1001,13 +1063,21 @@ class Crawler:
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
             added = 0
+            priority_added = 0
             for link in new_links:
                 k = url_key(link)
                 if k not in self._visited:
-                    self._enqueue(link, depth + 1, priority=True)
+                    # Prioritize binary/archive files for faster discovery
+                    is_priority = any(link.lower().endswith(ext) for ext in self.download_extensions) if self.download_extensions else False
+                    self._enqueue(link, depth + 1, priority=is_priority)
                     added += 1
+                    if is_priority:
+                        priority_added += 1
             if added:
-                log.debug("  +%d new URLs enqueued", added)
+                if priority_added > 0:
+                    log.debug("  +%d new URLs enqueued (%d priority)", added, priority_added)
+                else:
+                    log.debug("  +%d new URLs enqueued", added)
 
         time.sleep(self.delay)
 

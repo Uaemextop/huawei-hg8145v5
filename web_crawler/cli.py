@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
         help="Disable WAF/CAPTCHA protection detection – save pages even if "
              "captcha or WAF signatures are found",
     )
+    parser.add_argument(
+        "--download-extensions", type=str, default="",
+        help="Extra file extensions to actively seek (comma-separated, e.g. rar,bin,7z,tar,gz,exe,bat,cmd,ps1,sh,zip)",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +120,13 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Parse download extensions
+    download_exts = []
+    if args.download_extensions:
+        download_exts = [ext.strip().lower() for ext in args.download_extensions.split(",") if ext.strip()]
+        # Ensure extensions start with a dot
+        download_exts = [ext if ext.startswith(".") else f".{ext}" for ext in download_exts]
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -126,6 +137,7 @@ def main() -> None:
         force=args.force,
         git_push_every=args.git_push_every,
         skip_captcha_check=args.skip_captcha_check,
+        download_extensions=download_exts,
     )
 
     t0 = time.monotonic()
