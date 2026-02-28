@@ -868,6 +868,34 @@ class TestProbe403Threshold(unittest.TestCase):
         crawler._probe_hidden_files("https://example.com/a/other.html", 0)
         self.assertEqual(len(crawler._queue), q1)
 
+    def test_probe_404_threshold_disables_probing(self):
+        """After PROBE_404_THRESHOLD consecutive 404s, probing is disabled."""
+        from web_crawler.config import PROBE_404_THRESHOLD
+        crawler = self._make_crawler()
+        crawler._probe_404_count = PROBE_404_THRESHOLD
+        crawler._probing_disabled = True
+        prev_queue = len(crawler._queue)
+        crawler._probe_hidden_files("https://example.com/new-dir/", 0)
+        self.assertEqual(len(crawler._queue), prev_queue)
+
+    def test_probe_404_not_disabled_below_threshold(self):
+        """Below 404 threshold, probing still works."""
+        from web_crawler.config import PROBE_404_THRESHOLD
+        crawler = self._make_crawler()
+        crawler._probe_404_count = PROBE_404_THRESHOLD - 1
+        crawler._probe_hidden_files("https://example.com/dir/", 0)
+        self.assertGreater(len(crawler._queue), 0)
+
+    def test_probe_404_counter_initialized(self):
+        """Crawler initializes _probe_404_count to 0."""
+        crawler = self._make_crawler()
+        self.assertEqual(crawler._probe_404_count, 0)
+
+    def test_probe_404_threshold_config_exists(self):
+        """PROBE_404_THRESHOLD is defined and positive."""
+        from web_crawler.config import PROBE_404_THRESHOLD
+        self.assertGreater(PROBE_404_THRESHOLD, 0)
+
 
 # ------------------------------------------------------------------ #
 # WAF signatures include SiteGround
