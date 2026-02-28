@@ -1,0 +1,28 @@
+root:x:0:0:root:/root:/bin/sh
+osgi:x:1000:1000:OSGi User,,,:/var/osgi:/bin/sh
+web:x:1001:1001:Cfg User,,,:/var/web:/bin/false
+cli:x:1002:1001:Cfg User,,,:/var/cli:/bin/false
+srv_usb:x:3001:2002:hw_srv_usb:/var/srv_usb:/bin/sh
+srv_samba:x:3002:2002:hw_srv_samba:/var/srv_samba:/bin/sh
+srv_amp:x:3003:2002:hw_srv_amp:/var/srv_amp:/bin/sh
+srv_web:x:3004:2002:hw_srv_web:/var/srv_web:/bin/sh
+osgi_proxy:x:3005:2000:hw_osgi_proxy:/var/osgi_proxy:/bin/sh
+srv_igmp:x:3006:2002:hw_srv_igmp:/var/srv_igmp:/bin/sh
+cfg_cwmp:x:3007:2001:hw_cfg_cwmp:/var/cfg_cwmp:/bin/sh
+srv_ssmp:x:3008:2002:hw_srv_ssmp:/var/srv_ssmp:/bin/sh
+cfg_omci:x:3009:2001:hw_cfg_omci:/var/cfg_omci:/bin/sh
+cfg_cli:x:3010:2001:hw_cfg_cli:/var/cfg_cli:/bin/sh
+cfg_oam:x:3011:2001:hw_cfg_oam:/var/cfg_oam:/bin/sh
+srv_bbsp:x:3012:2002:hw_srv_bbsp:/var/srv_bbsp:/bin/sh
+srv_ethoam:x:3013:2002:hw_srv_ethoam:/var/srv_ethoam:/bin/sh
+srv_dbus:x:3014:2002:hw_srv_dbus:/var/srv_dbus:/bin/sh
+srv_wifi:x:3015:2002:hw_srv_wifi:/var/srv_wifi:/bin/sh
+tool_mu:x:3016:2003:hw_tool_mu:/var/tool_mu:/bin/sh
+srv_snmp:x:3017:2002:hw_srv_snmp:/var/srv_snmp:/bin/sh
+srv_apm:x:3018:2002:hw_srv_apm:/var/srv_apm:/bin/sh
+tool_iac:x:3019:2003:hw_tool_iac:/var/tool_iac:/bin/sh
+nobody:x:65534:65534::/tmp:/bin/false
+srv_ldsp:x:4001:2002:srv_ldsp:/var/service:/bin/sh
+srv_voice:x:4002:2002:srv_voice:/var/service:/bin/sh
+srv_appm:x:4003:2002:srv_appm:/var/service:/bin/sh
+srv_user:x:4004:2002:srv_user:/var/srv_user:/bin/sh
