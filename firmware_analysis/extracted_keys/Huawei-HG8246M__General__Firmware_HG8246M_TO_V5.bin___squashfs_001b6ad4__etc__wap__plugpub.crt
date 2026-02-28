@@ -1,0 +1,73 @@
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 1 (0x1)
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: CN=HuaWei ONT CA, ST=Guangdong, C=CN/emailAddress=support@huawei.com, O=Root CA of HuaWei ONT
+        Validity
+            Not Before: Apr  8 07:08:24 2016 GMT
+            Not After : Apr  3 07:08:24 2036 GMT
+        Subject: CN=ont.huawei.com, ST=HuBei, C=CN/emailAddress=support@huawei.com, O=HuaWei, OU=ONT
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+            RSA Public Key: (2048 bit)
+                Modulus (2048 bit):
+                    00:9c:34:a4:7b:ad:ba:a1:45:be:8e:a5:97:f5:ce:
+                    d2:ee:9c:d1:c8:3d:25:43:98:c9:0b:66:56:bf:9f:
+                    26:ff:53:50:89:e0:25:08:ea:e9:d0:a3:4c:86:1f:
+                    2b:38:72:a8:5f:e3:d2:41:50:ff:0b:ec:2e:57:bb:
+                    5b:4a:f7:51:e0:02:87:38:4f:ab:49:69:f9:83:86:
+                    3d:74:99:27:2c:4a:e8:55:dd:6e:1b:d7:56:5a:23:
+                    26:35:ec:66:64:a6:e6:c5:db:da:48:81:73:fd:c5:
+                    c4:3f:db:32:13:63:2b:a8:80:e4:6e:95:17:06:3b:
+                    a8:07:90:ed:4c:2a:5b:d8:5a:cd:88:60:10:45:1e:
+                    34:f7:c3:c2:43:ce:5b:a4:62:be:00:8f:b5:c5:cc:
+                    9f:70:a8:c1:c2:58:dd:f9:7b:7a:87:94:ac:de:72:
+                    76:a7:48:8b:e0:33:83:66:71:1a:ed:ca:8d:d3:b7:
+                    7c:6d:e6:de:14:97:30:12:79:f4:03:27:82:c1:7b:
+                    7d:44:46:47:2c:d0:a8:14:c3:6b:10:2e:c5:89:5b:
+                    8a:80:3f:c5:94:72:c9:58:55:08:4c:69:dd:9c:b5:
+                    8b:49:1a:84:3d:16:f1:df:00:79:43:09:f3:c0:c0:
+                    40:c8:ab:1d:aa:7c:2a:ad:ae:e5:bb:e3:66:40:1f:
+                    70:ad
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Basic Constraints: 
+                CA:FALSE
+    Signature Algorithm: sha256WithRSAEncryption
+        7c:f4:18:41:ac:9c:77:22:10:33:96:66:3f:de:3e:21:37:c1:
+        e1:3a:0f:96:24:1c:ab:b9:e5:f7:51:f5:b9:cd:47:ae:20:9c:
+        69:95:30:0f:04:ef:0a:ea:4f:df:8f:88:6b:3b:a0:22:7b:4d:
+        94:53:64:83:10:50:3b:be:cc:f7:55:86:3c:d0:65:ba:d8:ad:
+        5d:c9:85:e4:b9:73:a3:67:75:cc:2d:b0:29:55:86:22:16:74:
+        dd:26:de:ae:e9:4b:2b:80:3a:75:f7:cb:b3:cc:c8:bd:46:fd:
+        d7:aa:10:84:b0:93:76:71:26:3f:d7:a2:f6:8c:0e:91:0a:78:
+        91:c2:a0:d0:ef:11:bd:94:53:02:f7:17:65:c4:db:46:5f:7d:
+        33:3b:7b:b5:8b:63:0a:f5:22:41:b0:ce:fb:59:cd:69:2a:85:
+        d7:9a:a4:52:8a:9e:75:96:e3:11:7c:3a:46:6b:8a:96:0d:3c:
+        a4:df:28:32:d0:c0:fe:d8:96:90:6b:96:36:bf:b2:df:5c:d0:
+        37:ea:6c:97:af:31:c2:db:ff:5f:3b:5e:91:4d:4a:99:eb:fb:
+        1f:a0:6c:80:77:b4:0f:05:b8:dd:f6:3d:d2:c1:c7:b2:3a:01:
+        9f:63:3a:21:89:c0:03:a1:f5:7d:f9:80:0b:09:44:e9:36:96:
+        f8:c6:6d:1c
+-----BEGIN CERTIFICATE-----
+MIIDfDCCAmSgAwIBAgIBATANBgkqhkiG9w0BAQsFADB8MRYwFAYDVQQDEw1IdWFX
+ZWkgT05UIENBMRIwEAYDVQQIEwlHdWFuZ2RvbmcxCzAJBgNVBAYTAkNOMSEwHwYJ
+KoZIhvcNAQkBFhJzdXBwb3J0QGh1YXdlaS5jb20xHjAcBgNVBAoTFVJvb3QgQ0Eg
+b2YgSHVhV2VpIE9OVDAeFw0xNjA0MDgwNzA4MjRaFw0zNjA0MDMwNzA4MjRaMHgx
+FzAVBgNVBAMTDm9udC5odWF3ZWkuY29tMQ4wDAYDVQQIEwVIdUJlaTELMAkGA1UE
+BhMCQ04xITAfBgkqhkiG9w0BCQEWEnN1cHBvcnRAaHVhd2VpLmNvbTEPMA0GA1UE
+ChMGSHVhV2VpMQwwCgYDVQQLEwNPTlQwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
+ggEKAoIBAQCcNKR7rbqhRb6OpZf1ztLunNHIPSVDmMkLZla/nyb/U1CJ4CUI6unQ
+o0yGHys4cqhf49JBUP8L7C5Xu1tK91HgAoc4T6tJafmDhj10mScsSuhV3W4b11Za
+IyY17GZkpubF29pIgXP9xcQ/2zITYyuogORulRcGO6gHkO1MKlvYWs2IYBBFHjT3
+w8JDzlukYr4Aj7XFzJ9wqMHCWN35e3qHlKzecnanSIvgM4NmcRrtyo3Tt3xt5t4U
+lzASefQDJ4LBe31ERkcs0KgUw2sQLsWJW4qAP8WUcslYVQhMad2ctYtJGoQ9FvHf
+AHlDCfPAwEDIqx2qfCqtruW742ZAH3CtAgMBAAGjDTALMAkGA1UdEwQCMAAwDQYJ
+KoZIhvcNAQELBQADggEBAHz0GEGsnHciEDOWZj/ePiE3weE6D5YkHKu55fdR9bnN
+R64gnGmVMA8E7wrqT9+PiGs7oCJ7TZRTZIMQUDu+zPdVhjzQZbrYrV3JheS5c6Nn
+dcwtsClVhiIWdN0m3q7pSyuAOnX3y7PMyL1G/deqEISwk3ZxJj/XovaMDpEKeJHC
+oNDvEb2UUwL3F2XE20ZffTM7e7WLYwr1IkGwzvtZzWkqhdeapFKKnnWW4xF8OkZr
+ipYNPKTfKDLQwP7YlpBrlja/st9c0DfqbJevMcLb/187XpFNSpnr+x+gbIB3tA8F
+uN32PdLBx7I6AZ9jOiGJwAOh9X35gAsJROk2lvjGbRw=
+-----END CERTIFICATE-----
