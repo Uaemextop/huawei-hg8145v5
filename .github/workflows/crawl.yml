@@ -93,7 +93,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install curl_cffi
+          pip install curl_cffi playwright
+          playwright install --with-deps chromium
 
       - name: Generate normalized repo name
         id: reponame
@@ -316,6 +317,7 @@ jobs:
 
           UPLOAD_EXTS="${{ inputs.upload_extensions }}"
           if [ "$UPLOAD_EXTS" != "all" ] && [ -n "$UPLOAD_EXTS" ]; then
+            echo "Filtering upload to extensions: $UPLOAD_EXTS"
             # Build a single find command with -o clauses for all extensions
             IFS=',' read -ra EXT_ARRAY <<< "$UPLOAD_EXTS"
             FIND_ARGS=()
