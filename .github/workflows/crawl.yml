@@ -190,7 +190,7 @@ jobs:
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
           git checkout -b main
 
-          # Configure git for large binary files
+          # Allow pushing large binary firmware files (up to 500 MB)
           git config http.postBuffer 524288000
 
           # Initial commit so push works
@@ -259,7 +259,7 @@ jobs:
             echo "Total files: $(find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | wc -l)"
             echo ""
             echo "Files by extension:"
-            find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -20
+            find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | awk -F. '{if (NF>1) print $NF; else print "(no extension)"}' | sort | uniq -c | sort -rn | head -20
             echo ""
             echo "Binary/firmware files:"
             find downloaded_site -type f -not -path '*/\.git/*' \
