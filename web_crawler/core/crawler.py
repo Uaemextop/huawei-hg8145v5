@@ -577,7 +577,14 @@ class Crawler:
         ".pl":   "text/plain",
         ".sh":   "text/plain",
         ".bat":  "text/plain",
+        ".cmd":  "text/plain",
         ".ps1":  "text/plain",
+        ".exe":  "application/octet-stream",
+        ".bin":  "application/octet-stream",
+        ".rar":  "application/x-rar-compressed",
+        ".7z":   "application/x-7z-compressed",
+        ".tar":  "application/x-tar",
+        ".gz":   "application/gzip",
         ".lua":  "text/plain",
         ".go":   "text/plain",
         ".rs":   "text/plain",
@@ -992,11 +999,12 @@ class Crawler:
              ".env", ".cfg", ".conf", ".config", ".hst",
              ".ini", ".toml", ".yml", ".yaml",
              ".log", ".sql",
-             ".py", ".rb", ".pl", ".sh", ".bat", ".ps1",
+             ".py", ".rb", ".pl", ".sh", ".bat", ".cmd", ".ps1", ".exe",
              ".lua", ".go", ".rs", ".java", ".c", ".cpp", ".h",
              ".vue", ".svelte",
              ".htaccess", ".htpasswd",
-             ".gitignore", ".dockerignore", ".editorconfig")
+             ".gitignore", ".dockerignore", ".editorconfig",
+             ".bin", ".rar", ".7z", ".tar", ".gz")
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
