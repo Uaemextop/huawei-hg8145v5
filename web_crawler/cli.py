@@ -113,6 +113,12 @@ def parse_args() -> argparse.Namespace:
              "session. Use this to bypass Cloudflare Managed Challenges "
              "when Playwright is not available.",
     )
+    parser.add_argument(
+        "--no-external", dest="allow_external", action="store_false",
+        default=True,
+        help="Disable downloading media files from external CDN hosts "
+             "discovered in the crawled pages",
+    )
     return parser.parse_args()
 
 
@@ -200,6 +206,7 @@ def main() -> None:
         upload_extensions=upload_exts,
         debug=args.debug,
         cf_clearance=args.cf_clearance,
+        allow_external=args.allow_external,
     )
 
     t0 = time.monotonic()

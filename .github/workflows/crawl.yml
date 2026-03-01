@@ -77,6 +77,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_external_urls:
+        description: "Download media files (video/audio) from external CDN hosts discovered in the crawled pages"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -100,6 +105,7 @@ jobs:
           pip install -r requirements.txt
           pip install curl_cffi playwright
           playwright install --with-deps chromium
+          git lfs install
 
       - name: Generate normalized repo name
         id: reponame
@@ -207,6 +213,16 @@ jobs:
           mkdir -p downloaded_site
           cd downloaded_site
           git init
+          git lfs install --local
+          # Track video, audio and large binary files with Git LFS
+          git lfs track "*.mp4" "*.webm" "*.mkv" "*.avi" "*.mov" "*.flv" \
+                        "*.wmv" "*.m4v" "*.3gp" "*.3g2" "*.ts" "*.mpeg" \
+                        "*.mpg" "*.f4v" "*.asf" "*.vob" "*.m2ts" "*.mts" \
+                        "*.ogv" "*.m3u8" "*.mpd" \
+                        "*.mp3" "*.ogg" "*.wav" "*.flac" "*.aac" "*.m4a" "*.weba" \
+                        "*.zip" "*.rar" "*.7z" "*.tar" "*.gz" "*.bz2" "*.xz" \
+                        "*.bin" "*.exe" "*.img" "*.iso" "*.hwnp" "*.fwu" "*.pkg"
+          git add .gitattributes
           git config user.name "Web Crawler Bot"
           git config user.email "crawler@users.noreply.github.com"
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
@@ -266,6 +282,9 @@ jobs:
           fi
           if [ "${{ inputs.debug }}" = "true" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --debug"
+          fi
+          if [ "${{ inputs.allow_external_urls }}" = "false" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --no-external"
           fi
 
           # Upload-extension filtering: pass to crawler for periodic git push

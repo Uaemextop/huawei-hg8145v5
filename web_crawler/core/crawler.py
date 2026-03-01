@@ -115,6 +115,7 @@ class Crawler:
         upload_extensions: frozenset[str] | None = None,
         debug: bool = False,
         cf_clearance: str = "",
+        allow_external: bool = True,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -176,6 +177,7 @@ class Crawler:
         # (video/audio/source tags, Schema.org itemprop).  URLs on
         # these hosts are downloaded but NOT crawled for links.
         self._cdn_hosts: set[str] = set()
+        self._allow_external = allow_external
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -1023,7 +1025,11 @@ class Crawler:
                 if key in self._visited:
                     return
             if self.max_depth and depth > self.max_depth:
-                return
+                # CDN URLs bypass depth limits – they are terminal
+                # downloads (no link extraction) and would otherwise
+                # be unreachable when discovered at the depth boundary.
+                if not is_cdn:
+                    return
             # Auto-prioritize target extension files
             if not priority and self.download_extensions:
                 path_lower = parsed.path.lower()
@@ -1091,7 +1097,7 @@ class Crawler:
             )
             subprocess.run(
                 ["git", "push"],
-                cwd=cwd, check=True, capture_output=True, timeout=120,
+                cwd=cwd, check=True, capture_output=True, timeout=300,
             )
             log.info("[GIT] Push OK (%d files)", ok)
         except subprocess.CalledProcessError as exc:
@@ -1608,7 +1614,8 @@ class Crawler:
             for link in new_links:
                 # Register external hosts from media URLs as CDN hosts
                 link_parsed = urllib.parse.urlparse(link)
-                if (link_parsed.netloc
+                if (self._allow_external
+                        and link_parsed.netloc
                         and link_parsed.netloc != self.allowed_host):
                     with self._lock:
                         is_new_cdn = link_parsed.netloc not in self._cdn_hosts
