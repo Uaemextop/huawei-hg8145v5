@@ -214,15 +214,6 @@ jobs:
           cd downloaded_site
           git init
           git lfs install --local
-          # Track video, audio and large binary files with Git LFS
-          git lfs track "*.mp4" "*.webm" "*.mkv" "*.avi" "*.mov" "*.flv" \
-                        "*.wmv" "*.m4v" "*.3gp" "*.3g2" "*.ts" "*.mpeg" \
-                        "*.mpg" "*.f4v" "*.asf" "*.vob" "*.m2ts" "*.mts" \
-                        "*.ogv" "*.m3u8" "*.mpd" \
-                        "*.mp3" "*.ogg" "*.wav" "*.flac" "*.aac" "*.m4a" "*.weba" \
-                        "*.zip" "*.rar" "*.7z" "*.tar" "*.gz" "*.bz2" "*.xz" \
-                        "*.bin" "*.exe" "*.img" "*.iso" "*.hwnp" "*.fwu" "*.pkg"
-          git add .gitattributes
           git config user.name "Web Crawler Bot"
           git config user.email "crawler@users.noreply.github.com"
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
@@ -333,6 +324,19 @@ jobs:
         run: |
           cd downloaded_site
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+
+          # Track files > 50 MB with Git LFS automatically
+          LARGE_FILES=$(find . -not -path './.git/*' -type f -size +50M 2>/dev/null)
+          if [ -n "$LARGE_FILES" ]; then
+            echo "📦 Tracking large files (>50 MB) with Git LFS:"
+            echo "$LARGE_FILES" | while IFS= read -r f; do
+              SIZE_MB=$(du -m "$f" | cut -f1)
+              echo "  ${f} (${SIZE_MB} MB)"
+              # Track by exact path so only large files use LFS
+              git lfs track "$f"
+            done
+            git add .gitattributes
+          fi
 
           # Update README with completion status
           REPO_FULL="${{ steps.create_repo.outputs.repo_full }}"

@@ -1055,12 +1055,44 @@ class Crawler:
             encoding="utf-8",
         )
 
+    # Size threshold for automatic Git LFS tracking (50 MB)
+    _LFS_SIZE_THRESHOLD = 50 * 1024 * 1024
+
+    def _git_lfs_track_large_files(self, cwd: str) -> None:
+        """Find files > 50 MB and track them with Git LFS."""
+        out_dir = Path(cwd)
+        tracked_any = False
+        for f in out_dir.rglob("*"):
+            if not f.is_file() or ".git" in f.parts:
+                continue
+            try:
+                if f.stat().st_size > self._LFS_SIZE_THRESHOLD:
+                    rel = f.relative_to(out_dir)
+                    subprocess.run(
+                        ["git", "lfs", "track", str(rel)],
+                        cwd=cwd, capture_output=True, timeout=15,
+                    )
+                    log.debug("[GIT-LFS] Tracking %s (%.0f MB)",
+                              rel, f.stat().st_size / (1024 * 1024))
+                    tracked_any = True
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if tracked_any:
+            gitattr = out_dir / ".gitattributes"
+            if gitattr.exists():
+                subprocess.run(
+                    ["git", "add", ".gitattributes"],
+                    cwd=cwd, capture_output=True, timeout=15,
+                )
+
     def _maybe_git_push(self) -> None:
         """Commit and push progress every *git_push_every* saved files.
 
         When *upload_extensions* is set, only files matching those
         extensions (plus README.md) are staged.  When debug mode is
         active, ``.headers`` files are included too.
+
+        Files exceeding 50 MB are automatically tracked with Git LFS.
         """
         if self.git_push_every <= 0:
             return
@@ -1071,6 +1103,8 @@ class Crawler:
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
         try:
             cwd = str(self.output_dir.resolve())
+            # Track large files with Git LFS before staging
+            self._git_lfs_track_large_files(cwd)
             if self.upload_extensions:
                 # Stage only files matching the upload extensions
                 subprocess.run(
@@ -1670,13 +1704,10 @@ class Crawler:
         rel_path = parsed.path.lstrip("/")
         if not rel_path:
             rel_path = "index"
-        local_stream = smart_local_path(url, cdn_dir, content_type, content_disp)
-        # Override: use _cdn/<host>/... instead of default output_dir layout
         local_stream = cdn_dir / rel_path
         # Apply extension from Content-Type if file has no extension
         if not local_stream.suffix:
-            from web_crawler.core.storage import smart_local_path as _slp
-            hint = _slp(url, cdn_dir, content_type, content_disp)
+            hint = smart_local_path(url, cdn_dir, content_type, content_disp)
             if hint.suffix:
                 local_stream = local_stream.with_suffix(hint.suffix)
 
