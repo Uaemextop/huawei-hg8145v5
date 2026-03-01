@@ -230,6 +230,68 @@ class TestVideoExtraction(unittest.TestCase):
         self.assertIn("https://example.com/stream/manifest.mpd", result)
 
 
+class TestCdnMediaExtraction(unittest.TestCase):
+    """Test that external CDN media URLs are extracted from HTML."""
+
+    def test_video_src_external_cdn(self):
+        html = '<video src="https://cdn.example.net/videos/clip.mp4"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/videos/clip.mp4", result)
+
+    def test_source_src_external_cdn(self):
+        html = '<video><source src="https://cdn.example.net/v.webm"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/v.webm", result)
+
+    def test_audio_src_external_cdn(self):
+        html = '<audio src="https://cdn.example.net/a.mp3"></audio>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/a.mp3", result)
+
+    def test_schema_org_contenturl_external(self):
+        html = '<meta itemprop="contentURL" content="https://cdn.example.net/movie.mp4" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/movie.mp4", result)
+
+    def test_schema_org_embedurl_external(self):
+        html = '<meta itemprop="embedURL" content="https://cdn.example.net/embed/1" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/embed/1", result)
+
+    def test_non_media_external_rejected(self):
+        """Regular <a> tags to external hosts should still be rejected."""
+        html = '<a href="https://cdn.example.net/page.html">Link</a>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertNotIn("https://cdn.example.net/page.html", result)
+
+    def test_img_external_rejected(self):
+        """<img> tags to external hosts should still be rejected."""
+        html = '<img src="https://cdn.example.net/image.jpg">'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertNotIn("https://cdn.example.net/image.jpg", result)
+
+
+class TestNormaliseUrlAllowExternal(unittest.TestCase):
+    """Test allow_external parameter of normalise_url."""
+
+    def test_external_rejected_by_default(self):
+        from web_crawler.utils.url import normalise_url
+        result = normalise_url("https://cdn.example.net/v.mp4", PAGE, BASE)
+        self.assertIsNone(result)
+
+    def test_external_allowed_when_flag_set(self):
+        from web_crawler.utils.url import normalise_url
+        result = normalise_url("https://cdn.example.net/v.mp4", PAGE, BASE,
+                               allow_external=True)
+        self.assertEqual(result, "https://cdn.example.net/v.mp4")
+
+    def test_external_keeps_original_scheme(self):
+        from web_crawler.utils.url import normalise_url
+        result = normalise_url("http://cdn.example.net/v.mp4", PAGE, BASE,
+                               allow_external=True)
+        self.assertEqual(result, "http://cdn.example.net/v.mp4")
+
+
 class TestVideoContentTypeMappings(unittest.TestCase):
     """Test that video content types map to correct file extensions."""
 

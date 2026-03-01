@@ -7,7 +7,8 @@ import urllib.parse
 from pathlib import Path
 
 
-def normalise_url(raw: str, page_url: str, base: str) -> str | None:
+def normalise_url(raw: str, page_url: str, base: str,
+                  *, allow_external: bool = False) -> str | None:
     """
     Convert *raw* to an absolute URL on the same host.
 
@@ -19,6 +20,8 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     and TLS settings are applied consistently to every request.
 
     Returns ``None`` for external, ``data:``, ``javascript:``, ``mailto:`` URLs.
+    When *allow_external* is ``True``, external URLs are kept as-is
+    (scheme is NOT enforced for external hosts).
     """
     raw = raw.strip()
     if not raw or raw.startswith(("data:", "javascript:", "mailto:", "#")):
@@ -32,7 +35,8 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
 
     base_parsed = urllib.parse.urlparse(base)
     host = base_parsed.netloc
-    if parsed.netloc and parsed.netloc != host:
+    is_external = parsed.netloc and parsed.netloc != host
+    if is_external and not allow_external:
         return None
 
     qs = parsed.query
@@ -46,7 +50,11 @@ def normalise_url(raw: str, page_url: str, base: str) -> str | None:
     # protocol (e.g. always HTTPS when the site is HTTPS-only).
     # This prevents the SG-CAPTCHA session cookie, which is tied to
     # the HTTPS scheme, from being omitted on plain-HTTP requests.
-    scheme = base_parsed.scheme if base_parsed.scheme else parsed.scheme
+    # For external URLs, keep their original scheme.
+    if is_external:
+        scheme = parsed.scheme
+    else:
+        scheme = base_parsed.scheme if base_parsed.scheme else parsed.scheme
 
     canonical = urllib.parse.urlunparse(
         (scheme, parsed.netloc, parsed.path, "", qs, "")

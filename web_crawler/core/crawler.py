@@ -172,6 +172,11 @@ class Crawler:
         # Cloudflare bypass state
         self._cf_bypass_done: bool = False
 
+        # CDN hosts: external domains discovered from media elements
+        # (video/audio/source tags, Schema.org itemprop).  URLs on
+        # these hosts are downloaded but NOT crawled for links.
+        self._cdn_hosts: set[str] = set()
+
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._respect_robots = respect_robots
@@ -990,9 +995,10 @@ class Crawler:
         with self._lock:
             if key in self._visited:
                 return
-            # Only crawl URLs on the same host
+            # Only crawl URLs on the same host or allowed CDN hosts
             parsed = urllib.parse.urlparse(url)
-            if parsed.netloc != self.allowed_host:
+            is_cdn = parsed.netloc in self._cdn_hosts
+            if parsed.netloc != self.allowed_host and not is_cdn:
                 return
             # Reject glob/wildcard patterns (e.g. extracted from
             # <script type="speculationrules"> exclusion lists).
@@ -1139,6 +1145,15 @@ class Crawler:
             if key in self._visited:
                 return
             self._visited.add(key)
+
+        parsed_url = urllib.parse.urlparse(url)
+        is_cdn_url = parsed_url.netloc in self._cdn_hosts
+
+        # CDN URLs: download-only fast path (no probing, no robots, no
+        # link extraction).  Always streamed to disk.
+        if is_cdn_url:
+            self._fetch_cdn_media(url)
+            return
 
         # Early skip for probe URLs whose directory already exhausted
         is_probe_early = key in self._probe_urls
@@ -1591,12 +1606,111 @@ class Crawler:
                 )
             added = 0
             for link in new_links:
+                # Register external hosts from media URLs as CDN hosts
+                link_parsed = urllib.parse.urlparse(link)
+                if (link_parsed.netloc
+                        and link_parsed.netloc != self.allowed_host):
+                    with self._lock:
+                        is_new_cdn = link_parsed.netloc not in self._cdn_hosts
+                        self._cdn_hosts.add(link_parsed.netloc)
+                    if is_new_cdn:
+                        log.info("  [CDN] Discovered media host: %s",
+                                 link_parsed.netloc)
                 k = url_key(link)
                 if k not in self._visited:
                     self._enqueue(link, depth + 1, priority=True)
                     added += 1
             if added:
                 log.debug("  +%d new URLs enqueued", added)
+
+        time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # CDN media download
+    # ------------------------------------------------------------------
+
+    def _fetch_cdn_media(self, url: str) -> None:
+        """Download a media file from an external CDN host.
+
+        CDN URLs are always streamed directly to disk. No link
+        extraction, probe, or WAF checks are performed – these are
+        trusted media resources discovered from the crawled site's HTML.
+        Files are saved under a ``_cdn/<hostname>/`` subdirectory.
+        """
+        log.debug("[CDN] GET %s", url)
+
+        try:
+            resp = self.session.get(
+                url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                stream=True,
+            )
+        except _NETWORK_ERRORS as exc:
+            log.warning("[CDN] Request failed for %s – %s", url, exc)
+            self._stats["err"] += 1
+            return
+
+        if not resp.ok:
+            log.debug("[CDN] HTTP %s for %s – skipping", resp.status_code, url)
+            self._stats["err"] += 1
+            return
+
+        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        content_disp = resp.headers.get("Content-Disposition", "")
+
+        # Build local path: _cdn/<hostname>/<path>
+        parsed = urllib.parse.urlparse(url)
+        cdn_dir = self.output_dir / "_cdn" / parsed.netloc
+        rel_path = parsed.path.lstrip("/")
+        if not rel_path:
+            rel_path = "index"
+        local_stream = smart_local_path(url, cdn_dir, content_type, content_disp)
+        # Override: use _cdn/<host>/... instead of default output_dir layout
+        local_stream = cdn_dir / rel_path
+        # Apply extension from Content-Type if file has no extension
+        if not local_stream.suffix:
+            from web_crawler.core.storage import smart_local_path as _slp
+            hint = _slp(url, cdn_dir, content_type, content_disp)
+            if hint.suffix:
+                local_stream = local_stream.with_suffix(hint.suffix)
+
+        try:
+            chunks = resp.iter_content(chunk_size=524288)
+            first_chunk = next(chunks, b"")
+        except _NETWORK_ERRORS as exc:
+            log.warning("[CDN] Stream error for %s – %s", url, exc)
+            self._stats["err"] += 1
+            return
+
+        if not first_chunk:
+            log.debug("[CDN] Empty response for %s – skipping", url)
+            self._stats["err"] += 1
+            return
+
+        local_stream.parent.mkdir(parents=True, exist_ok=True)
+        written = len(first_chunk)
+        with local_stream.open("wb") as fh:
+            fh.write(first_chunk)
+            for chunk in chunks:
+                if chunk:
+                    fh.write(chunk)
+                    written += len(chunk)
+
+        ch = file_content_hash(local_stream)
+        with self._lock:
+            if ch in self._hashes:
+                log.debug("[CDN] Duplicate for %s – removing", url)
+                local_stream.unlink(missing_ok=True)
+                self._stats["dup"] += 1
+            else:
+                self._hashes.add(ch)
+                log.info(
+                    "  [CDN-DOWNLOAD] %s → %s (%.1f MiB)",
+                    url, local_stream.name, written / (1024 * 1024),
+                )
+                self._stats["ok"] += 1
+                if self.debug:
+                    self._save_http_headers(local_stream, resp, url)
+                self._maybe_git_push()
 
         time.sleep(self.delay)
 
