@@ -317,34 +317,6 @@ jobs:
             echo "No downloaded files found."
           fi
 
-      - name: Generate video URL list
-        run: |
-          BASE_URL="${{ inputs.url }}"
-          # Ensure base URL has no trailing slash for clean joining
-          BASE_URL="${BASE_URL%/}"
-
-          if [ -d downloaded_site ]; then
-            cd downloaded_site
-            find . -not -path './.git/*' -type f \( \
-              -iname '*.mp4' -o -iname '*.webm' -o -iname '*.ogv' \
-              -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.flv' \
-              -o -iname '*.mkv' -o -iname '*.wmv' -o -iname '*.m4v' \
-              -o -iname '*.3gp' -o -iname '*.3g2' -o -iname '*.ts' \
-              -o -iname '*.mpeg' -o -iname '*.mpg' -o -iname '*.f4v' \
-              -o -iname '*.asf' \) | sort | while IFS= read -r f; do
-                # Strip leading ./
-                REL="${f#./}"
-                echo "${BASE_URL}/${REL}"
-            done > video_urls.txt
-            COUNT=$(wc -l < video_urls.txt)
-            echo "📹 Video URL list: ${COUNT} URL(s) written to video_urls.txt"
-            if [ "$COUNT" -eq 0 ]; then
-              rm -f video_urls.txt
-              echo "   (empty list removed)"
-            fi
-            cd ..
-          fi
-
       - name: Final push of remaining files
         if: inputs.create_repo == true && steps.create_repo.outputs.repo_ready == 'true'
         env:

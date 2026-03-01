@@ -42,6 +42,11 @@ _NETWORK_ERRORS: tuple[type[Exception], ...] = (requests.RequestException,)
 if CfRequestException is not None:
     _NETWORK_ERRORS = (requests.RequestException, CfRequestException)
 
+_VIDEO_EXTENSIONS = frozenset((
+    ".mp4", ".webm", ".ogv", ".avi", ".mov", ".flv", ".mkv", ".wmv",
+    ".m4v", ".3gp", ".3g2", ".ts", ".mpeg", ".mpg", ".f4v", ".asf",
+))
+
 try:
     from tqdm import tqdm as _tqdm
     _TQDM_AVAILABLE = True
@@ -178,6 +183,7 @@ class Crawler:
         # these hosts are downloaded but NOT crawled for links.
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
+        self._video_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -267,6 +273,16 @@ class Crawler:
         log.info("Files saved in: %s", self.output_dir.resolve())
         ci_endgroup()
 
+        # Write video URL list
+        if self._video_urls:
+            video_list = self.output_dir / "video_urls.txt"
+            video_list.parent.mkdir(parents=True, exist_ok=True)
+            video_list.write_text(
+                "\n".join(self._video_urls) + "\n", encoding="utf-8",
+            )
+            log.info("Video URL list: %d URL(s) → %s",
+                      len(self._video_urls), video_list)
+
     def _stats_postfix(self) -> dict[str, object]:
         """Return a dict suitable for tqdm ``set_postfix``."""
         return {
@@ -277,6 +293,15 @@ class Crawler:
             "DUP": self._stats["dup"],
             "S404": self._stats["soft404"],
         }
+
+    def _track_video_url(self, url: str) -> None:
+        """Append *url* to the video list if it has a video extension.
+
+        Must be called while ``self._lock`` is held.
+        """
+        path_lower = urllib.parse.urlparse(url).path.lower()
+        if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
+            self._video_urls.append(url)
 
     def _run_with_progress(self) -> None:
         """BFS loop with a tqdm progress bar."""
@@ -1554,6 +1579,7 @@ class Crawler:
                             url, local_stream.name, written / (1024 * 1024),
                         )
                         self._stats["ok"] += 1
+                        self._track_video_url(url)
                         if self.debug:
                             self._save_http_headers(local_stream, resp, url)
                         self._maybe_git_push()
@@ -1618,6 +1644,7 @@ class Crawler:
                 self._save_http_headers(local, resp, url)
             with self._lock:
                 self._stats["ok"] += 1
+                self._track_video_url(url)
             self._maybe_git_push()
 
         # Extract and enqueue links from parseable content
@@ -1746,6 +1773,7 @@ class Crawler:
                     url, local_stream.name, written / (1024 * 1024),
                 )
                 self._stats["ok"] += 1
+                self._track_video_url(url)
                 if self.debug:
                     self._save_http_headers(local_stream, resp, url)
                 self._maybe_git_push()
