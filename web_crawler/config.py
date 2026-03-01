@@ -83,6 +83,31 @@ BINARY_CONTENT_TYPES = frozenset({
     "application/x-bat",
     "application/x-cmd",
     "application/x-powershell",
+    # Video
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "video/x-msvideo",
+    "video/quicktime",
+    "video/x-flv",
+    "video/x-matroska",
+    "video/x-ms-wmv",
+    "video/x-m4v",
+    "video/3gpp",
+    "video/3gpp2",
+    "video/mp2t",
+    "video/mpeg",
+    "video/x-f4v",
+    "video/x-ms-asf",
+    # Audio
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "audio/flac",
+    "audio/aac",
+    "audio/x-m4a",
+    "audio/mp4",
 })
 
 # ---------------------------------------------------------------------------
@@ -124,13 +149,10 @@ RETRY_STATUS_CODES = {403, 402}
 # ---------------------------------------------------------------------------
 WAF_SIGNATURES = {
     "cloudflare": [
-        "cf-ray",
         "cf-mitigated",
-        "cloudflare",
         "attention required! | cloudflare",
         "cf-chl-bypass",
         "checking your browser",
-        "ray id:",
         "_cf_chl_opt",
         "challenges.cloudflare.com",
     ],

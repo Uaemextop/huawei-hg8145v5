@@ -115,6 +115,7 @@ class Crawler:
         upload_extensions: frozenset[str] | None = None,
         debug: bool = False,
         cf_clearance: str = "",
+        allow_external: bool = True,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -171,6 +172,12 @@ class Crawler:
 
         # Cloudflare bypass state
         self._cf_bypass_done: bool = False
+
+        # CDN hosts: external domains discovered from media elements
+        # (video/audio/source tags, Schema.org itemprop).  URLs on
+        # these hosts are downloaded but NOT crawled for links.
+        self._cdn_hosts: set[str] = set()
+        self._allow_external = allow_external
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -739,7 +746,11 @@ class Crawler:
                 continue
             for m in _re2.finditer(
                 r'href=["\']([^"\']*\.(?:zip|rar|7z|bin|tar\.gz|tar|gz|bz2'
-                r'|xz|exe|img|iso|hwnp|fwu|pkg))["\']',
+                r'|xz|exe|img|iso|hwnp|fwu|pkg'
+                r'|mp4|webm|ogv|avi|mov|flv|mkv|wmv|m4v|3gp|3g2'
+                r'|ts|mpeg|mpg|f4v|asf|vob|m2ts|mts'
+                r'|mp3|ogg|wav|flac|aac|m4a|weba'
+                r'|m3u8|mpd))["\']',
                 r.text, _re2.I,
             ):
                 link = urllib.parse.urljoin(self.base + path, m.group(1))
@@ -986,9 +997,10 @@ class Crawler:
         with self._lock:
             if key in self._visited:
                 return
-            # Only crawl URLs on the same host
+            # Only crawl URLs on the same host or allowed CDN hosts
             parsed = urllib.parse.urlparse(url)
-            if parsed.netloc != self.allowed_host:
+            is_cdn = parsed.netloc in self._cdn_hosts
+            if parsed.netloc != self.allowed_host and not is_cdn:
                 return
             # Reject glob/wildcard patterns (e.g. extracted from
             # <script type="speculationrules"> exclusion lists).
@@ -1013,7 +1025,11 @@ class Crawler:
                 if key in self._visited:
                     return
             if self.max_depth and depth > self.max_depth:
-                return
+                # CDN URLs bypass depth limits – they are terminal
+                # downloads (no link extraction) and would otherwise
+                # be unreachable when discovered at the depth boundary.
+                if not is_cdn:
+                    return
             # Auto-prioritize target extension files
             if not priority and self.download_extensions:
                 path_lower = parsed.path.lower()
@@ -1039,12 +1055,44 @@ class Crawler:
             encoding="utf-8",
         )
 
+    # Size threshold for automatic Git LFS tracking (50 MB)
+    _LFS_SIZE_THRESHOLD = 50 * 1024 * 1024
+
+    def _git_lfs_track_large_files(self, cwd: str) -> None:
+        """Find files > 50 MB and track them with Git LFS."""
+        out_dir = Path(cwd)
+        tracked_any = False
+        for f in out_dir.rglob("*"):
+            if not f.is_file() or ".git" in f.parts:
+                continue
+            try:
+                if f.stat().st_size > self._LFS_SIZE_THRESHOLD:
+                    rel = f.relative_to(out_dir)
+                    subprocess.run(
+                        ["git", "lfs", "track", str(rel)],
+                        cwd=cwd, capture_output=True, timeout=15,
+                    )
+                    log.debug("[GIT-LFS] Tracking %s (%.0f MB)",
+                              rel, f.stat().st_size / (1024 * 1024))
+                    tracked_any = True
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if tracked_any:
+            gitattr = out_dir / ".gitattributes"
+            if gitattr.exists():
+                subprocess.run(
+                    ["git", "add", ".gitattributes"],
+                    cwd=cwd, capture_output=True, timeout=15,
+                )
+
     def _maybe_git_push(self) -> None:
         """Commit and push progress every *git_push_every* saved files.
 
         When *upload_extensions* is set, only files matching those
         extensions (plus README.md) are staged.  When debug mode is
         active, ``.headers`` files are included too.
+
+        Files exceeding 50 MB are automatically tracked with Git LFS.
         """
         if self.git_push_every <= 0:
             return
@@ -1055,6 +1103,8 @@ class Crawler:
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
         try:
             cwd = str(self.output_dir.resolve())
+            # Track large files with Git LFS before staging
+            self._git_lfs_track_large_files(cwd)
             if self.upload_extensions:
                 # Stage only files matching the upload extensions
                 subprocess.run(
@@ -1081,7 +1131,7 @@ class Crawler:
             )
             subprocess.run(
                 ["git", "push"],
-                cwd=cwd, check=True, capture_output=True, timeout=120,
+                cwd=cwd, check=True, capture_output=True, timeout=300,
             )
             log.info("[GIT] Push OK (%d files)", ok)
         except subprocess.CalledProcessError as exc:
@@ -1136,6 +1186,15 @@ class Crawler:
                 return
             self._visited.add(key)
 
+        parsed_url = urllib.parse.urlparse(url)
+        is_cdn_url = parsed_url.netloc in self._cdn_hosts
+
+        # CDN URLs: download-only fast path (no probing, no robots, no
+        # link extraction).  Always streamed to disk.
+        if is_cdn_url:
+            self._fetch_cdn_media(url)
+            return
+
         # Early skip for probe URLs whose directory already exhausted
         is_probe_early = key in self._probe_urls
         if is_probe_early:
@@ -1188,7 +1247,13 @@ class Crawler:
             _path_lower_pre.endswith(ext)
             for ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2",
                         ".xz", ".bin", ".exe", ".img", ".iso",
-                        ".hwnp", ".fwu", ".pkg")
+                        ".hwnp", ".fwu", ".pkg",
+                        ".mp4", ".webm", ".ogv", ".avi", ".mov",
+                        ".flv", ".mkv", ".wmv", ".m4v", ".3gp",
+                        ".3g2", ".ts", ".mpeg", ".mpg", ".f4v",
+                        ".asf", ".vob", ".m2ts", ".mts",
+                        ".mp3", ".ogg", ".wav", ".flac", ".aac",
+                        ".m4a", ".weba")
         )
 
         try:
@@ -1581,12 +1646,109 @@ class Crawler:
                 )
             added = 0
             for link in new_links:
+                # Register external hosts from media URLs as CDN hosts
+                link_parsed = urllib.parse.urlparse(link)
+                if (self._allow_external
+                        and link_parsed.netloc
+                        and link_parsed.netloc != self.allowed_host):
+                    with self._lock:
+                        is_new_cdn = link_parsed.netloc not in self._cdn_hosts
+                        self._cdn_hosts.add(link_parsed.netloc)
+                    if is_new_cdn:
+                        log.info("  [CDN] Discovered media host: %s",
+                                 link_parsed.netloc)
                 k = url_key(link)
                 if k not in self._visited:
                     self._enqueue(link, depth + 1, priority=True)
                     added += 1
             if added:
                 log.debug("  +%d new URLs enqueued", added)
+
+        time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # CDN media download
+    # ------------------------------------------------------------------
+
+    def _fetch_cdn_media(self, url: str) -> None:
+        """Download a media file from an external CDN host.
+
+        CDN URLs are always streamed directly to disk. No link
+        extraction, probe, or WAF checks are performed – these are
+        trusted media resources discovered from the crawled site's HTML.
+        Files are saved under a ``_cdn/<hostname>/`` subdirectory.
+        """
+        log.debug("[CDN] GET %s", url)
+
+        try:
+            resp = self.session.get(
+                url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                stream=True,
+            )
+        except _NETWORK_ERRORS as exc:
+            log.warning("[CDN] Request failed for %s – %s", url, exc)
+            self._stats["err"] += 1
+            return
+
+        if not resp.ok:
+            log.debug("[CDN] HTTP %s for %s – skipping", resp.status_code, url)
+            self._stats["err"] += 1
+            return
+
+        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        content_disp = resp.headers.get("Content-Disposition", "")
+
+        # Build local path: _cdn/<hostname>/<path>
+        parsed = urllib.parse.urlparse(url)
+        cdn_dir = self.output_dir / "_cdn" / parsed.netloc
+        rel_path = parsed.path.lstrip("/")
+        if not rel_path:
+            rel_path = "index"
+        local_stream = cdn_dir / rel_path
+        # Apply extension from Content-Type if file has no extension
+        if not local_stream.suffix:
+            hint = smart_local_path(url, cdn_dir, content_type, content_disp)
+            if hint.suffix:
+                local_stream = local_stream.with_suffix(hint.suffix)
+
+        try:
+            chunks = resp.iter_content(chunk_size=524288)
+            first_chunk = next(chunks, b"")
+        except _NETWORK_ERRORS as exc:
+            log.warning("[CDN] Stream error for %s – %s", url, exc)
+            self._stats["err"] += 1
+            return
+
+        if not first_chunk:
+            log.debug("[CDN] Empty response for %s – skipping", url)
+            self._stats["err"] += 1
+            return
+
+        local_stream.parent.mkdir(parents=True, exist_ok=True)
+        written = len(first_chunk)
+        with local_stream.open("wb") as fh:
+            fh.write(first_chunk)
+            for chunk in chunks:
+                if chunk:
+                    fh.write(chunk)
+                    written += len(chunk)
+
+        ch = file_content_hash(local_stream)
+        with self._lock:
+            if ch in self._hashes:
+                log.debug("[CDN] Duplicate for %s – removing", url)
+                local_stream.unlink(missing_ok=True)
+                self._stats["dup"] += 1
+            else:
+                self._hashes.add(ch)
+                log.info(
+                    "  [CDN-DOWNLOAD] %s → %s (%.1f MiB)",
+                    url, local_stream.name, written / (1024 * 1024),
+                )
+                self._stats["ok"] += 1
+                if self.debug:
+                    self._save_http_headers(local_stream, resp, url)
+                self._maybe_git_push()
 
         time.sleep(self.delay)
 

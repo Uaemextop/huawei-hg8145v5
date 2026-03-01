@@ -72,6 +72,16 @@ on:
         required: false
         default: false
         type: boolean
+      private_repo:
+        description: "Create the crawl repository as private (only applies when create_repo is true)"
+        required: false
+        default: false
+        type: boolean
+      allow_external_urls:
+        description: "Download media files (video/audio) from external CDN hosts discovered in the crawled pages"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -95,6 +105,7 @@ jobs:
           pip install -r requirements.txt
           pip install curl_cffi playwright
           playwright install --with-deps chromium
+          git lfs install
 
       - name: Generate normalized repo name
         id: reponame
@@ -187,7 +198,7 @@ jobs:
             -d "{
               \"name\": \"${REPO_NAME}\",
               \"description\": \"Crawled site: ${{ inputs.url }}\",
-              \"private\": false,
+              \"private\": ${{ inputs.private_repo }},
               \"auto_init\": false
             }")
           HTTP_CODE=$(echo "$RESP" | tail -1)
@@ -202,6 +213,7 @@ jobs:
           mkdir -p downloaded_site
           cd downloaded_site
           git init
+          git lfs install --local
           git config user.name "Web Crawler Bot"
           git config user.email "crawler@users.noreply.github.com"
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
@@ -262,6 +274,9 @@ jobs:
           if [ "${{ inputs.debug }}" = "true" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --debug"
           fi
+          if [ "${{ inputs.allow_external_urls }}" = "false" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --no-external"
+          fi
 
           # Upload-extension filtering: pass to crawler for periodic git push
           if [ "${{ inputs.upload_extensions }}" != "all" ] && [ -n "${{ inputs.upload_extensions }}" ]; then
@@ -309,6 +324,19 @@ jobs:
         run: |
           cd downloaded_site
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+
+          # Track files > 50 MB with Git LFS automatically
+          LARGE_FILES=$(find . -not -path './.git/*' -type f -size +50M 2>/dev/null)
+          if [ -n "$LARGE_FILES" ]; then
+            echo "📦 Tracking large files (>50 MB) with Git LFS:"
+            echo "$LARGE_FILES" | while IFS= read -r f; do
+              SIZE_MB=$(du -m "$f" | cut -f1)
+              echo "  ${f} (${SIZE_MB} MB)"
+              # Track by exact path so only large files use LFS
+              git lfs track "$f"
+            done
+            git add .gitattributes
+          fi
 
           # Update README with completion status
           REPO_FULL="${{ steps.create_repo.outputs.repo_full }}"
