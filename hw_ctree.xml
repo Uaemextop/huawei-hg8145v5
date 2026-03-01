@@ -1478,7 +1478,7 @@
 <SessionAction IPv4SessionFwd="1"/>
 </X_HW_PDT_FeatureList>
 <X_HW_Mobile_Backup Enable="0"/>
-<Time Enable="1" Status="Synchronized" NTPServer1="pool.ntp.org" NTPServer2="time.nist.gov" NTPServer3="clock.nyc.he.net" NTPServer4="" NTPServer5="" CurrentLocalTime="" LocalTimeZone="-06:00" LocalTimeZoneName="Guadalajara, Mexico City, Monterrey" X_HW_SynInterval="10" X_HW_WanName="" DaylightSavingsUsed="1" DaylightSavingsStart="2009-8-1T00:00:00" DaylightSavingsEnd="2009-8-30T00:00:00" X_HW_DaylightSavingsStartDate="7/4/1/0/0/0" X_HW_DaylightSavingsEndDate="9/4/1/0/0/0">
+<Time Enable="1" Status="Synchronized" NTPServer1="192.168.100.1" NTPServer2="pool.ntp.org" NTPServer3="time.nist.gov" NTPServer4="clock.nyc.he.net" NTPServer5="" CurrentLocalTime="" LocalTimeZone="-06:00" LocalTimeZoneName="Guadalajara, Mexico City, Monterrey" X_HW_SynInterval="10" X_HW_WanName="" DaylightSavingsUsed="1" DaylightSavingsStart="2009-8-1T00:00:00" DaylightSavingsEnd="2009-8-30T00:00:00" X_HW_DaylightSavingsStartDate="7/4/1/0/0/0" X_HW_DaylightSavingsEndDate="9/4/1/0/0/0">
 <X_HW_RetryInterval RetryInterval="20"/>
 </Time>
 <X_HW_LogCfg SrvAddr="0xC0A86401" Port="6543" DbgSwitch="1" RtoSwitch="1" MidFlag="2" LogTypeMask="255">
@@ -1528,7 +1528,7 @@
 <X_HW_WebUserInfoInstance InstanceID="2" UserName="telecomadmin" Password="$2i:1+(6w|K(connT3tKH.N8HeP5-EF-xc3pMRR.6W~E+4Ap[N[@w)u&amp;/]*1B/$,Zd=]htg&gt;{t|e1cAUS=1X+@R_Nen-&apos;*w92fRw*,$" UserLevel="0" Enable="1" ModifyPasswordFlag="0" SuperModeValue="$2^:laOw]c@=JLj3Pd9Z12AT`fT-JENT$`ME&lt;]%&gt;KS$" ModifySuperModeFlag="0" Salt="LSFP5fcMS6yNUN1i0qYnBU+F" PassMode="2" Alias="cpe-2"/>
 </X_HW_WebUserInfo>
 </UserInterface>
-<ManagementServer EnableCWMP="0" URL="" Username="" Password="" PeriodicInformEnable="1" PeriodicInformInterval="43200" PeriodicInformTime="" ParameterKey="0" ConnectionRequestURL="" ConnectionRequestUsername="" ConnectionRequestPassword="" UpgradesManaged="1" KickURL="" DownloadProgressURL="" DefaultActiveNotificationThrottle="0" UDPConnectionRequestAddress="" UDPConnectionRequestAddressNotificationLimit="0" STUNEnable="0" STUNServerAddress="" STUNServerPort="0" STUNUsername="" STUNPassword="" STUNMaximumKeepAlivePeriod="0" STUNMinimumKeepAlivePeriod="0" NATDetected="0" ManageableDeviceNumberOfEntries="0" ManageableDeviceNotificationLimit="0" X_HW_EnableCertificate="0" X_HW_CertPassword="$2S1N%A}[(DRoUa0Wyh&amp;W!@#\Y6(kbnG#D*;/)XX(Q$" X_HW_DSCP="0" X_HW_CheckPasswordComplex="0" X_HW_PeriodicInformTime="" X_HW_Path="6e0fe45d4d305251ae495de3aa406a54"/>
+<ManagementServer EnableCWMP="0" URL="" Username="" Password="" PeriodicInformEnable="0" PeriodicInformInterval="43200" PeriodicInformTime="" ParameterKey="0" ConnectionRequestURL="" ConnectionRequestUsername="" ConnectionRequestPassword="" UpgradesManaged="1" KickURL="" DownloadProgressURL="" DefaultActiveNotificationThrottle="0" UDPConnectionRequestAddress="" UDPConnectionRequestAddressNotificationLimit="0" STUNEnable="0" STUNServerAddress="" STUNServerPort="0" STUNUsername="" STUNPassword="" STUNMaximumKeepAlivePeriod="0" STUNMinimumKeepAlivePeriod="0" NATDetected="0" ManageableDeviceNumberOfEntries="0" ManageableDeviceNotificationLimit="0" X_HW_EnableCertificate="0" X_HW_CertPassword="$2S1N%A}[(DRoUa0Wyh&amp;W!@#\Y6(kbnG#D*;/)XX(Q$" X_HW_DSCP="0" X_HW_CheckPasswordComplex="0" X_HW_PeriodicInformTime="" X_HW_Path="6e0fe45d4d305251ae495de3aa406a54"/>
 <X_HW_APMPolicy EnablePowerSavingMode="1">
 <BatteryModePolicy NotUseUsbService="0" NotUseLanService="0" NotUseWlanService="0" NotUseVoiceService="0" NotUseCATVService="0" NotUseRemoteManagement="0"/>
 </X_HW_APMPolicy>
@@ -1579,7 +1579,7 @@
 <ExtDeviceInfo X_HW_LedSwitch="1">
 <X_HW_LED_SwitchTimer Enable="0"/>
 </ExtDeviceInfo>
-<X_HW_ProductInfo originalVersion="V300R020C00SPC160A2107120009" currentVersion="V300R020" customInfo="COMMON" customInfoDetail="common"/>
+<X_HW_ProductInfo originalVersion="V300R020C00SPC160A2107120009" currentVersion="V300R020" customInfo="COMMON" customInfoDetail="common" X_HW_DowngradeEnable="1"/>
 <DeviceInfo X_HW_UpPortMode="4" X_HW_OUIMode="0" X_HW_TotalSWReboot="5" FirstUseDate="2025-03-16T20:28:00" X_HW_RebootRecord="483933014922960149232201">
 <X_HW_Syslog Enable="1" Level="7"/>
 <X_HW_Monitor Enable="0" MonitorNumberOfEntries="0"/>
