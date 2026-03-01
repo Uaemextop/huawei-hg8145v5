@@ -72,6 +72,11 @@ on:
         required: false
         default: false
         type: boolean
+      private_repo:
+        description: "Create the crawl repository as private (only applies when create_repo is true)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -187,7 +192,7 @@ jobs:
             -d "{
               \"name\": \"${REPO_NAME}\",
               \"description\": \"Crawled site: ${{ inputs.url }}\",
-              \"private\": false,
+              \"private\": ${{ inputs.private_repo }},
               \"auto_init\": false
             }")
           HTTP_CODE=$(echo "$RESP" | tail -1)
