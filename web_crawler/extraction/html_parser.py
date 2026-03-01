@@ -3,6 +3,7 @@ HTML/ASP attribute extraction via BeautifulSoup.
 """
 
 import re
+import warnings
 
 from web_crawler.utils.url import normalise_url
 from web_crawler.extraction.css import extract_css_urls
@@ -16,6 +17,8 @@ except ImportError:
 
 try:
     from bs4 import BeautifulSoup
+    from bs4 import XMLParsedAsHTMLWarning
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 except ImportError:
     BeautifulSoup = None  # type: ignore[misc,assignment]
 
