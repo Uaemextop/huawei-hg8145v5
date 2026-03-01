@@ -1592,12 +1592,12 @@
 <Processor NumberOfInstances="1">
 <ProcessorInstance InstanceID="1" Alias="cpe-1" Architecture="arm"/>
 </Processor>
-<X_HW_SyslogConfig LogServerEnable="1" Interface="" Facility="16" Severity="7" ServerAddress="" ServerPort="514" WatchdogPSK="" PolicyMode="UDP" MaxTime="0"/>
+<X_HW_SyslogConfig LogServerEnable="0" Interface="" Facility="16" Severity="7" ServerAddress="" ServerPort="514" WatchdogPSK="" PolicyMode="UDP" MaxTime="0"/>
 <VendorLogFile NumberOfInstances="1">
 <VendorLogFileInstance InstanceID="1" Alias="cpe-1" Name="system_log" MaximumSize="0" Persistent="1"/>
 </VendorLogFile>
 <X_HW_UserContractInfo UsInternetBandwidth="0" DsInternetBandwidth="0"/>
-<X_HW_Reportlog Enable="1" ReportInterval="20" ReportUrl="" LogTimeStart="0" LogTimeEnd="23" LogDateStart="0" LogDateEnd="0" ReportLogType="5" ReportLogMode="1" DeviceMac=""/>
+<X_HW_Reportlog Enable="0" ReportInterval="20" ReportUrl="" LogTimeStart="0" LogTimeEnd="23" LogDateStart="0" LogDateEnd="0" ReportLogType="5" ReportLogMode="1" DeviceMac=""/>
 </DeviceInfo>
 <X_HW_AppRemoteManage MgtURL="" Port="" Heartbeat="60" Ability="0" LocatePort="17998" Version="1.0" LocalUserName="root" LocalUserPassword="$2IE+1GV72t&amp;)C&amp;m$i+i6&lt;6myOH$-!`T%&apos;#Q22D6x!@tKy&amp;=_a;Y6S~[8%%DlM]evxGY-RG@WQ{&amp;JviBM~sbFXJ_1O0,/9YD&quot;6_DfE$" LocalUserPassMode="2" LocalAdminName="telecomadmin" LocalAdminPassword="$2|OW4HD7u&gt;3dJKU@8z-j0WmBi:FVMp@(A@4~aaf[6D`l`C:@*RY&amp;W\~K*9&amp;;QES\J&apos;.&apos;cvST;s)~t(8`PZjB87x*Yp(5z!t&amp;6&lt;(&gt;5$" LocalAdminPassMode="2"/>
 <X_HW_iaccess Enable="0" ReportEnable="0" SecPlatEnable="2" SecPlatStatus="0"/>
