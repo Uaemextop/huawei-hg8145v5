@@ -45,7 +45,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "link":    ["href"],
         "script":  ["src"],
         "img":     ["src", "data-src", "data-lazy-src"],
-        "source":  ["src", "srcset"],
+        "source":  ["src", "srcset", "data-src"],
         "iframe":  ["src"],
         "frame":   ["src"],
         "form":    ["action"],
@@ -54,8 +54,8 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "meta":    [],
         "object":  ["data"],
         "embed":   ["src"],
-        "audio":   ["src"],
-        "video":   ["src", "poster"],
+        "audio":   ["src", "data-src"],
+        "video":   ["src", "poster", "data-src", "data-lazy-src"],
         "track":   ["src"],
     }
     for tag, attrs in attr_map.items():
@@ -69,6 +69,18 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                 m = re.search(r"url=([^\s;\"']+)", content, re.I)
                 if m:
                     _add(m.group(1))
+                # Schema.org itemprop with URL values (contentURL,
+                # embedURL, thumbnailUrl, url, image, etc.)
+                itemprop = (el.get("itemprop") or "").lower()
+                if itemprop and content:
+                    _url_props = {
+                        "contenturl", "embedurl", "thumbnailurl",
+                        "url", "image", "contenturl",
+                    }
+                    if itemprop in _url_props and content.startswith(
+                        ("http://", "https://", "/")
+                    ):
+                        _add(content)
 
     for style_el in soup.find_all("style"):
         found |= extract_css_urls(style_el.get_text(), page_url, base)

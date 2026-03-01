@@ -194,7 +194,7 @@ class TestWAFDetection(unittest.TestCase):
     """Test WAF / Cloudflare / CAPTCHA detection."""
 
     def test_detect_cloudflare_header(self):
-        headers = {"CF-RAY": "abc123", "Server": "cloudflare"}
+        headers = {"CF-Mitigated": "challenge"}
         result = Crawler.detect_protection(headers, "")
         self.assertIn("cloudflare", result)
 
@@ -250,11 +250,18 @@ class TestWAFDetection(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_multiple_protections(self):
-        headers = {"CF-RAY": "abc"}
+        headers = {"CF-Mitigated": "challenge"}
         body = '<div class="g-recaptcha"></div>'
         result = Crawler.detect_protection(headers, body)
         self.assertIn("cloudflare", result)
         self.assertIn("captcha", result)
+
+    def test_cloudflare_proxy_not_flagged(self):
+        """Normal Cloudflare-proxied response should NOT be flagged."""
+        headers = {"CF-RAY": "abc123", "Server": "cloudflare"}
+        body = '<html><body>Normal page content</body></html>'
+        result = Crawler.detect_protection(headers, body)
+        self.assertNotIn("cloudflare", result)
 
     def test_waf_signatures_config(self):
         self.assertIn("cloudflare", WAF_SIGNATURES)

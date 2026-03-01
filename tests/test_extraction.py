@@ -3,6 +3,7 @@ Tests for the link extraction module.
 """
 
 import unittest
+from pathlib import Path
 
 from web_crawler.extraction.links import extract_links
 from web_crawler.extraction.css import extract_css_urls
@@ -165,6 +166,164 @@ class TestHiddenFileProbeConfig(unittest.TestCase):
     def test_probe_list_contains_config(self):
         from web_crawler.config import HIDDEN_FILE_PROBES
         self.assertIn(".config", HIDDEN_FILE_PROBES)
+
+
+class TestVideoExtraction(unittest.TestCase):
+    """Test that video-related URLs are extracted from HTML."""
+
+    def test_video_src(self):
+        html = '<video src="/videos/clip.mp4"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/clip.mp4", result)
+
+    def test_video_poster(self):
+        html = '<video poster="/images/thumb.jpg"><source src="/videos/clip.webm"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/images/thumb.jpg", result)
+        self.assertIn("https://example.com/videos/clip.webm", result)
+
+    def test_video_data_src(self):
+        html = '<video data-src="/videos/lazy.mp4"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/lazy.mp4", result)
+
+    def test_source_data_src(self):
+        html = '<video><source data-src="/videos/lazy.webm"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/lazy.webm", result)
+
+    def test_audio_data_src(self):
+        html = '<audio data-src="/audio/lazy.mp3"></audio>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/audio/lazy.mp3", result)
+
+    def test_video_multiple_sources(self):
+        html = """
+        <video poster="/thumb.jpg">
+            <source src="/videos/clip.mp4" type="video/mp4">
+            <source src="/videos/clip.webm" type="video/webm">
+            <source src="/videos/clip.ogv" type="video/ogg">
+        </video>
+        """
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/clip.mp4", result)
+        self.assertIn("https://example.com/videos/clip.webm", result)
+        self.assertIn("https://example.com/videos/clip.ogv", result)
+        self.assertIn("https://example.com/thumb.jpg", result)
+
+    def test_video_formats_in_js(self):
+        js = 'var video = "/content/movie.mkv";'
+        from web_crawler.extraction.javascript import extract_js_paths
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/content/movie.mkv", result)
+
+    def test_m3u8_in_js(self):
+        js = 'var src = "/stream/playlist.m3u8";'
+        from web_crawler.extraction.javascript import extract_js_paths
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/stream/playlist.m3u8", result)
+
+    def test_mpd_in_js(self):
+        js = 'var src = "/stream/manifest.mpd";'
+        from web_crawler.extraction.javascript import extract_js_paths
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://example.com/stream/manifest.mpd", result)
+
+
+class TestVideoContentTypeMappings(unittest.TestCase):
+    """Test that video content types map to correct file extensions."""
+
+    def test_mp4_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/mp4")
+        self.assertEqual(p.suffix, ".mp4")
+
+    def test_webm_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/webm")
+        self.assertEqual(p.suffix, ".webm")
+
+    def test_wmv_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/x-ms-wmv")
+        self.assertEqual(p.suffix, ".wmv")
+
+    def test_m4v_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/x-m4v")
+        self.assertEqual(p.suffix, ".m4v")
+
+    def test_3gp_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/3gpp")
+        self.assertEqual(p.suffix, ".3gp")
+
+    def test_mpeg_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/mpeg")
+        self.assertEqual(p.suffix, ".mpeg")
+
+    def test_m3u8_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/stream", Path("/out"),
+                             "application/vnd.apple.mpegurl")
+        self.assertEqual(p.suffix, ".m3u8")
+
+    def test_mpd_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/stream", Path("/out"),
+                             "application/dash+xml")
+        self.assertEqual(p.suffix, ".mpd")
+
+    def test_flv_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/x-flv")
+        self.assertEqual(p.suffix, ".flv")
+
+    def test_mkv_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/x-matroska")
+        self.assertEqual(p.suffix, ".mkv")
+
+    def test_ts_mapping(self):
+        from web_crawler.core.storage import smart_local_path
+        p = smart_local_path("https://example.com/video", Path("/out"),
+                             "video/mp2t")
+        self.assertEqual(p.suffix, ".ts")
+
+
+class TestVideoBinaryContentTypes(unittest.TestCase):
+    """Test that video content types are in BINARY_CONTENT_TYPES for streaming."""
+
+    def test_video_types_in_binary_set(self):
+        from web_crawler.config import BINARY_CONTENT_TYPES
+        video_types = [
+            "video/mp4", "video/webm", "video/ogg", "video/x-msvideo",
+            "video/quicktime", "video/x-flv", "video/x-matroska",
+            "video/x-ms-wmv", "video/x-m4v", "video/3gpp", "video/3gpp2",
+            "video/mp2t", "video/mpeg", "video/x-f4v", "video/x-ms-asf",
+        ]
+        for vt in video_types:
+            self.assertIn(vt, BINARY_CONTENT_TYPES,
+                          f"{vt} should be in BINARY_CONTENT_TYPES")
+
+    def test_audio_types_in_binary_set(self):
+        from web_crawler.config import BINARY_CONTENT_TYPES
+        audio_types = [
+            "audio/mpeg", "audio/ogg", "audio/wav", "audio/webm",
+            "audio/flac", "audio/aac", "audio/x-m4a", "audio/mp4",
+        ]
+        for at in audio_types:
+            self.assertIn(at, BINARY_CONTENT_TYPES,
+                          f"{at} should be in BINARY_CONTENT_TYPES")
 
 
 if __name__ == "__main__":

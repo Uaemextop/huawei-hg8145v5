@@ -739,7 +739,11 @@ class Crawler:
                 continue
             for m in _re2.finditer(
                 r'href=["\']([^"\']*\.(?:zip|rar|7z|bin|tar\.gz|tar|gz|bz2'
-                r'|xz|exe|img|iso|hwnp|fwu|pkg))["\']',
+                r'|xz|exe|img|iso|hwnp|fwu|pkg'
+                r'|mp4|webm|ogv|avi|mov|flv|mkv|wmv|m4v|3gp|3g2'
+                r'|ts|mpeg|mpg|f4v|asf|vob|m2ts|mts'
+                r'|mp3|ogg|wav|flac|aac|m4a|weba'
+                r'|m3u8|mpd))["\']',
                 r.text, _re2.I,
             ):
                 link = urllib.parse.urljoin(self.base + path, m.group(1))
@@ -1188,7 +1192,13 @@ class Crawler:
             _path_lower_pre.endswith(ext)
             for ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2",
                         ".xz", ".bin", ".exe", ".img", ".iso",
-                        ".hwnp", ".fwu", ".pkg")
+                        ".hwnp", ".fwu", ".pkg",
+                        ".mp4", ".webm", ".ogv", ".avi", ".mov",
+                        ".flv", ".mkv", ".wmv", ".m4v", ".3gp",
+                        ".3g2", ".ts", ".mpeg", ".mpg", ".f4v",
+                        ".asf", ".vob", ".m2ts", ".mts",
+                        ".mp3", ".ogg", ".wav", ".flac", ".aac",
+                        ".m4a", ".weba")
         )
 
         try:
