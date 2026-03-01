@@ -1518,20 +1518,20 @@
 <X_HW_CLITelnetAccess Access="1" TelnetPort="23"/>
 <LoginInfo UserName="root" IpAddress="192.168.100.3" Time="1742156881"/>
 <X_HW_CLIUserInfo NumberOfInstances="1">
-<X_HW_CLIUserInfoInstance InstanceID="1" Username="root" Userpassword="$2ODa^Us{`{0NjSHNu&lt;S&amp;:J:~VXMKn\3gu$#1jHaF:Zf^&amp;+;Z9C&lt;u)g(U!t0A&amp;#+DbIGo($O.+k}6LgP8BT7s#NJvH9BZ:Ri2oC&lt;==$" UserGroup="" ModifyPWDFlag="0" EncryptMode="2" Salt="mb0kqaQRDeZ9T8wxL/BZmvet" AccessInterface=""/>
+<X_HW_CLIUserInfoInstance InstanceID="1" Username="root" Userpassword="$2ODa^Us{`{0NjSHNu&lt;S&amp;:J:~VXMKn\3gu$#1jHaF:Zf^&amp;+;Z9C&lt;u)g(U!t0A&amp;#+DbIGo($O.+k}6LgP8BT7s#NJvH9BZ:Ri2oC&lt;==$" UserGroup="4294967295" ModifyPWDFlag="0" EncryptMode="2" Salt="mb0kqaQRDeZ9T8wxL/BZmvet" AccessInterface=""/>
 </X_HW_CLIUserInfo>
 <X_HW_WebUserInfo NumberOfInstances="2">
-<X_HW_WebUserInfoInstance InstanceID="1" UserName="root" Password="$2A8O2@&lt;=}xQ|(&lt;PLB\k$U(I}2(UF:(*V*]&amp;K]iwJ,N{)V*JU1*~fjD:16v7E&gt;P}&apos;RRN@|w(:$ID&quot;%S&lt;\G&gt;!+=#;7-Y$&lt;DYk0l)sEN$" UserLevel="1" Enable="1" ModifyPasswordFlag="0" Salt="vN6u7pqjBjcgcLlLei5retOD" PassMode="2" Alias="cpe-1">
+<X_HW_WebUserInfoInstance InstanceID="1" UserName="telecomadmin" Password="$2A8O2@&lt;=}xQ|(&lt;PLB\k$U(I}2(UF:(*V*]&amp;K]iwJ,N{)V*JU1*~fjD:16v7E&gt;P}&apos;RRN@|w(:$ID&quot;%S&lt;\G&gt;!+=#;7-Y$&lt;DYk0l)sEN$" UserLevel="1" Enable="1" ModifyPasswordFlag="0" Salt="vN6u7pqjBjcgcLlLei5retOD" PassMode="2" Alias="cpe-1">
 <X_HW_IteratePassword Password="$2+4oiO2tbr7bgE&lt;O.U&lt;U;&amp;,1y&lt;MC8/@KwO2PC)O(3d,]F=QY!P.thr=LCdT](y&apos;,5Q@L]#@O[OlCIP2m1Iit-B:$vmD3X,m&lt;YWsd6$" Salt="cPXEzT6T8OJHEkHD33jrk0FR" IterateCount="10000" HashType="0"/>
 </X_HW_WebUserInfoInstance>
-<X_HW_WebUserInfoInstance InstanceID="2" UserName="telecomadmin" Password="$2i:1+(6w|K(connT3tKH.N8HeP5-EF-xc3pMRR.6W~E+4Ap[N[@w)u&amp;/]*1B/$,Zd=]htg&gt;{t|e1cAUS=1X+@R_Nen-&apos;*w92fRw*,$" UserLevel="0" Enable="1" ModifyPasswordFlag="0" SuperModeValue="$2^:laOw]c@=JLj3Pd9Z12AT`fT-JENT$`ME&lt;]%&gt;KS$" ModifySuperModeFlag="0" Salt="LSFP5fcMS6yNUN1i0qYnBU+F" PassMode="2" Alias="cpe-2"/>
+<X_HW_WebUserInfoInstance InstanceID="2" UserName="root" Password="$2i:1+(6w|K(connT3tKH.N8HeP5-EF-xc3pMRR.6W~E+4Ap[N[@w)u&amp;/]*1B/$,Zd=]htg&gt;{t|e1cAUS=1X+@R_Nen-&apos;*w92fRw*,$" UserLevel="0" Enable="1" ModifyPasswordFlag="0" SuperModeValue="$2^:laOw]c@=JLj3Pd9Z12AT`fT-JENT$`ME&lt;]%&gt;KS$" ModifySuperModeFlag="0" Salt="LSFP5fcMS6yNUN1i0qYnBU+F" PassMode="2" Alias="cpe-2"/>
 </X_HW_WebUserInfo>
 </UserInterface>
 <ManagementServer EnableCWMP="0" URL="" Username="" Password="" PeriodicInformEnable="1" PeriodicInformInterval="43200" PeriodicInformTime="" ParameterKey="0" ConnectionRequestURL="" ConnectionRequestUsername="" ConnectionRequestPassword="" UpgradesManaged="0" KickURL="" DownloadProgressURL="" DefaultActiveNotificationThrottle="0" UDPConnectionRequestAddress="" UDPConnectionRequestAddressNotificationLimit="0" STUNEnable="0" STUNServerAddress="" STUNServerPort="0" STUNUsername="" STUNPassword="" STUNMaximumKeepAlivePeriod="0" STUNMinimumKeepAlivePeriod="0" NATDetected="0" ManageableDeviceNumberOfEntries="0" ManageableDeviceNotificationLimit="0" X_HW_EnableCertificate="0" X_HW_CertPassword="$2S1N%A}[(DRoUa0Wyh&amp;W!@#\Y6(kbnG#D*;/)XX(Q$" X_HW_DSCP="0" X_HW_CheckPasswordComplex="0" X_HW_PeriodicInformTime="" X_HW_Path="6e0fe45d4d305251ae495de3aa406a54"/>
 <X_HW_APMPolicy EnablePowerSavingMode="1">
 <BatteryModePolicy NotUseUsbService="0" NotUseLanService="0" NotUseWlanService="0" NotUseVoiceService="0" NotUseCATVService="0" NotUseRemoteManagement="0"/>
 </X_HW_APMPolicy>
-<X_HW_PSIXmlReset ResetFlag="1"/>
+<X_HW_PSIXmlReset ResetFlag="0"/>
 <X_HW_UserInfo UserName="" UserId="" Status="99" Limit="10" Times="0" Result="99" X_HW_InformStatus="0" X_HW_AcsCnnctSatus="0"/>
 <X_HW_ServiceManage FtpEnable="0" FtpPort="21" FtpRoorDir="/mnt/usb1_1/" FtpUserNum="0"/>
 <X_HW_SSMPPDT>
