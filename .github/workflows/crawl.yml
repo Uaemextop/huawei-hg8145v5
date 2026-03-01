@@ -378,6 +378,23 @@ jobs:
           cd downloaded_site
           zip -r ../crawl-${{ steps.reponame.outputs.name }}.zip . -x '.git/*' -x '.git'
 
+      - name: Zip video files only
+        run: |
+          cd downloaded_site
+          find . -not -path './.git/*' -type f \( \
+            -iname '*.mp4' -o -iname '*.webm' -o -iname '*.ogv' \
+            -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.flv' \
+            -o -iname '*.mkv' -o -iname '*.wmv' -o -iname '*.m4v' \
+            -o -iname '*.3gp' -o -iname '*.3g2' -o -iname '*.ts' \
+            -o -iname '*.mpeg' -o -iname '*.mpg' -o -iname '*.f4v' \
+            -o -iname '*.asf' \) -print > /tmp/video_files.txt
+          if [ -s /tmp/video_files.txt ]; then
+            zip ../videos-${{ steps.reponame.outputs.name }}.zip -@ < /tmp/video_files.txt
+            echo "📹 Video zip created with $(wc -l < /tmp/video_files.txt) file(s)"
+          else
+            echo "📹 No video files found – skipping video zip"
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -406,6 +423,8 @@ jobs:
             - **Debug mode**: ${{ inputs.debug }}
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
-          files: "crawl-${{ steps.reponame.outputs.name }}.zip"
+          files: |
+            crawl-${{ steps.reponame.outputs.name }}.zip
+            videos-${{ steps.reponame.outputs.name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
