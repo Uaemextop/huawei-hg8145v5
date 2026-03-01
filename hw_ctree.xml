@@ -230,7 +230,7 @@
 </STAWMMParameter>
 </WLANConfigurationInstance>
 </WLANConfiguration>
-<LANHostConfigManagement DHCPServerConfigurable="1" DHCPServerEnable="1" DHCPRelay="0" DHCPLeaseTime="86400" PasstThroughLease="0" PassthroughLease="600" MinAddress="192.168.100.2" MaxAddress="192.168.100.254" SubnetMask="255.255.255.0" DNSServers="1.1.1.1,1.0.0.0" DomainName="" IPRouters="" ReservedAddresses="" UseAllocatedWan="" AssociatedConnection="" PassthroughMACAddress="" AllowedMACAddresses="" X_HW_DHCPL2RelayEnable="1" X_HW_HGWStart="" X_HW_HGWEnd="" X_HW_STBStart="" X_HW_STBEnd="" X_HW_CameraStart="" X_HW_CameraEnd="" X_HW_ComputerStart="" X_HW_ComputerEnd="" X_HW_PhoneStart="" X_HW_PhoneEnd="" X_HW_DHCPOption82Enable="0" X_HW_PPPoEPITPEnable="0" UseAllocatedWAN="Normal" X_HW_DNSList="1.1.1.1,1.0.0.0" X_HW_Option60Enable="1" X_HW_Option125Enable="1" X_HW_Option16Enable="1" X_HW_Option17Enable="1" X_HW_TftpServerEnable="1" X_HW_TftpServer="" X_HW_TDE_BR_RouterAdvertisementEnable="1" X_HW_MTU="1500" ISPDNSEnable="0" IPv4DNSConfigType="Static" DHCPStaticAddressNumberOfEntries="1">
+<LANHostConfigManagement DHCPServerConfigurable="1" DHCPServerEnable="1" DHCPRelay="0" DHCPLeaseTime="86400" PasstThroughLease="0" PassthroughLease="600" MinAddress="192.168.100.2" MaxAddress="192.168.100.254" SubnetMask="255.255.255.0" DNSServers="1.1.1.1,1.0.0.1" DomainName="" IPRouters="" ReservedAddresses="" UseAllocatedWan="" AssociatedConnection="" PassthroughMACAddress="" AllowedMACAddresses="" X_HW_DHCPL2RelayEnable="1" X_HW_HGWStart="" X_HW_HGWEnd="" X_HW_STBStart="" X_HW_STBEnd="" X_HW_CameraStart="" X_HW_CameraEnd="" X_HW_ComputerStart="" X_HW_ComputerEnd="" X_HW_PhoneStart="" X_HW_PhoneEnd="" X_HW_DHCPOption82Enable="0" X_HW_PPPoEPITPEnable="0" UseAllocatedWAN="Normal" X_HW_DNSList="1.1.1.1,1.0.0.1" X_HW_Option60Enable="1" X_HW_Option125Enable="1" X_HW_Option16Enable="1" X_HW_Option17Enable="1" X_HW_TftpServerEnable="1" X_HW_TftpServer="" X_HW_TDE_BR_RouterAdvertisementEnable="1" X_HW_MTU="1500" ISPDNSEnable="0" IPv4DNSConfigType="Static" DHCPStaticAddressNumberOfEntries="1">
 <IPInterface NumberOfInstances="2">
 <IPInterfaceInstance InstanceID="1" Enable="1" IPInterfaceIPAddress="192.168.100.1" IPInterfaceSubnetMask="255.255.255.0" IPInterfaceAddressingType="Static" X_HW_AddressConflictDetectionEnable="1" X_HW_RouteProtocolRx="Off" X_HW_RouteProtocolRxMode="Passive" X_HW_RouteProtocolAuthMode="Off" X_HW_RouteProtocolAuthKey=""/>
 <IPInterfaceInstance InstanceID="2" Enable="1" IPInterfaceIPAddress="192.168.2.1" IPInterfaceSubnetMask="255.255.255.0" IPInterfaceAddressingType="Static" X_HW_AddressConflictDetectionEnable="1" X_HW_RouteProtocolRx="" X_HW_RouteProtocolRxMode="" X_HW_RouteProtocolAuthMode="" X_HW_RouteProtocolAuthKey=""/>
@@ -1422,7 +1422,7 @@
 <X_HW_QueueSysCfg QueueLen="16" UpSchedualMode="sp" DownSchedualMode="sp"/>
 </QueueManagement>
 <X_HW_DHCPSLVSERVER DHCPEnable="0" Option60="MSFT 5.0" StartIP="192.168.2.2" EndIP="192.168.2.254" LeaseTime="86400" DNSList="" NTPList="" Option43="" NormalUserEnable="1" DynamicPortMappingEnable="0" PortMappingWan="" PortMappingStartPort="65501" PortMappingMaxPort="65510"/>
-<X_HW_Security MacFilterPolicy="0" MacFilterRight="0" IpFilterInPolicy="0" IpFilterInRight="0" IpFilterOutPolicy="0" IpFilterOutRight="0" X_HW_FirewallGeneralLevel="2" UrlFilterPolicy="0" UrlFilterRight="0" UrlFilterIpConcern="0" MacFilterNumberOfEntries="0" IpFilterInNumberOfEntries="0" IpFilterOutNumberOfEntries="0" X_HW_FirewallLevel="Custom" WlanMacFilterPolicy="0" WlanMacFilterRight="0" WlanMacFilterNumberOfEntries="0" X_HW_IPv6FWDFireWallEnable="1">
+<X_HW_Security MacFilterPolicy="0" MacFilterRight="0" IpFilterInPolicy="0" IpFilterInRight="0" IpFilterOutPolicy="0" IpFilterOutRight="0" X_HW_FirewallGeneralLevel="2" UrlFilterPolicy="0" UrlFilterRight="0" UrlFilterIpConcern="0" MacFilterNumberOfEntries="0" IpFilterInNumberOfEntries="0" IpFilterOutNumberOfEntries="0" X_HW_FirewallLevel="Custom" WlanMacFilterPolicy="0" WlanMacFilterRight="0" WlanMacFilterNumberOfEntries="0" X_HW_IPv6FWDFireWallEnable="1" PortScanEnable="1" InvalidPacketDenyEnable="1" AttachBandLimitEnable="1" X_HW_DosEnable="1" FilterApplyRange="SpecifiedDevice" MacFltGlbEnable="0" MacFltGlbPolicy="0" Ip6FilterPolicy="0" Ip6FilterRight="0">
 <MacFilter NumberOfInstances="0"/>
 <WLANMacFilter NumberOfInstances="0"/>
 <IpFilterIn NumberOfInstances="0"/>
@@ -1430,14 +1430,14 @@
 <UrlFilter NumberOfInstances="0"/>
 <Dosfilter SynFloodEn="1" IcmpEchoReplyEn="0" IcmpRedirectEn="1" LandEn="1" SmurfEn="1" WinnukeEn="1" PingSweepEn="1"/>
 <WANSrcWhiteList WANSrcWhiteListEnable="0" WANSrcWhiteListNumberOfEntries="0"/>
-<AclServices HTTPLanEnable="1" HTTPWanEnable="0" FTPLanEnable="0" FTPWanEnable="0" TELNETLanEnable="1" TELNETWanEnable="0" SSHLanEnable="1" SSHWanEnable="0" HTTPPORT="80" FTPPORT="21" TELNETPORT="23" SSHPORT="22" HTTPWifiEnable="1" TELNETWifiEnable="1">
+<AclServices HTTPLanEnable="1" HTTPWanEnable="0" HTTPSLanEnable="1" HTTPSWanEnable="0" FTPLanEnable="1" FTPWanEnable="0" TELNETLanEnable="1" TELNETWanEnable="0" SSHLanEnable="1" SSHWanEnable="0" SFTPLanEnable="1" SFTPWanEnable="0" SamBaLanEnable="0" SamBaWanEnable="0" HTTPPORT="80" FTPPORT="21" TELNETPORT="23" SSHPORT="22" HTTPWifiEnable="1" TELNETWifiEnable="1" IcmpAccessControl="1" WANAccessEnable="0" WebAccessControl="1" WebPermanentCloseControl="1" TrustHost="">
 <AccessControl AccessControlListEnable="1" AccessControlListNumberOfEntries="1">
 <List NumberOfInstances="1">
 <ListInstance InstanceID="1" SrcPortType="2" SrcPortName="ALL" SrcIp="" ServicePort="HTTP" SrcMac="" ServiceProto="" ServiceProtoPort="" Priority="1" Mode="0" DynamicWanServiceType=""/>
 </List>
 </AccessControl>
-<X_HW_RemoteAccess Enable="0" Port="" Protocol="" SupportedProtocols="HTTP,HTTPS,TELNET,FTP"/>
-<X_HW_LocalAccess Enable="1" Port="80,443,23" Protocol="HTTP,HTTPS,TELNET" SupportedProtocols="HTTP,HTTPS,TELNET,FTP"/>
+<X_HW_RemoteAccess Enable="0" Port="" Protocol="" SupportedProtocols="HTTP,HTTPS,TELNET,FTP,SSH"/>
+<X_HW_LocalAccess Enable="1" Port="80,443,21,22,23" Protocol="HTTP,HTTPS,TELNET,FTP,SSH" SupportedProtocols="HTTP,HTTPS,TELNET,FTP,SSH"/>
 </AclServices>
 <Firewall Enable="1" ChainNumberOfEntries="1" LevelNumberOfEntries="1" LastChange="1981-01-01T00:04:53Z" Version="1.0" Type="Stateful" AdvancedLevel="InternetGatewayDevice.X_HW_Security.Firewall.Level.1" Config="Advanced">
 <Level NumberOfInstances="1">
@@ -1528,11 +1528,11 @@
 <X_HW_WebUserInfoInstance InstanceID="2" UserName="telecomadmin" Password="$2i:1+(6w|K(connT3tKH.N8HeP5-EF-xc3pMRR.6W~E+4Ap[N[@w)u&amp;/]*1B/$,Zd=]htg&gt;{t|e1cAUS=1X+@R_Nen-&apos;*w92fRw*,$" UserLevel="0" Enable="1" ModifyPasswordFlag="0" SuperModeValue="$2^:laOw]c@=JLj3Pd9Z12AT`fT-JENT$`ME&lt;]%&gt;KS$" ModifySuperModeFlag="0" Salt="LSFP5fcMS6yNUN1i0qYnBU+F" PassMode="2" Alias="cpe-2"/>
 </X_HW_WebUserInfo>
 </UserInterface>
-<ManagementServer EnableCWMP="0" URL="" Username="" Password="" PeriodicInformEnable="0" PeriodicInformInterval="43200" PeriodicInformTime="" ParameterKey="0" ConnectionRequestURL="" ConnectionRequestUsername="" ConnectionRequestPassword="" UpgradesManaged="1" KickURL="" DownloadProgressURL="" DefaultActiveNotificationThrottle="0" UDPConnectionRequestAddress="" UDPConnectionRequestAddressNotificationLimit="0" STUNEnable="0" STUNServerAddress="" STUNServerPort="0" STUNUsername="" STUNPassword="" STUNMaximumKeepAlivePeriod="0" STUNMinimumKeepAlivePeriod="0" NATDetected="0" ManageableDeviceNumberOfEntries="0" ManageableDeviceNotificationLimit="0" X_HW_EnableCertificate="0" X_HW_CertPassword="$2S1N%A}[(DRoUa0Wyh&amp;W!@#\Y6(kbnG#D*;/)XX(Q$" X_HW_DSCP="0" X_HW_CheckPasswordComplex="0" X_HW_PeriodicInformTime="" X_HW_Path="6e0fe45d4d305251ae495de3aa406a54"/>
+<ManagementServer EnableCWMP="0" URL="" Username="" Password="" PeriodicInformEnable="0" PeriodicInformInterval="43200" PeriodicInformTime="" ParameterKey="0" ConnectionRequestURL="" ConnectionRequestUsername="" ConnectionRequestPassword="" UpgradesManaged="1" KickURL="" DownloadProgressURL="" DefaultActiveNotificationThrottle="0" UDPConnectionRequestAddress="" UDPConnectionRequestAddressNotificationLimit="0" STUNEnable="0" STUNServerAddress="" STUNServerPort="0" STUNUsername="" STUNPassword="" STUNMaximumKeepAlivePeriod="0" STUNMinimumKeepAlivePeriod="0" NATDetected="0" ManageableDeviceNumberOfEntries="0" ManageableDeviceNotificationLimit="0" X_HW_EnableCertificate="0" X_HW_CertPassword="$2S1N%A}[(DRoUa0Wyh&amp;W!@#\Y6(kbnG#D*;/)XX(Q$" X_HW_DSCP="0" X_HW_CheckPasswordComplex="0" X_HW_PeriodicInformTime="" X_HW_Path="6e0fe45d4d305251ae495de3aa406a54" X_HW_EnableCWMP="0" X_HW_IPProtocolVersion="4"/>
 <X_HW_APMPolicy EnablePowerSavingMode="1">
 <BatteryModePolicy NotUseUsbService="0" NotUseLanService="0" NotUseWlanService="0" NotUseVoiceService="0" NotUseCATVService="0" NotUseRemoteManagement="0"/>
 </X_HW_APMPolicy>
-<X_HW_PSIXmlReset ResetFlag="1"/>
+<X_HW_PSIXmlReset ResetFlag="0"/>
 <X_HW_UserInfo UserName="" UserId="" Status="99" Limit="10" Times="0" Result="99" X_HW_InformStatus="0" X_HW_AcsCnnctSatus="0"/>
 <X_HW_ServiceManage FtpEnable="1" FtpPort="21" FtpRoorDir="/mnt/usb1_1/" FtpUserNum="0"/>
 <X_HW_SSMPPDT>
@@ -1592,7 +1592,7 @@
 <Processor NumberOfInstances="1">
 <ProcessorInstance InstanceID="1" Alias="cpe-1" Architecture="arm"/>
 </Processor>
-<X_HW_SyslogConfig LogServerEnable="0" Interface="" Facility="16" Severity="7" ServerAddress="" ServerPort="514" WatchdogPSK="" PolicyMode="UDP" MaxTime="0"/>
+<X_HW_SyslogConfig LogServerEnable="0" Interface="" Facility="16" Severity="7" ServerAddress="" ServerPort="514" WatchdogPSK="" PolicyMode="UDP" MaxTime="0" Level="0" Target="Local" Timeout="3600"/>
 <VendorLogFile NumberOfInstances="1">
 <VendorLogFileInstance InstanceID="1" Alias="cpe-1" Name="system_log" MaximumSize="0" Persistent="1"/>
 </VendorLogFile>
