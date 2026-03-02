@@ -69,6 +69,7 @@ from web_crawler.config import (
     DEFAULT_CONCURRENCY,
     HEADER_RETRY_MAX,
     HIDDEN_FILE_PROBES,
+    MAX_QUEUE_SIZE,
     MAX_URL_RETRIES,
     PROBE_403_THRESHOLD,
     PROBE_404_THRESHOLD,
@@ -1076,6 +1077,9 @@ class Crawler:
             if any(path_lower_eq.endswith(ext)
                    for ext in SITEGROUND_BLOCKED_EXTENSIONS):
                 return
+            # Block known bad URL patterns early (before scheme enforcement)
+            if BLOCKED_PATH_RE.search(parsed.path):
+                return
             # Enforce the base scheme (upgrade http → https when base is https)
             # so every request uses the protocol the server expects and the
             # session cookie (e.g. SG-CAPTCHA bypass) is always included.
@@ -1093,6 +1097,11 @@ class Crawler:
                 # be unreachable when discovered at the depth boundary.
                 if not is_cdn:
                     return
+            # Queue size cap – prevent unbounded memory growth on sites
+            # whose REST API / pagination generates an ever-expanding
+            # set of discovery URLs.
+            if len(self._queue) >= MAX_QUEUE_SIZE and not priority:
+                return
             # Auto-prioritize target extension files
             if not priority and self.download_extensions:
                 path_lower = parsed.path.lower()
