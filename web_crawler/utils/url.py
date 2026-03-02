@@ -27,6 +27,10 @@ def normalise_url(raw: str, page_url: str, base: str,
     if not raw or raw.startswith(("data:", "javascript:", "mailto:", "#")):
         return None
 
+    # Fix JSON-escaped forward slashes (e.g. \/wp-json\/… from WP REST API)
+    if "\\/" in raw:
+        raw = raw.replace("\\/", "/")
+
     parsed = urllib.parse.urlparse(raw)
 
     if not parsed.scheme:

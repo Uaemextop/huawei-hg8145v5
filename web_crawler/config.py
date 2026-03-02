@@ -531,16 +531,31 @@ BLOCKED_PATH_RE = re.compile(
     r"wc/(?:v[1-9]|gla|analytics)/|"      # WC REST v1–9, GLA, Analytics (401)
     r"wc-admin/|"                           # WC Admin (401)
     r"wc-analytics/|"                       # WC Analytics (401)
+    r"wc-telemetry/|"                       # WC Telemetry (404)
+    r"wccom-site/|"                         # WooCommerce.com Site (404)
     r"jetpack/|my-jetpack/v\d+/(?!$)|"     # Jetpack (401), keep root index
-    r"elementor(?:-pro)?/v\d+/(?!$)|"      # Elementor/Pro (401), keep root index
+    r"elementor(?:-pro|-one)?/v\d+/(?!$)|" # Elementor/Pro/One (401), keep root index
     r"siteground-optimizer/|"              # SiteGround Optimizer (404/401)
     r"code-snippets/|"                     # Code Snippets (401)
     r"flexible-checkout-fields/|"          # Flexible Checkout Fields (401)
     r"wp-site-health/|"                    # WP Site Health (401)
-    r"oceanwp/v\d+/(?!$)"                  # OceanWP (401), keep root index
-    r")",
+    r"oceanwp/v\d+/(?!$)|"                 # OceanWP (401), keep root index
+    r"wc/pos/"                              # WC POS (404)
+    r")"
+    # WP REST API revision endpoints (always 401 without authentication).
+    # Each post/page generates revision sub-URLs that cause queue explosion.
+    r"|/wp-json/wp/v2/[^/]+/\d+/revisions"
+    # WC Store API action endpoints (cart mutations – always 404 on GET)
+    r"|/wp-json/wc/store/v1/(?:cart/(?:add-item|remove-item|update-item"
+    r"|apply-coupon|remove-coupon|select-shipping-rate|extensions)"
+    r"|batch|checkout)\b",
     re.IGNORECASE,
 )
+
+# Maximum queue size.  Prevents unbounded memory growth on sites whose
+# REST API / pagination generates an ever-expanding set of discovery URLs.
+# When the queue exceeds this limit, new URLs are silently dropped.
+MAX_QUEUE_SIZE = 50_000
 
 
 # ---------------------------------------------------------------------------
