@@ -1032,7 +1032,7 @@ class TestProbe403Threshold(unittest.TestCase):
         crawler._probe_urls.add(url_key(probe_url))
         # Should complete without making an HTTP request
         crawler._fetch_and_process(probe_url, 0)
-        self.assertEqual(crawler._stats["err"], 1)
+        self.assertEqual(crawler._stats["probe"], 1)
 
     def test_probe_dir_below_limit_not_skipped(self):
         """Probe URLs for directories below the limit are not pre-skipped."""
@@ -1046,6 +1046,168 @@ class TestProbe403Threshold(unittest.TestCase):
         # is what we're testing)
         key = url_key(probe_url)
         self.assertNotIn(key, crawler._visited)
+
+
+# ------------------------------------------------------------------ #
+# Probe counter separation and improved error handling
+# ------------------------------------------------------------------ #
+
+class TestProbeCounterSeparation(unittest.TestCase):
+    """Tests that probe failures use 'probe' counter, not 'err'."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, '_load_robots', return_value=None):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_probe_counter"),
+                respect_robots=False,
+            )
+
+    def test_probe_dir_exhausted_uses_probe_counter(self):
+        """Probe dir exhaustion increments 'probe', not 'err'."""
+        from web_crawler.config import PROBE_DIR_404_LIMIT
+        crawler = self._make_crawler()
+        crawler._probe_dir_failures["/dir/"] = PROBE_DIR_404_LIMIT
+        probe_url = "https://example.com/dir/.htaccess"
+        crawler._probe_urls.add(url_key(probe_url))
+        crawler._fetch_and_process(probe_url, 0)
+        self.assertEqual(crawler._stats["probe"], 1)
+        self.assertEqual(crawler._stats["err"], 0)
+
+    def test_stats_has_probe_key(self):
+        """The stats dict should include a 'probe' counter."""
+        crawler = self._make_crawler()
+        self.assertIn("probe", crawler._stats)
+        self.assertEqual(crawler._stats["probe"], 0)
+
+    def test_stats_postfix_includes_probe(self):
+        """The progress bar postfix should include PROBE."""
+        crawler = self._make_crawler()
+        postfix = crawler._stats_postfix()
+        self.assertIn("PROBE", postfix)
+
+    def test_url_retries_initialized(self):
+        """The URL retries dict should be initialized."""
+        crawler = self._make_crawler()
+        self.assertIsInstance(crawler._url_retries, dict)
+        self.assertEqual(len(crawler._url_retries), 0)
+
+
+class TestRedirectSkipNotError(unittest.TestCase):
+    """Tests that redirect-based skips use 'skip' counter, not 'err'."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, '_load_robots', return_value=None):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_redirect_skip"),
+                respect_robots=False,
+            )
+
+    def test_cross_domain_redirect_counts_as_skip(self):
+        """Cross-domain redirect should increment skip, not err."""
+        crawler = self._make_crawler()
+        resp = MagicMock()
+        resp.url = "https://other-domain.com/page"
+        resp.status_code = 200
+        resp.ok = True
+        resp.headers = {"Content-Type": "text/html"}
+        crawler.session = MagicMock()
+        crawler.session.get.return_value = resp
+        crawler.session.headers = {"User-Agent": "test"}
+        crawler._fetch_and_process("https://example.com/redirect-page", 0)
+        self.assertEqual(crawler._stats["skip"], 1)
+        self.assertEqual(crawler._stats["err"], 0)
+
+    def test_wp_login_redirect_counts_as_skip(self):
+        """WP login redirect should increment skip, not err."""
+        crawler = self._make_crawler()
+        resp = MagicMock()
+        resp.url = "https://example.com/wp-login.php?redirect_to=test"
+        resp.status_code = 200
+        resp.ok = True
+        resp.headers = {"Content-Type": "text/html"}
+        crawler.session = MagicMock()
+        crawler.session.get.return_value = resp
+        crawler.session.headers = {"User-Agent": "test"}
+        crawler._fetch_and_process("https://example.com/admin-page", 0)
+        self.assertEqual(crawler._stats["skip"], 1)
+        self.assertEqual(crawler._stats["err"], 0)
+
+
+class TestNetworkErrorRetry(unittest.TestCase):
+    """Tests that transient network errors trigger re-enqueue."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, '_load_robots', return_value=None):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_network_retry"),
+                respect_robots=False,
+            )
+
+    def test_network_error_reenqueues_url(self):
+        """First network error should re-enqueue URL, not count as ERR."""
+        import requests as _req
+        crawler = self._make_crawler()
+        crawler.session = MagicMock()
+        crawler.session.get.side_effect = _req.ConnectionError("reset")
+        crawler.session.headers = {"User-Agent": "test"}
+        url = "https://example.com/some-page"
+        crawler._fetch_and_process(url, 0)
+        self.assertEqual(crawler._stats["err"], 0)
+        # URL should have been removed from visited and re-enqueued
+        key = url_key(url)
+        self.assertNotIn(key, crawler._visited)
+
+    def test_network_error_counts_as_err_after_max_retries(self):
+        """After MAX_URL_RETRIES, network error should count as ERR."""
+        import requests as _req
+        from web_crawler.config import MAX_URL_RETRIES
+        crawler = self._make_crawler()
+        crawler.session = MagicMock()
+        crawler.session.get.side_effect = _req.ConnectionError("reset")
+        crawler.session.headers = {"User-Agent": "test"}
+        url = "https://example.com/some-page"
+        key = url_key(url)
+        # Simulate already exhausted retries
+        crawler._url_retries[key] = MAX_URL_RETRIES
+        crawler._fetch_and_process(url, 0)
+        self.assertEqual(crawler._stats["err"], 1)
+
+
+class TestProbeExtensionFiltering(unittest.TestCase):
+    """Tests that probe URLs with blocked extensions are not enqueued."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, '_load_robots', return_value=None):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_probe_filter"),
+                respect_robots=False,
+            )
+
+    def test_blocked_extension_probes_not_enqueued(self):
+        """Probes with SiteGround-blocked extensions should be skipped."""
+        from web_crawler.config import SITEGROUND_BLOCKED_EXTENSIONS
+        crawler = self._make_crawler()
+        crawler._probe_hidden_files("https://example.com/dir/page.html", 0)
+        # Check that none of the probe URLs have blocked extensions
+        for probe_key in crawler._probe_urls:
+            for ext in SITEGROUND_BLOCKED_EXTENSIONS:
+                self.assertFalse(
+                    probe_key.endswith(ext),
+                    f"Probe URL {probe_key} has blocked extension {ext}",
+                )
+
+
+class TestMaxUrlRetriesConfig(unittest.TestCase):
+    """Test that MAX_URL_RETRIES config exists and is positive."""
+
+    def test_max_url_retries_exists(self):
+        from web_crawler.config import MAX_URL_RETRIES
+        self.assertIsInstance(MAX_URL_RETRIES, int)
+        self.assertGreater(MAX_URL_RETRIES, 0)
 
 
 # ------------------------------------------------------------------ #

@@ -69,6 +69,7 @@ from web_crawler.config import (
     DEFAULT_CONCURRENCY,
     HEADER_RETRY_MAX,
     HIDDEN_FILE_PROBES,
+    MAX_URL_RETRIES,
     PROBE_403_THRESHOLD,
     PROBE_404_THRESHOLD,
     PROBE_DIR_404_LIMIT,
@@ -169,8 +170,9 @@ class Crawler:
         self._probing_disabled: bool = False  # set when threshold is reached
         self._sg_captcha_solves: int = 0     # how many inline captchas solved
         self._sg_solve_lock = threading.Lock()  # serialize concurrent CAPTCHA solves
+        self._url_retries: dict[str, int] = {}  # per-URL retry count for transient errors
         self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0,
-                       "soft404": 0, "waf": 0, "retry_ok": 0}
+                       "soft404": 0, "waf": 0, "retry_ok": 0, "probe": 0}
 
         # Soft-404 detection
         self._soft404_size: int | None = None
@@ -263,7 +265,7 @@ class Crawler:
     def _log_final_stats(self) -> None:
         """Print a summary table with final crawl statistics."""
         s = self._stats
-        total = s["ok"] + s["skip"] + s["dup"] + s["err"] + s["soft404"] + s["waf"]
+        total = s["ok"] + s["skip"] + s["dup"] + s["err"] + s["soft404"] + s["waf"] + s["probe"]
         pct_ok = (s["ok"] / total * 100) if total else 0
         pct_err = (s["err"] / total * 100) if total else 0
         ci_group("Crawl results")
@@ -276,6 +278,7 @@ class Crawler:
         log.info("Duplicates  : %d", s["dup"])
         log.info("Soft-404    : %d", s["soft404"])
         log.info("WAF blocked : %d", s["waf"])
+        log.info("Probe miss  : %d", s["probe"])
         log.info("Retry OK    : %d", s["retry_ok"])
         log.info("Errors      : %d  (%.1f%%)", s["err"], pct_err)
         log.info("Captcha     : %d solves", self._sg_captcha_solves)
@@ -302,6 +305,7 @@ class Crawler:
             "SKIP": self._stats["skip"],
             "DUP": self._stats["dup"],
             "S404": self._stats["soft404"],
+            "PROBE": self._stats["probe"],
         }
 
     def _track_video_url(self, url: str) -> None:
@@ -1215,13 +1219,21 @@ class Crawler:
                 return
             self._probed_dirs.add(dir_path)
 
+        enqueued = 0
         for probe in HIDDEN_FILE_PROBES:
+            # Skip probes whose extension is blocked by SiteGround WAF
+            # to avoid inflating error/probe counters with guaranteed 403s
+            probe_lower = probe.lower()
+            if any(probe_lower.endswith(ext)
+                   for ext in SITEGROUND_BLOCKED_EXTENSIONS):
+                continue
             probe_url = self.base + dir_path + probe
             with self._lock:
                 self._probe_urls.add(url_key(probe_url))
             self._enqueue(probe_url, depth + 1)
+            enqueued += 1
 
-        log.debug("Probed %d hidden files at %s", len(HIDDEN_FILE_PROBES), dir_path)
+        log.debug("Probed %d hidden files at %s", enqueued, dir_path)
 
     def _fetch_and_process(self, url: str, depth: int) -> None:
         key = url_key(url)
@@ -1248,7 +1260,7 @@ class Crawler:
             if dir_fails >= PROBE_DIR_404_LIMIT:
                 log.debug("[PROBE] Dir %s exhausted (%d fails) – skipping %s",
                           probe_dir, dir_fails, url)
-                self._stats["err"] += 1
+                self._stats["probe"] += 1
                 return
 
         # Probe hidden/config files at each new directory
@@ -1306,6 +1318,20 @@ class Crawler:
                 stream=_use_stream,
             )
         except _NETWORK_ERRORS as exc:
+            # Re-enqueue on transient network errors up to MAX_URL_RETRIES
+            with self._lock:
+                retries = self._url_retries.get(key, 0)
+                if retries < MAX_URL_RETRIES:
+                    self._url_retries[key] = retries + 1
+                    self._visited.discard(key)
+                    can_retry = True
+                else:
+                    can_retry = False
+            if can_retry:
+                self._enqueue(url, depth)
+                log.debug("Request failed for %s – retry %d/%d – %s",
+                          url, retries + 1, MAX_URL_RETRIES, exc)
+                return
             log.warning("Request failed for %s – %s", url, exc)
             self._stats["err"] += 1
             return
@@ -1318,7 +1344,7 @@ class Crawler:
             if final_parsed.netloc != self.allowed_host:
                 log.debug("  Redirect to external host %s – skipping",
                           final_parsed.netloc)
-                self._stats["err"] += 1
+                self._stats["skip"] += 1
                 return
             # WordPress protection: redirect to wp-login.php means
             # the page requires authentication – save the redirect
@@ -1326,7 +1352,7 @@ class Crawler:
             if "wp-login.php" in final_parsed.path:
                 log.debug("  WP auth redirect to wp-login.php – skipping %s",
                           url)
-                self._stats["err"] += 1
+                self._stats["skip"] += 1
                 return
             # Mark the final URL as visited too
             final_key = url_key(final_url)
@@ -1369,7 +1395,7 @@ class Crawler:
                         self._probe_403_count,
                     )
                 log.debug("  [PROBE] 403 for %s – skipping (no retry)", url)
-                self._stats["err"] += 1
+                self._stats["probe"] += 1
                 return
 
             log.debug("  [%d] Blocked – retrying with rotated headers: %s",
@@ -1453,7 +1479,7 @@ class Crawler:
                         self._probe_404_count,
                     )
                 log.debug("  [PROBE] 404 for %s – skipping", url)
-                self._stats["err"] += 1
+                self._stats["probe"] += 1
                 return
             log.warning("HTTP %s for %s – skipping", resp.status_code, url)
             self._stats["err"] += 1
@@ -1474,7 +1500,7 @@ class Crawler:
                         self._probe_dir_failures.get(probe_dir, 0) + 1
                     )
                 log.debug("  [PROBE] SG-Captcha for %s – skipping", url)
-                self._stats["err"] += 1
+                self._stats["probe"] += 1
                 return
 
             # Limit inline captcha solves to avoid endless PoW loops

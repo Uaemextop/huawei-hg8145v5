@@ -41,6 +41,8 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
         total=MAX_RETRIES,
         backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504],
+        connect=MAX_RETRIES,           # retry on connection errors
+        read=MAX_RETRIES,              # retry on read errors (socket reset, etc.)
     )
     adapter = HTTPAdapter(
         max_retries=retry,
