@@ -2095,6 +2095,11 @@ class TestSkipMediaFiles(unittest.TestCase):
         self.assertIn(".mp4", _MEDIA_EXTENSIONS)
         self.assertIn(".mp3", _MEDIA_EXTENSIONS)
 
+    def test_m3u8_in_video_extensions(self):
+        from web_crawler.core.crawler import _VIDEO_EXTENSIONS, _MEDIA_EXTENSIONS
+        self.assertIn(".m3u8", _VIDEO_EXTENSIONS)
+        self.assertIn(".m3u8", _MEDIA_EXTENSIONS)
+
 
 if __name__ == "__main__":
     unittest.main()
