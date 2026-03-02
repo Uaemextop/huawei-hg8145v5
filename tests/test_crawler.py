@@ -966,6 +966,63 @@ class TestUrlList(unittest.TestCase):
             self.assertEqual(parts[2], "Super Landia")  # author
             self.assertEqual(parts[3], "")              # description (deduped)
 
+    def test_populate_meta_merge_fills_empty_fields(self):
+        """Later metadata calls fill empty fields instead of being blocked."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        video_url = "https://cdn.example.com/video.mp4"
+        # Step 1: JSON response sets empty metadata
+        crawler._populate_video_meta("{}", {video_url})
+        self.assertIn(video_url, crawler._video_meta)
+        self.assertEqual(crawler._video_meta[video_url]["title"], "")
+
+        # Step 2: HTML page with microdata fills empty fields
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Super Landia" />
+          <meta itemprop="name" content="Mommy" />
+          <meta itemprop="description" content="Mommy" />
+          <meta itemprop="duration" content="PT5M" />
+          <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+          <meta itemprop="uploadDate" content="2026-01-16" />
+        </article></body></html>'''
+        crawler._populate_video_meta(html, {video_url})
+        meta = crawler._video_meta[video_url]
+        self.assertEqual(meta["title"], "Mommy")
+        self.assertEqual(meta["author"], "Super Landia")
+        self.assertEqual(meta["description"], "")  # deduped
+        self.assertEqual(meta["duration"], "PT5M")
+        self.assertEqual(meta["upload_date"], "2026-01-16")
+        self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
+
+    def test_populate_meta_enriches_author_from_microdata(self):
+        """Page-level fallback gets author from microdata when OG lacks it."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        main_video = "https://cdn.example.com/main.mp4"
+        related_video = "https://cdn.example.com/related.mp4"
+        html = '''<html><head>
+        <meta property="og:title" content="Page Title">
+        </head><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Author Name" />
+          <meta itemprop="name" content="Video Title" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/main.mp4" />
+        </article></body></html>'''
+        crawler._populate_video_meta(html, {main_video, related_video})
+        # Related video should get author from microdata enrichment
+        related_meta = crawler._video_meta[related_video]
+        self.assertEqual(related_meta["author"], "Author Name")
+
 
 # ------------------------------------------------------------------ #
 # Logging system
