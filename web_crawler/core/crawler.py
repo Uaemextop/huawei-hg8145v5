@@ -323,8 +323,16 @@ class Crawler:
             self._video_urls.append(url)
 
     def _write_url_list(self) -> None:
-        """Write the current list of saved URLs to ``url_list.txt``."""
-        snapshot = list(self._saved_urls)
+        """Write saved **video** URLs to ``url_list.txt``.
+
+        Only URLs whose path ends with a known video extension
+        (``_VIDEO_EXTENSIONS``) are included.
+        """
+        snapshot = [
+            u for u in self._saved_urls
+            if any(urllib.parse.urlparse(u).path.lower().endswith(ext)
+                   for ext in _VIDEO_EXTENSIONS)
+        ]
         if not snapshot:
             return
         url_list = self.output_dir / "url_list.txt"

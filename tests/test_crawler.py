@@ -611,16 +611,18 @@ class TestGitPushIntegration(unittest.TestCase):
                 )
             crawler._stats["ok"] = 100
             crawler._saved_urls = [
+                "https://example.com/video1.mp4",
+                "https://example.com/video2.webm",
                 "https://example.com/page1.html",
-                "https://example.com/page2.html",
             ]
             with patch("subprocess.run"):
                 crawler._maybe_git_push()
             url_list = Path(td) / "url_list.txt"
             self.assertTrue(url_list.exists())
             content = url_list.read_text(encoding="utf-8")
-            self.assertIn("https://example.com/page1.html", content)
-            self.assertIn("https://example.com/page2.html", content)
+            self.assertIn("https://example.com/video1.mp4", content)
+            self.assertIn("https://example.com/video2.webm", content)
+            self.assertNotIn("https://example.com/page1.html", content)
 
 
 class TestUrlList(unittest.TestCase):
@@ -649,13 +651,13 @@ class TestUrlList(unittest.TestCase):
                     output_dir=Path(td),
                     respect_robots=False,
                 )
-            crawler._saved_urls = ["https://example.com/a.html"]
+            crawler._saved_urls = ["https://example.com/a.mp4"]
             crawler._write_url_list()
             url_list = Path(td) / "url_list.txt"
             self.assertTrue(url_list.exists())
             self.assertEqual(
                 url_list.read_text(encoding="utf-8"),
-                "https://example.com/a.html\n",
+                "https://example.com/a.mp4\n",
             )
 
     def test_write_url_list_multiple_urls(self):
@@ -667,13 +669,17 @@ class TestUrlList(unittest.TestCase):
                     output_dir=Path(td),
                     respect_robots=False,
                 )
-            urls = [f"https://example.com/p{i}.html" for i in range(5)]
-            crawler._saved_urls = urls
+            video_urls = [f"https://example.com/v{i}.mp4" for i in range(3)]
+            non_video = ["https://example.com/page.html",
+                         "https://example.com/style.css"]
+            crawler._saved_urls = video_urls + non_video
             crawler._write_url_list()
             url_list = Path(td) / "url_list.txt"
             content = url_list.read_text(encoding="utf-8")
-            for u in urls:
+            for u in video_urls:
                 self.assertIn(u, content)
+            for u in non_video:
+                self.assertNotIn(u, content)
 
     def test_write_url_list_skipped_when_empty(self):
         import tempfile
@@ -684,6 +690,24 @@ class TestUrlList(unittest.TestCase):
                     output_dir=Path(td),
                     respect_robots=False,
                 )
+            crawler._write_url_list()
+            url_list = Path(td) / "url_list.txt"
+            self.assertFalse(url_list.exists())
+
+    def test_write_url_list_skipped_when_no_videos(self):
+        """url_list.txt is NOT created when saved URLs have no video files."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._saved_urls = [
+                "https://example.com/page.html",
+                "https://example.com/image.png",
+            ]
             crawler._write_url_list()
             url_list = Path(td) / "url_list.txt"
             self.assertFalse(url_list.exists())
