@@ -219,8 +219,8 @@ jobs:
           cd downloaded_site
           git init -b main
           git lfs install --local
-          git config user.name "Web Crawler Bot"
-          git config user.email "crawler@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
 
