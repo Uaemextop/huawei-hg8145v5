@@ -45,6 +45,7 @@ if CfRequestException is not None:
 _VIDEO_EXTENSIONS = frozenset((
     ".mp4", ".webm", ".ogv", ".avi", ".mov", ".flv", ".mkv", ".wmv",
     ".m4v", ".3gp", ".3g2", ".ts", ".mpeg", ".mpg", ".f4v", ".asf",
+    ".m3u8",
 ))
 
 _AUDIO_EXTENSIONS = frozenset((
