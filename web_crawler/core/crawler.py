@@ -196,7 +196,7 @@ class Crawler:
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
         self._video_urls: list[str] = []
-        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, description}
+        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
         self._saved_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
@@ -296,29 +296,42 @@ class Crawler:
         # Write video URL list
         self._write_video_url_list()
 
+    @staticmethod
+    def _sanitize_meta_value(value: str) -> str:
+        """Sanitize a metadata value for pipe-separated output.
+
+        Replaces pipe characters and newlines so they do not break
+        the ``video_urls.txt`` line format.
+        """
+        return value.replace("|", "-").replace("\n", " ").replace("\r", "")
+
     def _write_video_url_list(self) -> None:
         """Write tracked video URLs to ``video_urls.txt``.
 
-        Each line uses the pipe-separated format::
+        Each line uses the pipe-separated format (6 fields)::
 
-            URL|Title|Author|Description|ThumbnailUrl|Duration|UploadDate|Genre
+            URL|Title|Author|ThumbnailUrl|Duration|UploadDate
+
+        Metadata is sourced from JSON-LD ``VideoObject``, Schema.org
+        microdata (``itemprop`` tags), or page-level OG/meta tags (in
+        that priority order).  Pipe characters and newlines inside
+        metadata values are sanitized to preserve the format.
         """
         if not self._video_urls:
             return
         video_list = self.output_dir / "video_urls.txt"
         video_list.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
+        _san = self._sanitize_meta_value
         for url in self._video_urls:
             meta = self._video_meta.get(url, {})
             parts = [
                 url,
-                meta.get("title", ""),
-                meta.get("author", ""),
-                meta.get("description", ""),
-                meta.get("thumbnail", ""),
-                meta.get("duration", ""),
-                meta.get("upload_date", ""),
-                meta.get("genre", ""),
+                _san(meta.get("title", "")),
+                _san(meta.get("author", "")),
+                _san(meta.get("thumbnail", "")),
+                _san(meta.get("duration", "")),
+                _san(meta.get("upload_date", "")),
             ]
             lines.append("|".join(parts))
         video_list.write_text(
@@ -348,33 +361,79 @@ class Crawler:
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
 
+    @staticmethod
+    def _merge_video_meta(
+        existing: dict[str, str],
+        incoming: dict[str, str],
+    ) -> None:
+        """Merge *incoming* metadata into *existing*, filling empty fields.
+
+        Non-empty values in *existing* are kept; only blank fields are
+        filled from *incoming*.
+        """
+        for key, val in incoming.items():
+            if val and not existing.get(key):
+                existing[key] = val
+
     def _populate_video_meta(self, html: str, links: set[str]) -> None:
         """Extract metadata from an HTML page and associate it with video links.
 
-        Per-video metadata from JSON-LD ``VideoObject`` entries takes
-        priority over page-level metadata (title, description, author,
-        thumbnail, duration, upload_date, genre).
+        Per-video metadata from JSON-LD ``VideoObject`` entries and
+        Schema.org microdata (``itemprop`` meta tags) takes priority
+        over page-level metadata (title, author, thumbnail, duration,
+        upload_date).
+
+        When a video URL already has metadata from a previous call
+        (e.g. from a JSON API response with empty fields), non-empty
+        values from the new source are merged in rather than blocked.
         """
         from web_crawler.extraction.html_parser import (
             extract_page_metadata,
             extract_jsonld_video_meta,
+            extract_microdata_video_meta,
         )
         page_meta = extract_page_metadata(html)
         video_meta = extract_jsonld_video_meta(html)
+        microdata_meta = extract_microdata_video_meta(html)
+
+        # Enrich page-level fallback with shared fields from the
+        # page's structured data (e.g. author) so that video URLs
+        # that are NOT the microdata contentURL still get them.
+        # (empty dicts are falsy, so ``if src`` skips them safely)
+        for src in (microdata_meta, video_meta):
+            if src:
+                first = next(iter(src.values()))
+                if not page_meta.get("author") and first.get("author"):
+                    page_meta["author"] = first["author"]
+                break  # use the first available source
 
         with self._lock:
             # Store JSON-LD per-video metadata (highest priority)
             for vurl, vmeta in video_meta.items():
-                if vurl not in self._video_meta:
+                existing = self._video_meta.get(vurl)
+                if existing is None:
                     self._video_meta[vurl] = vmeta
+                else:
+                    self._merge_video_meta(existing, vmeta)
+
+            # Store microdata per-video metadata (second priority)
+            for vurl, vmeta in microdata_meta.items():
+                existing = self._video_meta.get(vurl)
+                if existing is None:
+                    self._video_meta[vurl] = vmeta
+                else:
+                    self._merge_video_meta(existing, vmeta)
 
             # For discovered links that look like video URLs, use
             # page-level metadata as a fallback.
             for link in links:
                 path_lower = urllib.parse.urlparse(link).path.lower()
                 if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
-                    if link not in self._video_meta:
+                    existing = self._video_meta.get(link)
+                    if existing is None:
                         self._video_meta[link] = dict(page_meta)
+                    else:
+                        self._merge_video_meta(existing, page_meta)
 
     def _write_url_list(self) -> None:
         """Write all **video** URLs to ``url_list.txt``.

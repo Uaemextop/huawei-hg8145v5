@@ -806,11 +806,9 @@ class TestUrlList(unittest.TestCase):
                 "https://example.com/a.mp4": {
                     "title": "Big Buck Bunny",
                     "author": "Blender Foundation",
-                    "description": "A short animation",
                     "thumbnail": "https://example.com/thumb.jpg",
                     "duration": "PT10M",
                     "upload_date": "2024-01-01",
-                    "genre": "Animation",
                 },
             }
             crawler._write_video_url_list()
@@ -818,7 +816,7 @@ class TestUrlList(unittest.TestCase):
             content = video_list.read_text(encoding="utf-8")
             expected = (
                 "https://example.com/a.mp4|Big Buck Bunny|Blender Foundation|"
-                "A short animation|https://example.com/thumb.jpg|PT10M|2024-01-01|Animation\n"
+                "https://example.com/thumb.jpg|PT10M|2024-01-01\n"
             )
             self.assertEqual(content, expected)
 
@@ -836,7 +834,7 @@ class TestUrlList(unittest.TestCase):
             crawler._write_video_url_list()
             video_list = Path(td) / "video_urls.txt"
             content = video_list.read_text(encoding="utf-8")
-            self.assertEqual(content, "https://example.com/a.mp4|||||||\n")
+            self.assertEqual(content, "https://example.com/a.mp4|||||\n")
 
     def test_populate_video_meta_from_html(self):
         """_populate_video_meta extracts metadata from HTML pages."""
@@ -874,12 +872,10 @@ class TestUrlList(unittest.TestCase):
         ld = {
             "@type": "VideoObject",
             "name": "Specific Title",
-            "description": "Specific desc",
             "contentUrl": "https://cdn.example.com/clip.mp4",
             "thumbnailUrl": "https://cdn.example.com/thumb.jpg",
             "duration": "PT5M",
             "uploadDate": "2025-06-01",
-            "genre": "Comedy",
             "author": "Specific Author",
         }
         html = (
@@ -894,6 +890,126 @@ class TestUrlList(unittest.TestCase):
         self.assertEqual(meta["author"], "Specific Author")
         self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
         self.assertEqual(meta["duration"], "PT5M")
+
+    def test_write_video_url_list_sanitizes_pipes(self):
+        """Pipe characters in metadata values are replaced to preserve format."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._video_urls = ["https://example.com/a.mp4"]
+            crawler._video_meta = {
+                "https://example.com/a.mp4": {
+                    "title": "Title|With|Pipes",
+                    "author": "Author",
+                    "thumbnail": "",
+                    "duration": "",
+                    "upload_date": "",
+                },
+            }
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            # Pipes in values replaced
+            self.assertEqual(
+                content,
+                "https://example.com/a.mp4|Title-With-Pipes|Author|||\n",
+            )
+
+    def test_write_video_url_list_microdata_metadata(self):
+        """video_urls.txt includes real metadata from microdata extraction."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            html = '''<html><body>
+            <article itemscope itemtype="https://schema.org/VideoObject">
+              <meta itemprop="author" content="Super Landia" />
+              <meta itemprop="name" content="Mommy" />
+              <meta itemprop="duration" content="PT5M" />
+              <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+              <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+              <meta itemprop="uploadDate" content="2026-01-16" />
+            </article></body></html>'''
+            links = {"https://cdn.example.com/video.mp4"}
+            crawler._populate_video_meta(html, links)
+            crawler._video_urls = ["https://cdn.example.com/video.mp4"]
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            # Metadata should be populated from microdata
+            self.assertIn("Mommy", content)
+            self.assertIn("Super Landia", content)
+            self.assertIn("https://cdn.example.com/thumb.jpg", content)
+            self.assertIn("PT5M", content)
+            self.assertIn("2026-01-16", content)
+            parts = content.strip().split("|")
+            self.assertEqual(len(parts), 6)
+            self.assertEqual(parts[1], "Mommy")        # title
+            self.assertEqual(parts[2], "Super Landia")  # author
+
+    def test_populate_meta_merge_fills_empty_fields(self):
+        """Later metadata calls fill empty fields instead of being blocked."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        video_url = "https://cdn.example.com/video.mp4"
+        # Step 1: JSON response sets empty metadata
+        crawler._populate_video_meta("{}", {video_url})
+        self.assertIn(video_url, crawler._video_meta)
+        self.assertEqual(crawler._video_meta[video_url]["title"], "")
+
+        # Step 2: HTML page with microdata fills empty fields
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Super Landia" />
+          <meta itemprop="name" content="Mommy" />
+          <meta itemprop="duration" content="PT5M" />
+          <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+          <meta itemprop="uploadDate" content="2026-01-16" />
+        </article></body></html>'''
+        crawler._populate_video_meta(html, {video_url})
+        meta = crawler._video_meta[video_url]
+        self.assertEqual(meta["title"], "Mommy")
+        self.assertEqual(meta["author"], "Super Landia")
+        self.assertEqual(meta["duration"], "PT5M")
+        self.assertEqual(meta["upload_date"], "2026-01-16")
+        self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
+
+    def test_populate_meta_enriches_author_from_microdata(self):
+        """Page-level fallback gets author from microdata when OG lacks it."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        main_video = "https://cdn.example.com/main.mp4"
+        related_video = "https://cdn.example.com/related.mp4"
+        html = '''<html><head>
+        <meta property="og:title" content="Page Title">
+        </head><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Author Name" />
+          <meta itemprop="name" content="Video Title" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/main.mp4" />
+        </article></body></html>'''
+        crawler._populate_video_meta(html, {main_video, related_video})
+        # Related video should get author from microdata enrichment
+        related_meta = crawler._video_meta[related_video]
+        self.assertEqual(related_meta["author"], "Author Name")
 
 
 # ------------------------------------------------------------------ #

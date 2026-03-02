@@ -530,17 +530,15 @@ class TestProbeThresholds(unittest.TestCase):
 class TestPageMetadataExtraction(unittest.TestCase):
     """Tests for extract_page_metadata()."""
 
-    def test_og_title_and_description(self):
+    def test_og_title_and_author(self):
         from web_crawler.extraction.html_parser import extract_page_metadata
         html = """<html><head>
         <meta property="og:title" content="My Video Page">
-        <meta property="og:description" content="A cool video page">
         <meta property="og:site_name" content="VideoSite">
         <meta property="og:image" content="https://example.com/thumb.jpg">
         </head></html>"""
         meta = extract_page_metadata(html)
         self.assertEqual(meta["title"], "My Video Page")
-        self.assertEqual(meta["description"], "A cool video page")
         self.assertEqual(meta["author"], "VideoSite")
         self.assertEqual(meta["thumbnail"], "https://example.com/thumb.jpg")
 
@@ -556,25 +554,12 @@ class TestPageMetadataExtraction(unittest.TestCase):
         meta = extract_page_metadata(html)
         self.assertEqual(meta["author"], "John Doe")
 
-    def test_meta_description_fallback(self):
-        from web_crawler.extraction.html_parser import extract_page_metadata
-        html = '<html><head><meta name="description" content="A description"></head></html>'
-        meta = extract_page_metadata(html)
-        self.assertEqual(meta["description"], "A description")
-
     def test_empty_html(self):
         from web_crawler.extraction.html_parser import extract_page_metadata
         meta = extract_page_metadata("")
         self.assertEqual(meta["title"], "")
-        self.assertEqual(meta["description"], "")
         self.assertEqual(meta["author"], "")
         self.assertEqual(meta["thumbnail"], "")
-
-    def test_genre_from_keywords(self):
-        from web_crawler.extraction.html_parser import extract_page_metadata
-        html = '<html><head><meta name="keywords" content="comedy, animation"></head></html>'
-        meta = extract_page_metadata(html)
-        self.assertEqual(meta["genre"], "comedy, animation")
 
 
 class TestJsonLdVideoMeta(unittest.TestCase):
@@ -587,12 +572,10 @@ class TestJsonLdVideoMeta(unittest.TestCase):
             "@context": "https://schema.org",
             "@type": "VideoObject",
             "name": "Big Buck Bunny",
-            "description": "A short animation",
             "contentUrl": "https://example.com/video.mp4",
             "thumbnailUrl": "https://example.com/thumb.jpg",
             "duration": "PT10M",
             "uploadDate": "2024-01-01",
-            "genre": "Animation",
             "author": {"@type": "Person", "name": "Blender Foundation"},
         }
         html = f'<html><head><script type="application/ld+json">{json.dumps(ld)}</script></head></html>'
@@ -600,12 +583,10 @@ class TestJsonLdVideoMeta(unittest.TestCase):
         self.assertIn("https://example.com/video.mp4", result)
         meta = result["https://example.com/video.mp4"]
         self.assertEqual(meta["title"], "Big Buck Bunny")
-        self.assertEqual(meta["description"], "A short animation")
         self.assertEqual(meta["author"], "Blender Foundation")
         self.assertEqual(meta["thumbnail"], "https://example.com/thumb.jpg")
         self.assertEqual(meta["duration"], "PT10M")
         self.assertEqual(meta["upload_date"], "2024-01-01")
-        self.assertEqual(meta["genre"], "Animation")
 
     def test_thumbnail_url_as_list(self):
         from web_crawler.extraction.html_parser import extract_jsonld_video_meta
@@ -642,6 +623,55 @@ class TestJsonLdVideoMeta(unittest.TestCase):
         html = "<html><head></head></html>"
         result = extract_jsonld_video_meta(html)
         self.assertEqual(result, {})
+
+
+class TestMicrodataVideoMeta(unittest.TestCase):
+    """Tests for extract_microdata_video_meta()."""
+
+    def test_basic_microdata_video(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Super Landia" />
+          <meta itemprop="name" content="My Video" />
+          <meta itemprop="duration" content="PT5M" />
+          <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+          <meta itemprop="uploadDate" content="2026-01-16T23:30:05" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertIn("https://cdn.example.com/video.mp4", result)
+        meta = result["https://cdn.example.com/video.mp4"]
+        self.assertEqual(meta["title"], "My Video")
+        self.assertEqual(meta["author"], "Super Landia")
+        self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
+        self.assertEqual(meta["duration"], "PT5M")
+        self.assertEqual(meta["upload_date"], "2026-01-16T23:30:05")
+
+    def test_no_microdata(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = "<html><body><p>No video here</p></body></html>"
+        result = extract_microdata_video_meta(html)
+        self.assertEqual(result, {})
+
+    def test_no_content_url(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="name" content="No URL" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertEqual(result, {})
+
+    def test_embedurl_fallback(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="name" content="Embed" />
+          <meta itemprop="embedUrl" content="https://cdn.example.com/embed.mp4" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertIn("https://cdn.example.com/embed.mp4", result)
 
 
 if __name__ == "__main__":
