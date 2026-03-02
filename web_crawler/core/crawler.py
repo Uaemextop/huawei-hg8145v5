@@ -196,7 +196,7 @@ class Crawler:
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
         self._video_urls: list[str] = []
-        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, description, thumbnail, duration, upload_date, genre}
+        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
         self._saved_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
@@ -308,9 +308,9 @@ class Crawler:
     def _write_video_url_list(self) -> None:
         """Write tracked video URLs to ``video_urls.txt``.
 
-        Each line uses the pipe-separated format (8 fields)::
+        Each line uses the pipe-separated format (6 fields)::
 
-            URL|Title|Author|Description|ThumbnailUrl|Duration|UploadDate|Genre
+            URL|Title|Author|ThumbnailUrl|Duration|UploadDate
 
         Metadata is sourced from JSON-LD ``VideoObject``, Schema.org
         microdata (``itemprop`` tags), or page-level OG/meta tags (in
@@ -329,11 +329,9 @@ class Crawler:
                 url,
                 _san(meta.get("title", "")),
                 _san(meta.get("author", "")),
-                _san(meta.get("description", "")),
                 _san(meta.get("thumbnail", "")),
                 _san(meta.get("duration", "")),
                 _san(meta.get("upload_date", "")),
-                _san(meta.get("genre", "")),
             ]
             lines.append("|".join(parts))
         video_list.write_text(
@@ -371,23 +369,19 @@ class Crawler:
         """Merge *incoming* metadata into *existing*, filling empty fields.
 
         Non-empty values in *existing* are kept; only blank fields are
-        filled from *incoming*.  After merging, if *title* equals
-        *description* the description is cleared to avoid redundancy.
+        filled from *incoming*.
         """
         for key, val in incoming.items():
             if val and not existing.get(key):
                 existing[key] = val
-        # Deduplicate title == description after merge
-        if existing.get("title") and existing["title"] == existing.get("description"):
-            existing["description"] = ""
 
     def _populate_video_meta(self, html: str, links: set[str]) -> None:
         """Extract metadata from an HTML page and associate it with video links.
 
         Per-video metadata from JSON-LD ``VideoObject`` entries and
         Schema.org microdata (``itemprop`` meta tags) takes priority
-        over page-level metadata (title, description, author,
-        thumbnail, duration, upload_date, genre).
+        over page-level metadata (title, author, thumbnail, duration,
+        upload_date).
 
         When a video URL already has metadata from a previous call
         (e.g. from a JSON API response with empty fields), non-empty
@@ -403,14 +397,13 @@ class Crawler:
         microdata_meta = extract_microdata_video_meta(html)
 
         # Enrich page-level fallback with shared fields from the
-        # page's structured data (e.g. author, genre) so that video
-        # URLs that are NOT the microdata contentURL still get them.
+        # page's structured data (e.g. author) so that video URLs
+        # that are NOT the microdata contentURL still get them.
         for src in (microdata_meta, video_meta):
             if src:
                 first = next(iter(src.values()))
-                for key in ("author", "genre"):
-                    if not page_meta.get(key) and first.get(key):
-                        page_meta[key] = first[key]
+                if not page_meta.get("author") and first.get("author"):
+                    page_meta["author"] = first["author"]
                 break  # use the first available source
 
         with self._lock:

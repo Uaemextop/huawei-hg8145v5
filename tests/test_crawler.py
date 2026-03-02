@@ -806,11 +806,9 @@ class TestUrlList(unittest.TestCase):
                 "https://example.com/a.mp4": {
                     "title": "Big Buck Bunny",
                     "author": "Blender Foundation",
-                    "description": "A short animation",
                     "thumbnail": "https://example.com/thumb.jpg",
                     "duration": "PT10M",
                     "upload_date": "2024-01-01",
-                    "genre": "Animation",
                 },
             }
             crawler._write_video_url_list()
@@ -818,7 +816,7 @@ class TestUrlList(unittest.TestCase):
             content = video_list.read_text(encoding="utf-8")
             expected = (
                 "https://example.com/a.mp4|Big Buck Bunny|Blender Foundation|"
-                "A short animation|https://example.com/thumb.jpg|PT10M|2024-01-01|Animation\n"
+                "https://example.com/thumb.jpg|PT10M|2024-01-01\n"
             )
             self.assertEqual(content, expected)
 
@@ -836,7 +834,7 @@ class TestUrlList(unittest.TestCase):
             crawler._write_video_url_list()
             video_list = Path(td) / "video_urls.txt"
             content = video_list.read_text(encoding="utf-8")
-            self.assertEqual(content, "https://example.com/a.mp4|||||||\n")
+            self.assertEqual(content, "https://example.com/a.mp4|||||\n")
 
     def test_populate_video_meta_from_html(self):
         """_populate_video_meta extracts metadata from HTML pages."""
@@ -874,12 +872,10 @@ class TestUrlList(unittest.TestCase):
         ld = {
             "@type": "VideoObject",
             "name": "Specific Title",
-            "description": "Specific desc",
             "contentUrl": "https://cdn.example.com/clip.mp4",
             "thumbnailUrl": "https://cdn.example.com/thumb.jpg",
             "duration": "PT5M",
             "uploadDate": "2025-06-01",
-            "genre": "Comedy",
             "author": "Specific Author",
         }
         html = (
@@ -910,21 +906,18 @@ class TestUrlList(unittest.TestCase):
                 "https://example.com/a.mp4": {
                     "title": "Title|With|Pipes",
                     "author": "Author",
-                    "description": "Line1\nLine2",
                     "thumbnail": "",
                     "duration": "",
                     "upload_date": "",
-                    "genre": "",
                 },
             }
             crawler._write_video_url_list()
             video_list = Path(td) / "video_urls.txt"
             content = video_list.read_text(encoding="utf-8")
-            # Pipes in values replaced, newlines replaced with space
+            # Pipes in values replaced
             self.assertEqual(
                 content,
-                "https://example.com/a.mp4|Title-With-Pipes|Author|"
-                "Line1 Line2||||\n",
+                "https://example.com/a.mp4|Title-With-Pipes|Author|||\n",
             )
 
     def test_write_video_url_list_microdata_metadata(self):
@@ -941,7 +934,6 @@ class TestUrlList(unittest.TestCase):
             <article itemscope itemtype="https://schema.org/VideoObject">
               <meta itemprop="author" content="Super Landia" />
               <meta itemprop="name" content="Mommy" />
-              <meta itemprop="description" content="Mommy" />
               <meta itemprop="duration" content="PT5M" />
               <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
               <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
@@ -959,12 +951,10 @@ class TestUrlList(unittest.TestCase):
             self.assertIn("https://cdn.example.com/thumb.jpg", content)
             self.assertIn("PT5M", content)
             self.assertIn("2026-01-16", content)
-            # Description deduped (same as title)
             parts = content.strip().split("|")
-            self.assertEqual(len(parts), 8)
-            self.assertEqual(parts[1], "Mommy")      # title
+            self.assertEqual(len(parts), 6)
+            self.assertEqual(parts[1], "Mommy")        # title
             self.assertEqual(parts[2], "Super Landia")  # author
-            self.assertEqual(parts[3], "")              # description (deduped)
 
     def test_populate_meta_merge_fills_empty_fields(self):
         """Later metadata calls fill empty fields instead of being blocked."""
@@ -985,7 +975,6 @@ class TestUrlList(unittest.TestCase):
         <article itemscope itemtype="https://schema.org/VideoObject">
           <meta itemprop="author" content="Super Landia" />
           <meta itemprop="name" content="Mommy" />
-          <meta itemprop="description" content="Mommy" />
           <meta itemprop="duration" content="PT5M" />
           <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
           <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
@@ -995,7 +984,6 @@ class TestUrlList(unittest.TestCase):
         meta = crawler._video_meta[video_url]
         self.assertEqual(meta["title"], "Mommy")
         self.assertEqual(meta["author"], "Super Landia")
-        self.assertEqual(meta["description"], "")  # deduped
         self.assertEqual(meta["duration"], "PT5M")
         self.assertEqual(meta["upload_date"], "2026-01-16")
         self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
