@@ -399,6 +399,7 @@ class Crawler:
         # Enrich page-level fallback with shared fields from the
         # page's structured data (e.g. author) so that video URLs
         # that are NOT the microdata contentURL still get them.
+        # (empty dicts are falsy, so ``if src`` skips them safely)
         for src in (microdata_meta, video_meta):
             if src:
                 first = next(iter(src.values()))
