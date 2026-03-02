@@ -292,14 +292,19 @@ class Crawler:
         self._write_url_list()
 
         # Write video URL list
-        if self._video_urls:
-            video_list = self.output_dir / "video_urls.txt"
-            video_list.parent.mkdir(parents=True, exist_ok=True)
-            video_list.write_text(
-                "\n".join(self._video_urls) + "\n", encoding="utf-8",
-            )
-            log.info("Video URL list: %d URL(s) → %s",
-                      len(self._video_urls), video_list)
+        self._write_video_url_list()
+
+    def _write_video_url_list(self) -> None:
+        """Write tracked video URLs to ``video_urls.txt``."""
+        if not self._video_urls:
+            return
+        video_list = self.output_dir / "video_urls.txt"
+        video_list.parent.mkdir(parents=True, exist_ok=True)
+        video_list.write_text(
+            "\n".join(self._video_urls) + "\n", encoding="utf-8",
+        )
+        log.info("Video URL list: %d URL(s) → %s",
+                  len(self._video_urls), video_list)
 
     def _stats_postfix(self) -> dict[str, object]:
         """Return a dict suitable for tqdm ``set_postfix``."""
@@ -323,16 +328,21 @@ class Crawler:
             self._video_urls.append(url)
 
     def _write_url_list(self) -> None:
-        """Write saved **video** URLs to ``url_list.txt``.
+        """Write all **video** URLs to ``url_list.txt``.
 
-        Only URLs whose path ends with a known video extension
-        (``_VIDEO_EXTENSIONS``) are included.
+        Includes URLs whose path ends with a known video extension
+        (``_VIDEO_EXTENSIONS``) from both saved downloads and tracked
+        video URLs (e.g. media files recorded when ``--skip-media-files``
+        is active).
         """
-        snapshot = [
+        saved_videos = [
             u for u in self._saved_urls
             if any(urllib.parse.urlparse(u).path.lower().endswith(ext)
                    for ext in _VIDEO_EXTENSIONS)
         ]
+        # Merge saved video URLs with tracked video URLs, preserving order
+        # and removing duplicates.
+        snapshot = list(dict.fromkeys(saved_videos + self._video_urls))
         if not snapshot:
             return
         url_list = self.output_dir / "url_list.txt"
@@ -1184,8 +1194,9 @@ class Crawler:
         if self._stats["ok"] % self.git_push_every != 0:
             return
 
-        # Update URL list before pushing so it is included in the commit
+        # Update URL lists before pushing so they are included in the commit
         self._write_url_list()
+        self._write_video_url_list()
 
         ok = self._stats["ok"]
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
@@ -1199,6 +1210,13 @@ class Crawler:
                     ["git", "add", "README.md"],
                     cwd=cwd, capture_output=True, timeout=30,
                 )
+                # Stage URL list files when they exist
+                for txt in ("url_list.txt", "video_urls.txt"):
+                    if (self.output_dir / txt).exists():
+                        subprocess.run(
+                            ["git", "add", "--", txt],
+                            cwd=cwd, capture_output=True, timeout=30,
+                        )
                 for ext in self.upload_extensions:
                     args = ["git", "add", "--", f"*{ext}"]
                     if self.debug:
