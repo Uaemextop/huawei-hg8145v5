@@ -323,12 +323,13 @@ class Crawler:
 
     def _write_url_list(self) -> None:
         """Write the current list of saved URLs to ``url_list.txt``."""
-        if not self._saved_urls:
+        snapshot = list(self._saved_urls)
+        if not snapshot:
             return
         url_list = self.output_dir / "url_list.txt"
         url_list.parent.mkdir(parents=True, exist_ok=True)
         url_list.write_text(
-            "\n".join(self._saved_urls) + "\n", encoding="utf-8",
+            "\n".join(snapshot) + "\n", encoding="utf-8",
         )
 
     def _is_media_url(self, url: str) -> bool:
