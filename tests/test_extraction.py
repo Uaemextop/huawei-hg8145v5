@@ -527,5 +527,122 @@ class TestProbeThresholds(unittest.TestCase):
         self.assertEqual(PROBE_DIR_404_LIMIT, 5)
 
 
+class TestPageMetadataExtraction(unittest.TestCase):
+    """Tests for extract_page_metadata()."""
+
+    def test_og_title_and_description(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = """<html><head>
+        <meta property="og:title" content="My Video Page">
+        <meta property="og:description" content="A cool video page">
+        <meta property="og:site_name" content="VideoSite">
+        <meta property="og:image" content="https://example.com/thumb.jpg">
+        </head></html>"""
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["title"], "My Video Page")
+        self.assertEqual(meta["description"], "A cool video page")
+        self.assertEqual(meta["author"], "VideoSite")
+        self.assertEqual(meta["thumbnail"], "https://example.com/thumb.jpg")
+
+    def test_fallback_to_title_tag(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = "<html><head><title>Fallback Title</title></head></html>"
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["title"], "Fallback Title")
+
+    def test_meta_author(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = '<html><head><meta name="author" content="John Doe"></head></html>'
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["author"], "John Doe")
+
+    def test_meta_description_fallback(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = '<html><head><meta name="description" content="A description"></head></html>'
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["description"], "A description")
+
+    def test_empty_html(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        meta = extract_page_metadata("")
+        self.assertEqual(meta["title"], "")
+        self.assertEqual(meta["description"], "")
+        self.assertEqual(meta["author"], "")
+        self.assertEqual(meta["thumbnail"], "")
+
+    def test_genre_from_keywords(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = '<html><head><meta name="keywords" content="comedy, animation"></head></html>'
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["genre"], "comedy, animation")
+
+
+class TestJsonLdVideoMeta(unittest.TestCase):
+    """Tests for extract_jsonld_video_meta()."""
+
+    def test_basic_video_object(self):
+        from web_crawler.extraction.html_parser import extract_jsonld_video_meta
+        import json
+        ld = {
+            "@context": "https://schema.org",
+            "@type": "VideoObject",
+            "name": "Big Buck Bunny",
+            "description": "A short animation",
+            "contentUrl": "https://example.com/video.mp4",
+            "thumbnailUrl": "https://example.com/thumb.jpg",
+            "duration": "PT10M",
+            "uploadDate": "2024-01-01",
+            "genre": "Animation",
+            "author": {"@type": "Person", "name": "Blender Foundation"},
+        }
+        html = f'<html><head><script type="application/ld+json">{json.dumps(ld)}</script></head></html>'
+        result = extract_jsonld_video_meta(html)
+        self.assertIn("https://example.com/video.mp4", result)
+        meta = result["https://example.com/video.mp4"]
+        self.assertEqual(meta["title"], "Big Buck Bunny")
+        self.assertEqual(meta["description"], "A short animation")
+        self.assertEqual(meta["author"], "Blender Foundation")
+        self.assertEqual(meta["thumbnail"], "https://example.com/thumb.jpg")
+        self.assertEqual(meta["duration"], "PT10M")
+        self.assertEqual(meta["upload_date"], "2024-01-01")
+        self.assertEqual(meta["genre"], "Animation")
+
+    def test_thumbnail_url_as_list(self):
+        from web_crawler.extraction.html_parser import extract_jsonld_video_meta
+        import json
+        ld = {
+            "@type": "VideoObject",
+            "name": "Test",
+            "contentUrl": "https://example.com/v.mp4",
+            "thumbnailUrl": [
+                "https://example.com/t1.jpg",
+                "https://example.com/t2.jpg",
+            ],
+        }
+        html = f'<html><head><script type="application/ld+json">{json.dumps(ld)}</script></head></html>'
+        result = extract_jsonld_video_meta(html)
+        self.assertEqual(result["https://example.com/v.mp4"]["thumbnail"],
+                         "https://example.com/t1.jpg")
+
+    def test_author_as_string(self):
+        from web_crawler.extraction.html_parser import extract_jsonld_video_meta
+        import json
+        ld = {
+            "@type": "VideoObject",
+            "name": "Test",
+            "contentUrl": "https://example.com/v.mp4",
+            "author": "Jane Doe",
+        }
+        html = f'<html><head><script type="application/ld+json">{json.dumps(ld)}</script></head></html>'
+        result = extract_jsonld_video_meta(html)
+        self.assertEqual(result["https://example.com/v.mp4"]["author"], "Jane Doe")
+
+    def test_no_video_objects(self):
+        from web_crawler.extraction.html_parser import extract_jsonld_video_meta
+        html = "<html><head></head></html>"
+        result = extract_jsonld_video_meta(html)
+        self.assertEqual(result, {})
+
+
 if __name__ == "__main__":
     unittest.main()

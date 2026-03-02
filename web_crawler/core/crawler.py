@@ -196,6 +196,7 @@ class Crawler:
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
         self._video_urls: list[str] = []
+        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, description}
         self._saved_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
@@ -296,13 +297,32 @@ class Crawler:
         self._write_video_url_list()
 
     def _write_video_url_list(self) -> None:
-        """Write tracked video URLs to ``video_urls.txt``."""
+        """Write tracked video URLs to ``video_urls.txt``.
+
+        Each line uses the pipe-separated format::
+
+            URL|Title|Author|Description|ThumbnailUrl|Duration|UploadDate|Genre
+        """
         if not self._video_urls:
             return
         video_list = self.output_dir / "video_urls.txt"
         video_list.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        for url in self._video_urls:
+            meta = self._video_meta.get(url, {})
+            parts = [
+                url,
+                meta.get("title", ""),
+                meta.get("author", ""),
+                meta.get("description", ""),
+                meta.get("thumbnail", ""),
+                meta.get("duration", ""),
+                meta.get("upload_date", ""),
+                meta.get("genre", ""),
+            ]
+            lines.append("|".join(parts))
         video_list.write_text(
-            "\n".join(self._video_urls) + "\n", encoding="utf-8",
+            "\n".join(lines) + "\n", encoding="utf-8",
         )
         log.info("Video URL list: %d URL(s) → %s",
                   len(self._video_urls), video_list)
@@ -327,6 +347,34 @@ class Crawler:
         path_lower = urllib.parse.urlparse(url).path.lower()
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
+
+    def _populate_video_meta(self, html: str, links: set[str]) -> None:
+        """Extract metadata from an HTML page and associate it with video links.
+
+        Per-video metadata from JSON-LD ``VideoObject`` entries takes
+        priority over page-level metadata (title, description, author,
+        thumbnail, duration, upload_date, genre).
+        """
+        from web_crawler.extraction.html_parser import (
+            extract_page_metadata,
+            extract_jsonld_video_meta,
+        )
+        page_meta = extract_page_metadata(html)
+        video_meta = extract_jsonld_video_meta(html)
+
+        with self._lock:
+            # Store JSON-LD per-video metadata (highest priority)
+            for vurl, vmeta in video_meta.items():
+                if vurl not in self._video_meta:
+                    self._video_meta[vurl] = vmeta
+
+            # For discovered links that look like video URLs, use
+            # page-level metadata as a fallback.
+            for link in links:
+                path_lower = urllib.parse.urlparse(link).path.lower()
+                if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
+                    if link not in self._video_meta:
+                        self._video_meta[link] = dict(page_meta)
 
     def _write_url_list(self) -> None:
         """Write all **video** URLs to ``url_list.txt``.
@@ -1789,6 +1837,9 @@ class Crawler:
                 new_links |= self._extract_extension_links(
                     content, url, self.download_extensions,
                 )
+            # Extract page & video metadata for discovered video URLs
+            if text is not None:
+                self._populate_video_meta(text, new_links)
             added = 0
             for link in new_links:
                 # Register external hosts from media URLs as CDN hosts

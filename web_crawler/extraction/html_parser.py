@@ -152,3 +152,141 @@ def _extract_jsonld_urls(
     elif isinstance(obj, list):
         for item in obj:
             _extract_jsonld_urls(item, keys, add_fn)
+
+
+# ------------------------------------------------------------------
+# Page & video metadata extraction
+# ------------------------------------------------------------------
+
+# Metadata keys written to video_urls.txt (pipe-separated).
+_VIDEO_META_KEYS = (
+    "title", "author", "description",
+    "thumbnail", "duration", "upload_date", "genre",
+)
+
+
+def extract_page_metadata(html: str) -> dict[str, str]:
+    """Extract page-level metadata from HTML.
+
+    Returns a dict with keys matching :data:`_VIDEO_META_KEYS`.
+    Missing values are represented as empty strings.
+    """
+    meta: dict[str, str] = {k: "" for k in _VIDEO_META_KEYS}
+    if BeautifulSoup is None:
+        return meta
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return meta
+
+    # Title: prefer og:title, then <title>
+    og_title = soup.find("meta", attrs={"property": "og:title"})
+    if og_title and og_title.get("content"):
+        meta["title"] = og_title["content"].strip()
+    elif soup.title and soup.title.string:
+        meta["title"] = soup.title.string.strip()
+
+    # Description: prefer og:description, then meta description
+    og_desc = soup.find("meta", attrs={"property": "og:description"})
+    if og_desc and og_desc.get("content"):
+        meta["description"] = og_desc["content"].strip()
+    else:
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        if meta_desc and meta_desc.get("content"):
+            meta["description"] = meta_desc["content"].strip()
+
+    # Author: prefer meta author, then og:site_name
+    author_el = soup.find("meta", attrs={"name": "author"})
+    if author_el and author_el.get("content"):
+        meta["author"] = author_el["content"].strip()
+    else:
+        site_name = soup.find("meta", attrs={"property": "og:site_name"})
+        if site_name and site_name.get("content"):
+            meta["author"] = site_name["content"].strip()
+
+    # Thumbnail: og:image
+    og_image = soup.find("meta", attrs={"property": "og:image"})
+    if og_image and og_image.get("content"):
+        meta["thumbnail"] = og_image["content"].strip()
+
+    # Genre: article:tag or keywords meta
+    tag_el = soup.find("meta", attrs={"property": "article:tag"})
+    if tag_el and tag_el.get("content"):
+        meta["genre"] = tag_el["content"].strip()
+    else:
+        kw_el = soup.find("meta", attrs={"name": "keywords"})
+        if kw_el and kw_el.get("content"):
+            meta["genre"] = kw_el["content"].strip()
+
+    return meta
+
+
+def extract_jsonld_video_meta(html: str) -> dict[str, dict[str, str]]:
+    """Extract per-video metadata from JSON-LD ``VideoObject`` entries.
+
+    Returns a dict mapping video content URLs to metadata dicts with
+    keys matching :data:`_VIDEO_META_KEYS`.
+    """
+    result: dict[str, dict[str, str]] = {}
+    if BeautifulSoup is None:
+        return result
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return result
+
+    for ld_el in soup.find_all("script", type="application/ld+json"):
+        try:
+            ld_data = json.loads(ld_el.get_text())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        _collect_video_objects(ld_data, result)
+
+    return result
+
+
+def _collect_video_objects(
+    obj: object,
+    out: dict[str, dict[str, str]],
+) -> None:
+    """Recursively collect metadata from VideoObject nodes."""
+    if isinstance(obj, dict):
+        obj_type = obj.get("@type", "")
+        if isinstance(obj_type, list):
+            obj_type = " ".join(obj_type)
+        if "VideoObject" in obj_type:
+            url = obj.get("contentUrl") or obj.get("embedUrl") or ""
+            if url:
+                title = obj.get("name", "")
+                desc = obj.get("description", "")
+                author_obj = obj.get("author") or obj.get("creator") or ""
+                if isinstance(author_obj, dict):
+                    author = author_obj.get("name", "")
+                elif isinstance(author_obj, str):
+                    author = author_obj
+                else:
+                    author = ""
+                # Thumbnail: may be a string or a list of strings
+                thumb = obj.get("thumbnailUrl", "")
+                if isinstance(thumb, list):
+                    thumb = thumb[0] if thumb else ""
+                duration = obj.get("duration", "")
+                upload_date = obj.get("uploadDate", "")
+                genre = obj.get("genre", "")
+                out[url] = {
+                    "title": str(title).strip(),
+                    "author": str(author).strip(),
+                    "description": str(desc).strip(),
+                    "thumbnail": str(thumb).strip(),
+                    "duration": str(duration).strip(),
+                    "upload_date": str(upload_date).strip(),
+                    "genre": str(genre).strip(),
+                }
+        # Recurse into all values
+        for v in obj.values():
+            _collect_video_objects(v, out)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_video_objects(item, out)
