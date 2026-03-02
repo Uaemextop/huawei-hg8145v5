@@ -624,6 +624,30 @@ class TestGitPushIntegration(unittest.TestCase):
             self.assertIn("https://example.com/video2.webm", content)
             self.assertNotIn("https://example.com/page1.html", content)
 
+    def test_video_urls_written_on_git_push(self):
+        """video_urls.txt is written before each periodic git push."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                    git_push_every=100,
+                )
+            crawler._stats["ok"] = 100
+            crawler._video_urls = [
+                "https://example.com/video1.mp4",
+                "https://cdn.example.com/clip.webm",
+            ]
+            with patch("subprocess.run"):
+                crawler._maybe_git_push()
+            video_list = Path(td) / "video_urls.txt"
+            self.assertTrue(video_list.exists())
+            content = video_list.read_text(encoding="utf-8")
+            self.assertIn("https://example.com/video1.mp4", content)
+            self.assertIn("https://cdn.example.com/clip.webm", content)
+
 
 class TestUrlList(unittest.TestCase):
     """Test the URL list tracking feature."""
@@ -711,6 +735,61 @@ class TestUrlList(unittest.TestCase):
             crawler._write_url_list()
             url_list = Path(td) / "url_list.txt"
             self.assertFalse(url_list.exists())
+
+    def test_write_url_list_includes_tracked_video_urls(self):
+        """url_list.txt includes tracked video URLs (e.g. skip-media)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            # Simulate skip-media: video tracked but not in _saved_urls
+            crawler._saved_urls = ["https://example.com/page.html"]
+            crawler._video_urls = ["https://example.com/skipped.mp4"]
+            crawler._write_url_list()
+            url_list = Path(td) / "url_list.txt"
+            self.assertTrue(url_list.exists())
+            content = url_list.read_text(encoding="utf-8")
+            self.assertIn("https://example.com/skipped.mp4", content)
+            self.assertNotIn("https://example.com/page.html", content)
+
+    def test_write_video_url_list_creates_file(self):
+        """video_urls.txt is created with tracked video URLs."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._video_urls = [
+                "https://example.com/a.mp4",
+                "https://example.com/b.webm",
+            ]
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            self.assertTrue(video_list.exists())
+            content = video_list.read_text(encoding="utf-8")
+            self.assertIn("https://example.com/a.mp4", content)
+            self.assertIn("https://example.com/b.webm", content)
+
+    def test_write_video_url_list_skipped_when_empty(self):
+        """video_urls.txt is NOT created when no video URLs are tracked."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            self.assertFalse(video_list.exists())
 
 
 # ------------------------------------------------------------------ #
@@ -1635,10 +1714,10 @@ class TestUploadExtensions(unittest.TestCase):
         cmds = [c[0][0] for c in calls]
         # First call: git add README.md
         self.assertEqual(cmds[0], ["git", "add", "README.md"])
-        # Should have ext-specific git add calls (2 extensions)
+        # Should have ext-specific git add calls (2 txt files + 2 extensions)
         ext_adds = [c for c in cmds if len(c) >= 4 and c[1] == "add"
                     and c[2] == "--"]
-        self.assertEqual(len(ext_adds), 2)  # one per extension
+        self.assertEqual(len(ext_adds), 4)  # url_list.txt, video_urls.txt, + 2 exts
         # Should have commit and push
         self.assertTrue(any(c[0:2] == ["git", "commit"] for c in cmds))
         self.assertTrue(any(c == ["git", "push"] for c in cmds))
