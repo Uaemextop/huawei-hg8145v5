@@ -30,6 +30,14 @@ _DOC_WRITE_RE = re.compile(
     re.I | re.DOTALL,
 )
 
+# Absolute URLs pointing to HLS/DASH streams or video files in JS strings.
+# Video players often embed these as full https:// URLs that would otherwise
+# be missed because they are on external CDN hosts.
+_STREAM_URL_RE = re.compile(
+    r"""['"`](https?://[^'"`\s\n]{5,300}\.(?:m3u8|mpd|mp4|webm|mkv|mov|avi|flv|wmv|m4v|ts|mp3|ogg|wav|flac|aac|m4a|weba)(?:\?[^'"`\s\n]*)?)['"`]""",
+    re.I,
+)
+
 # All root-relative quoted path strings: '/anything/here'
 _ABS_QUOTED_PATH_RE = re.compile(
     r"""['"`](/[a-zA-Z0-9_./%?&=+\-#][^'"`\n]{0,200})['"`]""",
@@ -157,5 +165,14 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
         snippet = m.group(1).replace("\\'", "'").replace('\\"', '"')
         from web_crawler.extraction.html_parser import extract_html_attrs
         found |= extract_html_attrs(snippet, page_url, base)
+
+    # Extract absolute stream/media URLs (often on external CDN hosts)
+    for m in _STREAM_URL_RE.finditer(js):
+        raw = m.group(1)
+        if "${" not in raw:
+            n = normalise_url(raw.strip(), page_url, base,
+                              allow_external=True)
+            if n:
+                found.add(n)
 
     return found

@@ -56,8 +56,8 @@ HEADER_RETRY_MAX = 3           # extra retries with rotated headers on 403/etc.
 BACKOFF_429_BASE = 2.0         # base seconds for exponential backoff on 429
 BACKOFF_429_MAX = 60.0         # cap for 429 backoff
 PROBE_403_THRESHOLD = 10       # disable hidden-file probing after this many 403s
-PROBE_404_THRESHOLD = 50       # disable hidden-file probing after this many 404s
-PROBE_DIR_404_LIMIT = 10       # skip remaining probes for a directory after this many 404s
+PROBE_404_THRESHOLD = 30       # disable hidden-file probing after this many 404s
+PROBE_DIR_404_LIMIT = 5        # skip remaining probes for a directory after this many 404s
 MAX_URL_RETRIES = 2            # re-enqueue a URL this many times on transient network errors
 
 # Minimum response body size (in bytes) at which the crawler switches to
