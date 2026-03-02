@@ -194,6 +194,7 @@ class Crawler:
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
         self._video_urls: list[str] = []
+        self._saved_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -286,6 +287,9 @@ class Crawler:
         log.info("Files saved in: %s", self.output_dir.resolve())
         ci_endgroup()
 
+        # Write final URL list
+        self._write_url_list()
+
         # Write video URL list
         if self._video_urls:
             video_list = self.output_dir / "video_urls.txt"
@@ -316,6 +320,16 @@ class Crawler:
         path_lower = urllib.parse.urlparse(url).path.lower()
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
+
+    def _write_url_list(self) -> None:
+        """Write the current list of saved URLs to ``url_list.txt``."""
+        if not self._saved_urls:
+            return
+        url_list = self.output_dir / "url_list.txt"
+        url_list.parent.mkdir(parents=True, exist_ok=True)
+        url_list.write_text(
+            "\n".join(self._saved_urls) + "\n", encoding="utf-8",
+        )
 
     def _is_media_url(self, url: str) -> bool:
         """Return ``True`` if *url* points to a media file (video/audio)."""
@@ -1147,6 +1161,9 @@ class Crawler:
         if self._stats["ok"] % self.git_push_every != 0:
             return
 
+        # Update URL list before pushing so it is included in the commit
+        self._write_url_list()
+
         ok = self._stats["ok"]
         log.info("[GIT] Pushing progress (%d files saved so far)…", ok)
         try:
@@ -1636,6 +1653,7 @@ class Crawler:
                             url, local_stream.name, written / (1024 * 1024),
                         )
                         self._stats["ok"] += 1
+                        self._saved_urls.append(url)
                         self._track_video_url(url)
                         if self.debug:
                             self._save_http_headers(local_stream, resp, url)
@@ -1701,6 +1719,7 @@ class Crawler:
                 self._save_http_headers(local, resp, url)
             with self._lock:
                 self._stats["ok"] += 1
+                self._saved_urls.append(url)
                 self._track_video_url(url)
             self._maybe_git_push()
 
@@ -1843,6 +1862,7 @@ class Crawler:
                     url, local_stream.name, written / (1024 * 1024),
                 )
                 self._stats["ok"] += 1
+                self._saved_urls.append(url)
                 self._track_video_url(url)
                 if self.debug:
                     self._save_http_headers(local_stream, resp, url)
