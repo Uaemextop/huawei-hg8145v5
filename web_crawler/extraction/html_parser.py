@@ -170,6 +170,10 @@ def extract_page_metadata(html: str) -> dict[str, str]:
 
     Returns a dict with keys matching :data:`_VIDEO_META_KEYS`.
     Missing values are represented as empty strings.
+
+    When the extracted title and description are identical the
+    description is cleared to avoid redundant metadata (common on
+    sites that auto-fill ``og:description`` from the title).
     """
     meta: dict[str, str] = {k: "" for k in _VIDEO_META_KEYS}
     if BeautifulSoup is None:
@@ -218,6 +222,10 @@ def extract_page_metadata(html: str) -> dict[str, str]:
         kw_el = soup.find("meta", attrs={"name": "keywords"})
         if kw_el and kw_el.get("content"):
             meta["genre"] = kw_el["content"].strip()
+
+    # Deduplicate: if title == description, clear description
+    if meta["title"] and meta["title"] == meta["description"]:
+        meta["description"] = ""
 
     return meta
 
@@ -290,3 +298,66 @@ def _collect_video_objects(
     elif isinstance(obj, list):
         for item in obj:
             _collect_video_objects(item, out)
+
+
+# ------------------------------------------------------------------
+# Schema.org microdata extraction (itemprop-based VideoObject)
+# ------------------------------------------------------------------
+
+# Mapping from itemprop names (lowercased) to metadata dict keys.
+_ITEMPROP_TO_META = {
+    "name": "title",
+    "description": "description",
+    "author": "author",
+    "duration": "duration",
+    "thumbnailurl": "thumbnail",
+    "uploaddate": "upload_date",
+    "genre": "genre",
+}
+
+
+def extract_microdata_video_meta(html: str) -> dict[str, dict[str, str]]:
+    """Extract per-video metadata from Schema.org microdata.
+
+    Looks for elements with ``itemtype`` containing ``VideoObject``
+    (typically ``<article>`` or ``<div>`` with ``itemscope``) and
+    reads ``<meta itemprop="…" content="…">`` tags inside them.
+
+    Returns a dict mapping video content URLs to metadata dicts with
+    keys matching :data:`_VIDEO_META_KEYS`.
+    """
+    result: dict[str, dict[str, str]] = {}
+    if BeautifulSoup is None:
+        return result
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return result
+
+    for container in soup.find_all(
+        attrs={"itemtype": re.compile(r"schema\.org/VideoObject", re.I)},
+    ):
+        meta: dict[str, str] = {k: "" for k in _VIDEO_META_KEYS}
+        content_url = ""
+
+        for el in container.find_all("meta", attrs={"itemprop": True}):
+            prop = (el.get("itemprop") or "").lower()
+            val = (el.get("content") or "").strip()
+            if not val:
+                continue
+            if prop == "contenturl":
+                content_url = val
+            elif prop == "embedurl" and not content_url:
+                content_url = val
+            key = _ITEMPROP_TO_META.get(prop)
+            if key:
+                meta[key] = val
+
+        if content_url:
+            # Deduplicate: if title == description, clear description
+            if meta["title"] and meta["title"] == meta["description"]:
+                meta["description"] = ""
+            result[content_url] = meta
+
+    return result

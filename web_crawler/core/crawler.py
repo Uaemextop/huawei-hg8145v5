@@ -351,20 +351,28 @@ class Crawler:
     def _populate_video_meta(self, html: str, links: set[str]) -> None:
         """Extract metadata from an HTML page and associate it with video links.
 
-        Per-video metadata from JSON-LD ``VideoObject`` entries takes
-        priority over page-level metadata (title, description, author,
+        Per-video metadata from JSON-LD ``VideoObject`` entries and
+        Schema.org microdata (``itemprop`` meta tags) takes priority
+        over page-level metadata (title, description, author,
         thumbnail, duration, upload_date, genre).
         """
         from web_crawler.extraction.html_parser import (
             extract_page_metadata,
             extract_jsonld_video_meta,
+            extract_microdata_video_meta,
         )
         page_meta = extract_page_metadata(html)
         video_meta = extract_jsonld_video_meta(html)
+        microdata_meta = extract_microdata_video_meta(html)
 
         with self._lock:
             # Store JSON-LD per-video metadata (highest priority)
             for vurl, vmeta in video_meta.items():
+                if vurl not in self._video_meta:
+                    self._video_meta[vurl] = vmeta
+
+            # Store microdata per-video metadata (second priority)
+            for vurl, vmeta in microdata_meta.items():
                 if vurl not in self._video_meta:
                     self._video_meta[vurl] = vmeta
 

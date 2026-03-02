@@ -644,5 +644,93 @@ class TestJsonLdVideoMeta(unittest.TestCase):
         self.assertEqual(result, {})
 
 
+class TestMicrodataVideoMeta(unittest.TestCase):
+    """Tests for extract_microdata_video_meta()."""
+
+    def test_basic_microdata_video(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="author" content="Super Landia" />
+          <meta itemprop="name" content="My Video" />
+          <meta itemprop="description" content="A cool video" />
+          <meta itemprop="duration" content="PT5M" />
+          <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+          <meta itemprop="uploadDate" content="2026-01-16T23:30:05" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertIn("https://cdn.example.com/video.mp4", result)
+        meta = result["https://cdn.example.com/video.mp4"]
+        self.assertEqual(meta["title"], "My Video")
+        self.assertEqual(meta["description"], "A cool video")
+        self.assertEqual(meta["author"], "Super Landia")
+        self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
+        self.assertEqual(meta["duration"], "PT5M")
+        self.assertEqual(meta["upload_date"], "2026-01-16T23:30:05")
+
+    def test_dedup_title_equals_description(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="name" content="Mommy" />
+          <meta itemprop="description" content="Mommy" />
+          <meta itemprop="contentURL" content="https://cdn.example.com/v.mp4" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        meta = result["https://cdn.example.com/v.mp4"]
+        self.assertEqual(meta["title"], "Mommy")
+        self.assertEqual(meta["description"], "")
+
+    def test_no_microdata(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = "<html><body><p>No video here</p></body></html>"
+        result = extract_microdata_video_meta(html)
+        self.assertEqual(result, {})
+
+    def test_no_content_url(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="name" content="No URL" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertEqual(result, {})
+
+    def test_embedurl_fallback(self):
+        from web_crawler.extraction.html_parser import extract_microdata_video_meta
+        html = '''<html><body>
+        <article itemscope itemtype="https://schema.org/VideoObject">
+          <meta itemprop="name" content="Embed" />
+          <meta itemprop="embedUrl" content="https://cdn.example.com/embed.mp4" />
+        </article></body></html>'''
+        result = extract_microdata_video_meta(html)
+        self.assertIn("https://cdn.example.com/embed.mp4", result)
+
+
+class TestPageMetadataDedup(unittest.TestCase):
+    """Tests for title==description dedup in extract_page_metadata()."""
+
+    def test_title_equals_description_cleared(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = '''<html><head>
+        <meta property="og:title" content="Mommy">
+        <meta property="og:description" content="Mommy">
+        </head></html>'''
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["title"], "Mommy")
+        self.assertEqual(meta["description"], "")
+
+    def test_title_different_from_description_kept(self):
+        from web_crawler.extraction.html_parser import extract_page_metadata
+        html = '''<html><head>
+        <meta property="og:title" content="My Video">
+        <meta property="og:description" content="A great video">
+        </head></html>'''
+        meta = extract_page_metadata(html)
+        self.assertEqual(meta["title"], "My Video")
+        self.assertEqual(meta["description"], "A great video")
+
+
 if __name__ == "__main__":
     unittest.main()
