@@ -33,6 +33,8 @@ _DOC_WRITE_RE = re.compile(
 # Absolute URLs pointing to HLS/DASH streams or video files in JS strings.
 # Video players often embed these as full https:// URLs that would otherwise
 # be missed because they are on external CDN hosts.
+# Length constraint: min 5 chars for shortest valid host (a.co), max 300
+# to avoid matching overly long template/concatenated strings.
 _STREAM_URL_RE = re.compile(
     r"""['"`](https?://[^'"`\s\n]{5,300}\.(?:m3u8|mpd|mp4|webm|mkv|mov|avi|flv|wmv|m4v|ts|mp3|ogg|wav|flac|aac|m4a|weba)(?:\?[^'"`\s\n]*)?)['"`]""",
     re.I,

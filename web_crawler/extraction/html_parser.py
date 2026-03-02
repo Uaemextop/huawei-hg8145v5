@@ -119,6 +119,8 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
 
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.
+    # Both camelCase (Schema.org canonical) and lowercase variants are
+    # checked because some implementations deviate from the spec.
     _JSONLD_URL_KEYS = frozenset({
         "contenturl", "embedurl", "thumbnailurl", "url",
         "contentUrl", "embedUrl", "thumbnailUrl",
@@ -136,7 +138,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
 def _extract_jsonld_urls(
     obj: object,
     keys: frozenset[str],
-    add_fn,  # type: ignore[type-arg]
+    add_fn,
 ) -> None:
     """Recursively walk a JSON-LD structure and pass media URLs to *add_fn*."""
     if isinstance(obj, dict):
