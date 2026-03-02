@@ -82,6 +82,11 @@ on:
         required: false
         default: true
         type: boolean
+      skip_media_files:
+        description: "Skip downloading media files (video/audio) but still record their URLs in video_urls.txt"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -232,6 +237,7 @@ jobs:
           - **Download extensions**: ${{ inputs.download_extensions }}
           - **Upload extensions**: ${{ inputs.upload_extensions }}
           - **Concurrency**: ${{ inputs.concurrency }} workers
+          - **Skip media files**: ${{ inputs.skip_media_files }}
           - **Run**: #${{ github.run_number }}
           - **Status**: 🔄 Crawling in progress…
           EOF
@@ -276,6 +282,9 @@ jobs:
           fi
           if [ "${{ inputs.allow_external_urls }}" = "false" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --no-external"
+          fi
+          if [ "${{ inputs.skip_media_files }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --skip-media-files"
           fi
 
           # Upload-extension filtering: pass to crawler for periodic git push
@@ -421,6 +430,7 @@ jobs:
             - **Upload extensions**: ${{ inputs.upload_extensions }}
             - **Concurrency**: ${{ inputs.concurrency }} workers
             - **Debug mode**: ${{ inputs.debug }}
+            - **Skip media files**: ${{ inputs.skip_media_files }}
             - **Run**: #${{ github.run_number }}
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('- **Live repo**: https://github.com/{0}', steps.create_repo.outputs.repo_full) || '' }}
           files: |

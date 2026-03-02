@@ -1659,6 +1659,79 @@ class TestWooCommerceDiscovery(unittest.TestCase):
         crawler._discover_wc_products()
 
 
+# ------------------------------------------------------------------ #
+# Skip media files
+# ------------------------------------------------------------------ #
+
+class TestSkipMediaFiles(unittest.TestCase):
+    """Test the skip_media_files feature."""
+
+    def _make_crawler(self, skip: bool = False) -> Crawler:
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_skip_media"),
+                respect_robots=False,
+                skip_media_files=skip,
+            )
+
+    def test_default_skip_media_disabled(self):
+        c = self._make_crawler(skip=False)
+        self.assertFalse(c.skip_media_files)
+
+    def test_skip_media_enabled(self):
+        c = self._make_crawler(skip=True)
+        self.assertTrue(c.skip_media_files)
+
+    def test_is_media_url_video(self):
+        c = self._make_crawler()
+        self.assertTrue(c._is_media_url("https://cdn.example.com/video.mp4"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/clip.webm"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/movie.avi"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/film.mkv"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/show.mov"))
+
+    def test_is_media_url_audio(self):
+        c = self._make_crawler()
+        self.assertTrue(c._is_media_url("https://cdn.example.com/song.mp3"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/audio.ogg"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/music.flac"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/track.aac"))
+        self.assertTrue(c._is_media_url("https://cdn.example.com/clip.wav"))
+
+    def test_is_media_url_not_media(self):
+        c = self._make_crawler()
+        self.assertFalse(c._is_media_url("https://example.com/page.html"))
+        self.assertFalse(c._is_media_url("https://example.com/data.zip"))
+        self.assertFalse(c._is_media_url("https://example.com/image.jpg"))
+        self.assertFalse(c._is_media_url("https://example.com/doc.pdf"))
+
+    def test_is_media_content_type_video(self):
+        c = self._make_crawler()
+        self.assertTrue(c._is_media_content_type("video/mp4"))
+        self.assertTrue(c._is_media_content_type("video/webm"))
+        self.assertTrue(c._is_media_content_type("video/ogg"))
+
+    def test_is_media_content_type_audio(self):
+        c = self._make_crawler()
+        self.assertTrue(c._is_media_content_type("audio/mpeg"))
+        self.assertTrue(c._is_media_content_type("audio/ogg"))
+        self.assertTrue(c._is_media_content_type("audio/wav"))
+
+    def test_is_media_content_type_not_media(self):
+        c = self._make_crawler()
+        self.assertFalse(c._is_media_content_type("text/html"))
+        self.assertFalse(c._is_media_content_type("application/zip"))
+        self.assertFalse(c._is_media_content_type("image/jpeg"))
+
+    def test_media_extensions_include_video_and_audio(self):
+        from web_crawler.core.crawler import _MEDIA_EXTENSIONS, _VIDEO_EXTENSIONS, _AUDIO_EXTENSIONS
+        self.assertTrue(_VIDEO_EXTENSIONS.issubset(_MEDIA_EXTENSIONS))
+        self.assertTrue(_AUDIO_EXTENSIONS.issubset(_MEDIA_EXTENSIONS))
+        self.assertIn(".mp4", _MEDIA_EXTENSIONS)
+        self.assertIn(".mp3", _MEDIA_EXTENSIONS)
+
+
 if __name__ == "__main__":
     unittest.main()
 

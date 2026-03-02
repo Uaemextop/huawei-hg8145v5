@@ -89,6 +89,21 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                         ("http://", "https://", "/")
                     ):
                         _add(content, allow_external=True)
+                # Open Graph (og:image, og:video, og:audio, og:url)
+                # and Twitter Card (twitter:image) media meta tags
+                og_prop = (el.get("property") or "").lower()
+                tw_name = (el.get("name") or "").lower()
+                _og_media_props = {
+                    "og:image", "og:video", "og:video:url",
+                    "og:video:secure_url", "og:audio",
+                    "og:audio:url", "og:audio:secure_url",
+                }
+                _tw_media_props = {"twitter:image", "twitter:player"}
+                if content and content.startswith(
+                    ("http://", "https://", "/")
+                ):
+                    if og_prop in _og_media_props or tw_name in _tw_media_props:
+                        _add(content, allow_external=True)
 
     for style_el in soup.find_all("style"):
         found |= extract_css_urls(style_el.get_text(), page_url, base)
