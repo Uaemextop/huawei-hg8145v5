@@ -1210,12 +1210,13 @@ class Crawler:
                     ["git", "add", "README.md"],
                     cwd=cwd, capture_output=True, timeout=30,
                 )
-                # Always stage URL list files
+                # Stage URL list files when they exist
                 for txt in ("url_list.txt", "video_urls.txt"):
-                    subprocess.run(
-                        ["git", "add", "--", txt],
-                        cwd=cwd, capture_output=True, timeout=30,
-                    )
+                    if (self.output_dir / txt).exists():
+                        subprocess.run(
+                            ["git", "add", "--", txt],
+                            cwd=cwd, capture_output=True, timeout=30,
+                        )
                 for ext in self.upload_extensions:
                     args = ["git", "add", "--", f"*{ext}"]
                     if self.debug:

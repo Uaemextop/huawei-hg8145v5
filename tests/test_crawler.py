@@ -1698,29 +1698,38 @@ class TestUploadExtensions(unittest.TestCase):
     @patch("subprocess.run")
     def test_filtered_git_push_stages_only_matching(self, mock_run):
         """When upload_extensions is set, git add should target specific globs."""
+        import tempfile
         import subprocess as _sp
-        with patch.object(Crawler, "_load_robots"):
-            crawler = Crawler(
-                start_url="https://example.com",
-                output_dir=Path("/tmp/test_crawl_output"),
-                respect_robots=False,
-                upload_extensions=frozenset({".zip", ".bin"}),
-                git_push_every=1,
-            )
-        crawler._stats["ok"] = 1
-        crawler._maybe_git_push()
-        # Should have called git add for README, each ext, commit, push
-        calls = mock_run.call_args_list
-        cmds = [c[0][0] for c in calls]
-        # First call: git add README.md
-        self.assertEqual(cmds[0], ["git", "add", "README.md"])
-        # Should have ext-specific git add calls (2 txt files + 2 extensions)
-        ext_adds = [c for c in cmds if len(c) >= 4 and c[1] == "add"
-                    and c[2] == "--"]
-        self.assertEqual(len(ext_adds), 4)  # url_list.txt, video_urls.txt, + 2 exts
-        # Should have commit and push
-        self.assertTrue(any(c[0:2] == ["git", "commit"] for c in cmds))
-        self.assertTrue(any(c == ["git", "push"] for c in cmds))
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                    upload_extensions=frozenset({".zip", ".bin"}),
+                    git_push_every=1,
+                )
+            crawler._stats["ok"] = 1
+            # Add video URLs so txt files get created and staged
+            crawler._saved_urls = ["https://example.com/v.mp4"]
+            crawler._video_urls = ["https://example.com/v.mp4"]
+            crawler._maybe_git_push()
+            # Should have called git add for README, txt files, each ext, commit, push
+            calls = mock_run.call_args_list
+            cmds = [c[0][0] for c in calls]
+            # First call: git add README.md
+            self.assertEqual(cmds[0], ["git", "add", "README.md"])
+            # Should have ext-specific git add calls (2 txt files + 2 extensions)
+            ext_adds = [c for c in cmds if len(c) >= 4 and c[1] == "add"
+                        and c[2] == "--"]
+            self.assertEqual(len(ext_adds), 4)  # url_list.txt, video_urls.txt, + 2 exts
+            # Verify txt files are staged
+            staged_files = [c[3] for c in ext_adds]
+            self.assertIn("url_list.txt", staged_files)
+            self.assertIn("video_urls.txt", staged_files)
+            # Should have commit and push
+            self.assertTrue(any(c[0:2] == ["git", "commit"] for c in cmds))
+            self.assertTrue(any(c == ["git", "push"] for c in cmds))
 
     @patch("subprocess.run")
     def test_unfiltered_git_push_uses_add_all(self, mock_run):
