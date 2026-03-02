@@ -895,6 +895,77 @@ class TestUrlList(unittest.TestCase):
         self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
         self.assertEqual(meta["duration"], "PT5M")
 
+    def test_write_video_url_list_sanitizes_pipes(self):
+        """Pipe characters in metadata values are replaced to preserve format."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._video_urls = ["https://example.com/a.mp4"]
+            crawler._video_meta = {
+                "https://example.com/a.mp4": {
+                    "title": "Title|With|Pipes",
+                    "author": "Author",
+                    "description": "Line1\nLine2",
+                    "thumbnail": "",
+                    "duration": "",
+                    "upload_date": "",
+                    "genre": "",
+                },
+            }
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            # Pipes in values replaced, newlines replaced with space
+            self.assertEqual(
+                content,
+                "https://example.com/a.mp4|Title-With-Pipes|Author|"
+                "Line1 Line2||||\n",
+            )
+
+    def test_write_video_url_list_microdata_metadata(self):
+        """video_urls.txt includes real metadata from microdata extraction."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            html = '''<html><body>
+            <article itemscope itemtype="https://schema.org/VideoObject">
+              <meta itemprop="author" content="Super Landia" />
+              <meta itemprop="name" content="Mommy" />
+              <meta itemprop="description" content="Mommy" />
+              <meta itemprop="duration" content="PT5M" />
+              <meta itemprop="thumbnailUrl" content="https://cdn.example.com/thumb.jpg" />
+              <meta itemprop="contentURL" content="https://cdn.example.com/video.mp4" />
+              <meta itemprop="uploadDate" content="2026-01-16" />
+            </article></body></html>'''
+            links = {"https://cdn.example.com/video.mp4"}
+            crawler._populate_video_meta(html, links)
+            crawler._video_urls = ["https://cdn.example.com/video.mp4"]
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            # Metadata should be populated from microdata
+            self.assertIn("Mommy", content)
+            self.assertIn("Super Landia", content)
+            self.assertIn("https://cdn.example.com/thumb.jpg", content)
+            self.assertIn("PT5M", content)
+            self.assertIn("2026-01-16", content)
+            # Description deduped (same as title)
+            parts = content.strip().split("|")
+            self.assertEqual(len(parts), 8)
+            self.assertEqual(parts[1], "Mommy")      # title
+            self.assertEqual(parts[2], "Super Landia")  # author
+            self.assertEqual(parts[3], "")              # description (deduped)
+
 
 # ------------------------------------------------------------------ #
 # Logging system

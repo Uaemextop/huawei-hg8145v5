@@ -196,7 +196,7 @@ class Crawler:
         self._cdn_hosts: set[str] = set()
         self._allow_external = allow_external
         self._video_urls: list[str] = []
-        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, description}
+        self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, description, thumbnail, duration, upload_date, genre}
         self._saved_urls: list[str] = []
 
         # robots.txt (loaded after captcha solve in run())
@@ -296,29 +296,44 @@ class Crawler:
         # Write video URL list
         self._write_video_url_list()
 
+    @staticmethod
+    def _sanitize_meta_value(value: str) -> str:
+        """Sanitize a metadata value for pipe-separated output.
+
+        Replaces pipe characters and newlines so they do not break
+        the ``video_urls.txt`` line format.
+        """
+        return value.replace("|", "-").replace("\n", " ").replace("\r", "")
+
     def _write_video_url_list(self) -> None:
         """Write tracked video URLs to ``video_urls.txt``.
 
-        Each line uses the pipe-separated format::
+        Each line uses the pipe-separated format (8 fields)::
 
             URL|Title|Author|Description|ThumbnailUrl|Duration|UploadDate|Genre
+
+        Metadata is sourced from JSON-LD ``VideoObject``, Schema.org
+        microdata (``itemprop`` tags), or page-level OG/meta tags (in
+        that priority order).  Pipe characters and newlines inside
+        metadata values are sanitized to preserve the format.
         """
         if not self._video_urls:
             return
         video_list = self.output_dir / "video_urls.txt"
         video_list.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
+        _san = self._sanitize_meta_value
         for url in self._video_urls:
             meta = self._video_meta.get(url, {})
             parts = [
                 url,
-                meta.get("title", ""),
-                meta.get("author", ""),
-                meta.get("description", ""),
-                meta.get("thumbnail", ""),
-                meta.get("duration", ""),
-                meta.get("upload_date", ""),
-                meta.get("genre", ""),
+                _san(meta.get("title", "")),
+                _san(meta.get("author", "")),
+                _san(meta.get("description", "")),
+                _san(meta.get("thumbnail", "")),
+                _san(meta.get("duration", "")),
+                _san(meta.get("upload_date", "")),
+                _san(meta.get("genre", "")),
             ]
             lines.append("|".join(parts))
         video_list.write_text(
