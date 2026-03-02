@@ -157,7 +157,7 @@ jobs:
           # Check if a repo already exists and find next available name
           REPO_NAME="$REPO_BASE"
           COPY=0
-          MAX_COPIES=10
+          MAX_COPIES=50
           while true; do
             HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
               -H "Authorization: token $ONT_TOKEN" \
@@ -217,13 +217,12 @@ jobs:
           # Initialize git in the output directory
           mkdir -p downloaded_site
           cd downloaded_site
-          git init
+          git init -b main
           git lfs install --local
-          git config user.name "Web Crawler Bot"
-          git config user.email "crawler@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
-          git checkout -b main
 
           # Allow pushing large binary firmware files (up to 500 MB)
           git config http.postBuffer 524288000
