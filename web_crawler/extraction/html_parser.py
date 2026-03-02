@@ -2,6 +2,7 @@
 HTML/ASP attribute extraction via BeautifulSoup.
 """
 
+import json
 import re
 import warnings
 
@@ -61,7 +62,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "link":    ["href"],
         "script":  ["src"],
         "img":     ["src", "data-src", "data-lazy-src"],
-        "source":  ["src", "srcset", "data-src"],
+        "source":  ["src", "srcset", "data-src", "data-video-src"],
         "iframe":  ["src"],
         "frame":   ["src"],
         "form":    ["action"],
@@ -71,7 +72,8 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "object":  ["data"],
         "embed":   ["src"],
         "audio":   ["src", "data-src"],
-        "video":   ["src", "poster", "data-src", "data-lazy-src"],
+        "video":   ["src", "poster", "data-src", "data-lazy-src",
+                    "data-video-src", "data-video-url"],
         "track":   ["src"],
     }
     for tag, attrs in attr_map.items():
@@ -115,4 +117,38 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         if not script_el.get("src"):
             found |= extract_js_paths(script_el.get_text(), page_url, base)
 
+    # JSON-LD structured data – extract media URLs from VideoObject,
+    # AudioObject and other Schema.org types that embed content URLs.
+    # Both camelCase (Schema.org canonical) and lowercase variants are
+    # checked because some implementations deviate from the spec.
+    _JSONLD_URL_KEYS = frozenset({
+        "contenturl", "embedurl", "thumbnailurl", "url",
+        "contentUrl", "embedUrl", "thumbnailUrl",
+    })
+    for ld_el in soup.find_all("script", type="application/ld+json"):
+        try:
+            ld_data = json.loads(ld_el.get_text())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        _extract_jsonld_urls(ld_data, _JSONLD_URL_KEYS, _add)
+
     return found
+
+
+def _extract_jsonld_urls(
+    obj: object,
+    keys: frozenset[str],
+    add_fn,
+) -> None:
+    """Recursively walk a JSON-LD structure and pass media URLs to *add_fn*."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys and isinstance(v, str) and v.startswith(
+                ("http://", "https://", "/")
+            ):
+                add_fn(v, allow_external=True)
+            else:
+                _extract_jsonld_urls(v, keys, add_fn)
+    elif isinstance(obj, list):
+        for item in obj:
+            _extract_jsonld_urls(item, keys, add_fn)

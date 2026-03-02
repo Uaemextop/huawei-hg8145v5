@@ -413,5 +413,119 @@ class TestVideoBinaryContentTypes(unittest.TestCase):
                           f"{at} should be in BINARY_CONTENT_TYPES")
 
 
+class TestJsonLdVideoExtraction(unittest.TestCase):
+    """Test JSON-LD structured data extraction for VideoObject."""
+
+    def test_jsonld_video_object_contenturl(self):
+        html = '''<html><head>
+        <script type="application/ld+json">
+        {"@type": "VideoObject", "contentUrl": "https://cdn.example.net/video.mp4"}
+        </script></head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/video.mp4", result)
+
+    def test_jsonld_video_object_embedurl(self):
+        html = '''<html><head>
+        <script type="application/ld+json">
+        {"@type": "VideoObject", "embedUrl": "https://cdn.example.net/embed/123"}
+        </script></head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/embed/123", result)
+
+    def test_jsonld_video_object_thumbnailurl(self):
+        html = '''<html><head>
+        <script type="application/ld+json">
+        {"@type": "VideoObject", "thumbnailUrl": "https://cdn.example.net/thumb.jpg"}
+        </script></head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/thumb.jpg", result)
+
+    def test_jsonld_nested_graph(self):
+        html = '''<html><head>
+        <script type="application/ld+json">
+        {"@graph": [{"@type": "VideoObject", "contentUrl": "https://cdn.example.net/nested.mp4"}]}
+        </script></head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/nested.mp4", result)
+
+    def test_jsonld_invalid_json_ignored(self):
+        html = '''<html><head>
+        <script type="application/ld+json">not valid json{</script>
+        </head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIsInstance(result, set)
+
+    def test_jsonld_relative_url(self):
+        html = '''<html><head>
+        <script type="application/ld+json">
+        {"@type": "VideoObject", "contentUrl": "/videos/local.mp4"}
+        </script></head></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/local.mp4", result)
+
+
+class TestVideoDataAttributes(unittest.TestCase):
+    """Test additional data-* attributes for video players."""
+
+    def test_video_data_video_src(self):
+        html = '<video data-video-src="/videos/player.mp4"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/player.mp4", result)
+
+    def test_video_data_video_url(self):
+        html = '<video data-video-url="/videos/player.webm"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/player.webm", result)
+
+    def test_source_data_video_src(self):
+        html = '<video><source data-video-src="/videos/source.mp4"></video>'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://example.com/videos/source.mp4", result)
+
+
+class TestStreamUrlExtraction(unittest.TestCase):
+    """Test HLS/DASH stream URL extraction from JavaScript."""
+
+    def test_hls_stream_in_js(self):
+        js = 'var src = "https://cdn.example.net/stream/playlist.m3u8";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://cdn.example.net/stream/playlist.m3u8", result)
+
+    def test_dash_stream_in_js(self):
+        js = 'var src = "https://cdn.example.net/stream/manifest.mpd";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://cdn.example.net/stream/manifest.mpd", result)
+
+    def test_mp4_url_in_js(self):
+        js = 'player.src("https://cdn.example.net/videos/clip.mp4");'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn("https://cdn.example.net/videos/clip.mp4", result)
+
+    def test_stream_url_with_query_params(self):
+        js = 'var src = "https://cdn.example.net/live/stream.m3u8?token=abc123";'
+        result = extract_js_paths(js, PAGE, BASE)
+        self.assertIn(
+            "https://cdn.example.net/live/stream.m3u8?token=abc123", result)
+
+    def test_stream_url_in_html_script(self):
+        html = '''<html><script>
+        var videoSrc = "https://cdn.example.net/hls/video.m3u8";
+        </script></html>'''
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/hls/video.m3u8", result)
+
+
+class TestProbeThresholds(unittest.TestCase):
+    """Test that probe thresholds are set to optimized values."""
+
+    def test_probe_404_threshold(self):
+        from web_crawler.config import PROBE_404_THRESHOLD
+        self.assertEqual(PROBE_404_THRESHOLD, 30)
+
+    def test_probe_dir_404_limit(self):
+        from web_crawler.config import PROBE_DIR_404_LIMIT
+        self.assertEqual(PROBE_DIR_404_LIMIT, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
