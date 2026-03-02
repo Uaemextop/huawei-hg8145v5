@@ -264,6 +264,31 @@ class TestCdnMediaExtraction(unittest.TestCase):
         result = extract_links(html, "text/html", PAGE, BASE)
         self.assertNotIn("https://cdn.example.net/page.html", result)
 
+    def test_og_image_external(self):
+        html = '<meta property="og:image" content="https://cdn.example.net/thumb.jpg" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/thumb.jpg", result)
+
+    def test_og_video_external(self):
+        html = '<meta property="og:video" content="https://cdn.example.net/movie.mp4" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/movie.mp4", result)
+
+    def test_og_audio_external(self):
+        html = '<meta property="og:audio" content="https://cdn.example.net/track.mp3" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/track.mp3", result)
+
+    def test_twitter_image_external(self):
+        html = '<meta name="twitter:image" content="https://cdn.example.net/card.jpg" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/card.jpg", result)
+
+    def test_og_video_secure_url(self):
+        html = '<meta property="og:video:secure_url" content="https://cdn.example.net/secure.mp4" />'
+        result = extract_links(html, "text/html", PAGE, BASE)
+        self.assertIn("https://cdn.example.net/secure.mp4", result)
+
     def test_img_external_rejected(self):
         """<img> tags to external hosts should still be rejected."""
         html = '<img src="https://cdn.example.net/image.jpg">'

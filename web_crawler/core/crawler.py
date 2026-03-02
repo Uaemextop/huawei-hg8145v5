@@ -47,6 +47,12 @@ _VIDEO_EXTENSIONS = frozenset((
     ".m4v", ".3gp", ".3g2", ".ts", ".mpeg", ".mpg", ".f4v", ".asf",
 ))
 
+_AUDIO_EXTENSIONS = frozenset((
+    ".mp3", ".ogg", ".wav", ".flac", ".aac", ".m4a", ".weba",
+))
+
+_MEDIA_EXTENSIONS = _VIDEO_EXTENSIONS | _AUDIO_EXTENSIONS
+
 try:
     from tqdm import tqdm as _tqdm
     _TQDM_AVAILABLE = True
@@ -121,6 +127,7 @@ class Crawler:
         debug: bool = False,
         cf_clearance: str = "",
         allow_external: bool = True,
+        skip_media_files: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -133,6 +140,7 @@ class Crawler:
         self.debug = debug
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
+        self.skip_media_files = skip_media_files
         self.download_extensions = download_extensions or frozenset()
         self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
@@ -209,6 +217,8 @@ class Crawler:
             log.info("Debug mode       : ON (headers saved, verbose logging)")
         if self.upload_extensions:
             log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
+        if self.skip_media_files:
+            log.info("Skip media files : ON (media URLs recorded but files not saved)")
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         ci_endgroup()
 
@@ -302,6 +312,15 @@ class Crawler:
         path_lower = urllib.parse.urlparse(url).path.lower()
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
+
+    def _is_media_url(self, url: str) -> bool:
+        """Return ``True`` if *url* points to a media file (video/audio)."""
+        path_lower = urllib.parse.urlparse(url).path.lower()
+        return any(path_lower.endswith(ext) for ext in _MEDIA_EXTENSIONS)
+
+    def _is_media_content_type(self, ct: str) -> bool:
+        """Return ``True`` if *ct* is a video or audio MIME type."""
+        return ct.startswith("video/") or ct.startswith("audio/")
 
     def _run_with_progress(self) -> None:
         """BFS loop with a tqdm progress bar."""
@@ -1529,6 +1548,18 @@ class Crawler:
             or content_disp.lower().startswith("attachment")
         )
         if _use_stream or _is_binary:
+            # Skip media files if requested – record URL but don't download
+            if self.skip_media_files and (
+                self._is_media_url(url) or self._is_media_content_type(ct_lower)
+            ):
+                with self._lock:
+                    self._track_video_url(url)
+                    self._stats["skip"] += 1
+                log.info("  [SKIP-MEDIA] %s (media file skipped)", url)
+                resp.close()
+                time.sleep(self.delay)
+                return
+
             # Streaming path: write chunks directly to disk, read first chunk
             # only for WAF/SG-CAPTCHA checks on unexpected HTML responses.
             local_stream = smart_local_path(url, self.output_dir,
@@ -1724,6 +1755,19 @@ class Crawler:
 
         content_type = resp.headers.get("Content-Type", "application/octet-stream")
         content_disp = resp.headers.get("Content-Disposition", "")
+        ct_lower_cdn = content_type.split(";")[0].strip().lower()
+
+        # Skip media files if requested – record URL but don't download
+        if self.skip_media_files and (
+            self._is_media_url(url) or self._is_media_content_type(ct_lower_cdn)
+        ):
+            with self._lock:
+                self._track_video_url(url)
+                self._stats["skip"] += 1
+            log.info("[CDN] [SKIP-MEDIA] %s (media file skipped)", url)
+            resp.close()
+            time.sleep(self.delay)
+            return
 
         # Build local path: _cdn/<hostname>/<path>
         parsed = urllib.parse.urlparse(url)

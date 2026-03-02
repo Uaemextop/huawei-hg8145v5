@@ -23,6 +23,15 @@ except ImportError:
     BeautifulSoup = None  # type: ignore[misc,assignment]
 
 
+# Open Graph and Twitter Card properties that contain media URLs
+_OG_MEDIA_PROPS = frozenset({
+    "og:image", "og:video", "og:video:url",
+    "og:video:secure_url", "og:audio",
+    "og:audio:url", "og:audio:secure_url",
+})
+_TW_MEDIA_PROPS = frozenset({"twitter:image", "twitter:player"})
+
+
 def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     """
     Extract every resource URL from HTML/ASP content using BeautifulSoup.
@@ -88,6 +97,15 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                     if itemprop in _url_props and content.startswith(
                         ("http://", "https://", "/")
                     ):
+                        _add(content, allow_external=True)
+                # Open Graph (og:image, og:video, og:audio, og:url)
+                # and Twitter Card (twitter:image) media meta tags
+                og_prop = (el.get("property") or "").lower()
+                tw_name = (el.get("name") or "").lower()
+                if content and content.startswith(
+                    ("http://", "https://", "/")
+                ):
+                    if og_prop in _OG_MEDIA_PROPS or tw_name in _TW_MEDIA_PROPS:
                         _add(content, allow_external=True)
 
     for style_el in soup.find_all("style"):

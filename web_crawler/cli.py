@@ -119,6 +119,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable downloading media files from external CDN hosts "
              "discovered in the crawled pages",
     )
+    parser.add_argument(
+        "--skip-media-files", action="store_true", default=False,
+        help="Skip downloading media files (video/audio) but still record "
+             "their URLs in video_urls.txt",
+    )
     return parser.parse_args()
 
 
@@ -207,6 +212,7 @@ def main() -> None:
         debug=args.debug,
         cf_clearance=args.cf_clearance,
         allow_external=args.allow_external,
+        skip_media_files=args.skip_media_files,
     )
 
     t0 = time.monotonic()
