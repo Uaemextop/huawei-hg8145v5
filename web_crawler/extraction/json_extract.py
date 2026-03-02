@@ -10,6 +10,9 @@ from web_crawler.utils.url import normalise_url
 # WP REST API "self-referential" URL patterns that create queue loops.
 # These are embedded in every REST response under ``_links`` / ``href``
 # and generate exponential queue growth when crawled recursively.
+# NOTE: some patterns overlap with BLOCKED_PATH_RE in config.py; that is
+# intentional – filtering here prevents URL *generation*, while
+# BLOCKED_PATH_RE prevents URL *enqueue*.  Defence in depth.
 _WP_REST_LOOP_RE = re.compile(
     r"/wp-json/wp/v2/[^/]+/\d+/revisions"           # post revisions (401)
     r"|/wp-json/wp/v2/[^/]+\?[^\"]*\bparent=\d+"     # parent filter

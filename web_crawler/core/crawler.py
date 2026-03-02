@@ -1099,9 +1099,14 @@ class Crawler:
                     return
             # Queue size cap – prevent unbounded memory growth on sites
             # whose REST API / pagination generates an ever-expanding
-            # set of discovery URLs.
-            if len(self._queue) >= MAX_QUEUE_SIZE and not priority:
-                return
+            # set of discovery URLs.  Priority URLs (target extension
+            # downloads, CF retries) bypass the soft cap but are bounded
+            # by a hard cap at 2× to ensure high-value targets are not
+            # lost while still preventing runaway growth.
+            qlen = len(self._queue)
+            if qlen >= MAX_QUEUE_SIZE:
+                if not priority or qlen >= MAX_QUEUE_SIZE * 2:
+                    return
             # Auto-prioritize target extension files
             if not priority and self.download_extensions:
                 path_lower = parsed.path.lower()
