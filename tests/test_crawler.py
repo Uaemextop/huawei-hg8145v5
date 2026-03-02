@@ -598,6 +598,96 @@ class TestGitPushIntegration(unittest.TestCase):
             crawler._maybe_git_push()
         self.assertEqual(crawler.git_push_every, 0)
 
+    def test_url_list_written_on_git_push(self):
+        """URL list file is written before each periodic git push."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                    git_push_every=100,
+                )
+            crawler._stats["ok"] = 100
+            crawler._saved_urls = [
+                "https://example.com/page1.html",
+                "https://example.com/page2.html",
+            ]
+            with patch("subprocess.run"):
+                crawler._maybe_git_push()
+            url_list = Path(td) / "url_list.txt"
+            self.assertTrue(url_list.exists())
+            content = url_list.read_text(encoding="utf-8")
+            self.assertIn("https://example.com/page1.html", content)
+            self.assertIn("https://example.com/page2.html", content)
+
+
+class TestUrlList(unittest.TestCase):
+    """Test the URL list tracking feature."""
+
+    def _make_crawler(self, **kwargs):
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_output"),
+                respect_robots=False,
+                **kwargs,
+            )
+        return crawler
+
+    def test_saved_urls_initialized_empty(self):
+        crawler = self._make_crawler()
+        self.assertEqual(crawler._saved_urls, [])
+
+    def test_write_url_list_creates_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._saved_urls = ["https://example.com/a.html"]
+            crawler._write_url_list()
+            url_list = Path(td) / "url_list.txt"
+            self.assertTrue(url_list.exists())
+            self.assertEqual(
+                url_list.read_text(encoding="utf-8"),
+                "https://example.com/a.html\n",
+            )
+
+    def test_write_url_list_multiple_urls(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            urls = [f"https://example.com/p{i}.html" for i in range(5)]
+            crawler._saved_urls = urls
+            crawler._write_url_list()
+            url_list = Path(td) / "url_list.txt"
+            content = url_list.read_text(encoding="utf-8")
+            for u in urls:
+                self.assertIn(u, content)
+
+    def test_write_url_list_skipped_when_empty(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._write_url_list()
+            url_list = Path(td) / "url_list.txt"
+            self.assertFalse(url_list.exists())
+
 
 # ------------------------------------------------------------------ #
 # Logging system
