@@ -1321,10 +1321,13 @@ class Crawler:
             # Re-enqueue on transient network errors up to MAX_URL_RETRIES
             with self._lock:
                 retries = self._url_retries.get(key, 0)
-            if retries < MAX_URL_RETRIES:
-                with self._lock:
+                if retries < MAX_URL_RETRIES:
                     self._url_retries[key] = retries + 1
-                self._visited.discard(key)
+                    self._visited.discard(key)
+                    can_retry = True
+                else:
+                    can_retry = False
+            if can_retry:
                 self._enqueue(url, depth)
                 log.debug("Request failed for %s – retry %d/%d – %s",
                           url, retries + 1, MAX_URL_RETRIES, exc)

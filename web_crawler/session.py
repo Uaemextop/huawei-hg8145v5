@@ -41,8 +41,6 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
         total=MAX_RETRIES,
         backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504],
-        allowed_methods=None,          # retry on all HTTP methods
-        raise_on_status=False,         # don't raise, let crawler handle status
         connect=MAX_RETRIES,           # retry on connection errors
         read=MAX_RETRIES,              # retry on read errors (socket reset, etc.)
     )
