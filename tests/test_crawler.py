@@ -791,6 +791,110 @@ class TestUrlList(unittest.TestCase):
             video_list = Path(td) / "video_urls.txt"
             self.assertFalse(video_list.exists())
 
+    def test_write_video_url_list_pipe_format(self):
+        """video_urls.txt uses pipe-separated metadata format."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._video_urls = ["https://example.com/a.mp4"]
+            crawler._video_meta = {
+                "https://example.com/a.mp4": {
+                    "title": "Big Buck Bunny",
+                    "author": "Blender Foundation",
+                    "description": "A short animation",
+                    "thumbnail": "https://example.com/thumb.jpg",
+                    "duration": "PT10M",
+                    "upload_date": "2024-01-01",
+                    "genre": "Animation",
+                },
+            }
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            expected = (
+                "https://example.com/a.mp4|Big Buck Bunny|Blender Foundation|"
+                "A short animation|https://example.com/thumb.jpg|PT10M|2024-01-01|Animation\n"
+            )
+            self.assertEqual(content, expected)
+
+    def test_write_video_url_list_no_meta(self):
+        """video_urls.txt uses empty pipes when no metadata is available."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(td),
+                    respect_robots=False,
+                )
+            crawler._video_urls = ["https://example.com/a.mp4"]
+            crawler._write_video_url_list()
+            video_list = Path(td) / "video_urls.txt"
+            content = video_list.read_text(encoding="utf-8")
+            self.assertEqual(content, "https://example.com/a.mp4|||||||\n")
+
+    def test_populate_video_meta_from_html(self):
+        """_populate_video_meta extracts metadata from HTML pages."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        html = """<html><head>
+        <meta property="og:title" content="Video Page">
+        <meta property="og:description" content="Cool videos">
+        <meta name="author" content="TestAuthor">
+        <meta property="og:image" content="https://example.com/og.jpg">
+        </head></html>"""
+        links = {"https://cdn.example.com/clip.mp4", "https://example.com/page.html"}
+        crawler._populate_video_meta(html, links)
+        self.assertIn("https://cdn.example.com/clip.mp4", crawler._video_meta)
+        meta = crawler._video_meta["https://cdn.example.com/clip.mp4"]
+        self.assertEqual(meta["title"], "Video Page")
+        self.assertEqual(meta["author"], "TestAuthor")
+        self.assertEqual(meta["thumbnail"], "https://example.com/og.jpg")
+        # Non-video links should NOT get metadata
+        self.assertNotIn("https://example.com/page.html", crawler._video_meta)
+
+    def test_populate_video_meta_jsonld_priority(self):
+        """JSON-LD VideoObject metadata takes priority over page metadata."""
+        import json as _json
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl"),
+                respect_robots=False,
+            )
+        ld = {
+            "@type": "VideoObject",
+            "name": "Specific Title",
+            "description": "Specific desc",
+            "contentUrl": "https://cdn.example.com/clip.mp4",
+            "thumbnailUrl": "https://cdn.example.com/thumb.jpg",
+            "duration": "PT5M",
+            "uploadDate": "2025-06-01",
+            "genre": "Comedy",
+            "author": "Specific Author",
+        }
+        html = (
+            '<html><head><title>Page Title</title>'
+            f'<script type="application/ld+json">{_json.dumps(ld)}</script>'
+            '</head></html>'
+        )
+        links = {"https://cdn.example.com/clip.mp4"}
+        crawler._populate_video_meta(html, links)
+        meta = crawler._video_meta["https://cdn.example.com/clip.mp4"]
+        self.assertEqual(meta["title"], "Specific Title")
+        self.assertEqual(meta["author"], "Specific Author")
+        self.assertEqual(meta["thumbnail"], "https://cdn.example.com/thumb.jpg")
+        self.assertEqual(meta["duration"], "PT5M")
+
 
 # ------------------------------------------------------------------ #
 # Logging system
