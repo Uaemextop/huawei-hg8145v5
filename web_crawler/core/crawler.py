@@ -562,16 +562,64 @@ class Crawler:
     # ------------------------------------------------------------------
 
     def _load_robots(self) -> None:
-        """Parse robots.txt from the target host."""
+        """Parse robots.txt from the target host.
+
+        Uses our live session so captcha cookies are included.  Treats HTTP
+        responses as follows (per RFC 9309 §2.3.1):
+
+        * 2xx  → parse normally
+        * 404 / 410  → no restrictions (allow all)
+        * 401 / 403  → Python's ``RobotFileParser`` normally marks everything
+          as disallowed for these codes.  We override that behaviour when the
+          response body is an AWS/S3/CloudFront ``AccessDenied`` XML error,
+          which is not a real robots.txt and should be treated as "not found".
+        * Other 4xx/5xx  → treat as "not found" (allow all)
+        """
         robots_url = self.base + "/robots.txt"
+        try:
+            resp = self.session.get(robots_url, timeout=15, allow_redirects=True)
+        except Exception as exc:
+            log.debug("Could not fetch robots.txt: %s", exc)
+            return
+
+        status = resp.status_code
+
+        # 404/410 → no robots.txt file, allow everything.
+        if status in (404, 410):
+            log.debug("No robots.txt at %s (HTTP %s)", robots_url, status)
+            return
+
+        # 401/403 that look like S3/CloudFront AccessDenied XML → ignore.
+        # Python's RobotFileParser would treat these as Disallow: / which is
+        # wrong for private S3 buckets where robots.txt simply doesn't exist.
+        if status in (401, 403):
+            ct = resp.headers.get("Content-Type", "")
+            body = resp.text
+            if ("AccessDenied" in body or "application/xml" in ct
+                    or "AmazonS3" in resp.headers.get("server", "")
+                    or "cloudfront" in resp.headers.get("via", "").lower()):
+                log.debug(
+                    "robots.txt at %s returned %s with S3/CloudFront error body "
+                    "— treating as not found (allow all)",
+                    robots_url, status,
+                )
+                return
+            # Genuine 403 (not an S3 artefact) → disallow all, per RFC 9309.
+            log.debug("robots.txt at %s returned %s → disallowing all", robots_url, status)
+            self._robots = urllib.robotparser.RobotFileParser()
+            self._robots.set_url(robots_url)
+            self._robots.disallow_all = True
+            return
+
+        if status != 200:
+            log.debug("robots.txt fetch returned HTTP %s — treating as not found", status)
+            return
+
+        # HTTP 200 — parse normally.
         self._robots = urllib.robotparser.RobotFileParser()
         self._robots.set_url(robots_url)
-        try:
-            self._robots.read()
-            log.info("Loaded robots.txt from %s", robots_url)
-        except Exception as exc:
-            log.debug("Could not load robots.txt: %s", exc)
-            self._robots = None
+        self._robots.parse(resp.text.splitlines())
+        log.info("Loaded robots.txt from %s", robots_url)
 
     def _is_allowed(self, url: str) -> bool:
         """Check if the URL is allowed by robots.txt."""
@@ -1491,9 +1539,16 @@ class Crawler:
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
 
         # Rotate User-Agent per request (skip for curl_cffi which
-        # manages its own UA via TLS impersonation)
+        # manages its own UA via TLS impersonation).
+        # For rsddownload-secure.lenovo.com (S3 bucket), use the exact UA that
+        # the LMSA HttpDownload.OpenRequest() uses (GlobalVar.UserAgent = IE8).
         if not self._cf_bypass_done:
-            self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+            parsed_host = urllib.parse.urlparse(url).netloc.lower()
+            if "rsddownload" in parsed_host and "lenovo.com" in parsed_host:
+                from web_crawler.auth.lmsa import DOWNLOAD_USER_AGENT as _S3_UA
+                self.session.headers["User-Agent"] = _S3_UA
+            else:
+                self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
 
         # Build conditional request headers from cached ETag / Last-Modified
         _conditional: dict[str, str] = {}

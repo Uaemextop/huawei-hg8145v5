@@ -82,7 +82,9 @@ _LMSA_CB_URL = "https://lmsa.prod.cloud.lenovo.com/Tips/lenovoIdSuccess.html"
 _LMSA_FORM_DEFAULTS: dict[str, str] = {
     "lenovoid.action":       "uilogin",
     "lenovoid.realm":        _LMSA_REALM,
-    "lenovoid.lang":         "en_US",
+    # Confirmed from DotNetBrowserLog (LMSA 7.4.3.4 session):
+    # lenovoid.lang=es_ES in the gateway URL
+    "lenovoid.lang":         "es_ES",
     "lenovoid.ctx":          "null",
     "lenovoid.uinfo":        "null",
     "lenovoid.cb":           _LMSA_CB_URL,
@@ -102,9 +104,11 @@ _LMSA_FORM_DEFAULTS: dict[str, str] = {
 }
 
 _BROWSER_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
+    # Confirmed from DotNetBrowserLog (LMSA 7.4.3.4):
+    # http_header { name: "User-Agent" value: "Mozilla/5.0 (Windows NT 10.0; WOW64)
+    #   AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36" }
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36"
 )
 
 _WUST_RE = re.compile(r"lenovoid\.wust=([^&\s\"']+)")
@@ -252,20 +256,38 @@ class LenovoIDAuth:
 
         try:
             with _sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-http2",
-                    ],
-                )
+                # Try Firefox first — it has a different TLS fingerprint from
+                # Playwright's Chromium and avoids the HTTP/2 protocol error that
+                # Akamai triggers against automated Chromium instances.
+                try:
+                    browser = p.firefox.launch(headless=True)
+                    _log("[LenovoID] Using Firefox browser engine")
+                except Exception:
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-http2",
+                            "--disable-blink-features=AutomationControlled",
+                        ],
+                    )
+                    _log("[LenovoID] Using Chromium browser engine (Firefox unavailable)")
                 ctx = browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent=_BROWSER_UA,
-                    locale="en-US",
+                    # Confirmed from DotNetBrowserLog:
+                    # Accept-Language: es-419,es;q=0.9
+                    locale="es-419",
                     ignore_https_errors=True,
+                    extra_http_headers={
+                        "Accept-Language": "es-419,es;q=0.9",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-User": "?1",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
                 )
                 page = ctx.new_page()
 
@@ -280,34 +302,35 @@ class LenovoIDAuth:
                 gateway_url = (
                     f"{PASSPORT_BASE}{_GATEWAY_PATH}"
                     f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
-                    f"&lenovoid.lang=en_US"
+                    f"&lenovoid.lang=es_ES"
                     f"&lenovoid.cb={_LMSA_CB_URL}"
                 )
                 _log(f"[LenovoID] Browser → gateway: {gateway_url[:80]}")
                 try:
-                    page.goto(gateway_url, timeout=10_000,
-                              wait_until="domcontentloaded")
+                    page.goto(gateway_url, timeout=20_000,
+                              wait_until="networkidle")
                 except Exception as exc:
                     _log(f"[LenovoID] Browser goto error (Akamai may be blocking): {exc}")
-                    # If goto failed, close and return None immediately.
                     browser.close()
                     return None
 
-                # Allow JS challenges to run.
+                # Allow JS challenges to run (Akamai sensor_data generation).
                 page.wait_for_timeout(3000)
 
-                # Fill email field.
-                email_selectors = [
-                    'input[name="username"]',
-                    'input[type="email"]',
-                    'input[id*="email" i]',
-                    'input[id*="user" i]',
-                    'input[placeholder*="email" i]',
-                ]
+                # The Lenovo ID page is a two-step SPA:
+                # Step A: fill email in the visible text input → click Next
+                # Step B: fill password in the visible password input → click Sign In
+                # Confirmed from live page: id="emailOrPhoneInput" (type=text, visible)
                 filled_email = False
-                for sel in email_selectors:
+                for sel in [
+                    '#emailOrPhoneInput',
+                    'input[id="emailOrPhoneInput"]',
+                    'input[type="text"]:visible',
+                    'input[type="email"]:visible',
+                    'input[id*="email" i]:visible',
+                ]:
                     try:
-                        page.fill(sel, email, timeout=3000)
+                        page.locator(sel).first.fill(email, timeout=5000)
                         filled_email = True
                         break
                     except Exception:
@@ -316,30 +339,43 @@ class LenovoIDAuth:
                 if not filled_email:
                     _log("[LenovoID] Browser: could not locate email field")
 
+                # Click "Next" / "Continuar" to proceed to password step.
+                for sel in [
+                    'button[type="submit"]:visible',
+                    'button:visible',
+                    '#loginBtn',
+                ]:
+                    try:
+                        page.locator(sel).first.click(timeout=3000)
+                        break
+                    except Exception:
+                        continue
+
+                # Wait for password field to appear (SPA transition).
+                page.wait_for_timeout(3000)
+
                 # Fill password field.
                 try:
-                    page.fill('input[type="password"]', password, timeout=3000)
+                    page.locator('input[type="password"]:visible').first.fill(
+                        password, timeout=5000
+                    )
                 except Exception:
                     _log("[LenovoID] Browser: could not locate password field")
 
-                # Submit.
-                submit_selectors = [
-                    'button[type="submit"]',
-                    'input[type="submit"]',
+                # Submit credentials.
+                for sel in [
+                    'button[type="submit"]:visible',
                     '#loginBtn',
-                    '.login-submit',
-                    'button:has-text("Sign in")',
-                    'button:has-text("Log in")',
-                ]
-                for sel in submit_selectors:
+                    'button:visible',
+                ]:
                     try:
-                        page.click(sel, timeout=3000)
+                        page.locator(sel).first.click(timeout=3000)
                         break
                     except Exception:
                         continue
 
                 # Wait for redirect / WUST extraction.
-                page.wait_for_timeout(6000)
+                page.wait_for_timeout(8000)
 
                 # Check captured navigation events.
                 for url in captured:
@@ -355,7 +391,6 @@ class LenovoIDAuth:
                         _log("[LenovoID] ✓ WUST token found in final browser URL")
 
                 if not wust:
-                    # Check if there's an error message on page.
                     body = ""
                     try:
                         body = page.content()
@@ -385,7 +420,7 @@ class LenovoIDAuth:
         gateway_url = (
             f"{PASSPORT_BASE}{_GATEWAY_PATH}"
             f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
-            f"&lenovoid.lang=en_US"
+            f"&lenovoid.lang=es_ES"
             f"&lenovoid.cb={requests.utils.quote(_LMSA_CB_URL, safe='')}"
         )
         _log(f"[LenovoID] Loading OAuth gateway: {gateway_url}")

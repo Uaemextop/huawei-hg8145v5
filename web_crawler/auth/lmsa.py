@@ -77,6 +77,19 @@ AES_IV: bytes  = b"52,*u^yhNjk<./O0"
 #: Password used to decrypt ROM archives (``OSD`` constant in flash DLL).
 ROM_PASSWORD = "OSD"
 
+# User-Agent used by HttpDownload.OpenRequest() for actual S3 file downloads.
+# Source: GlobalVar.UserAgent in lenovo.mbg.service.common.utilities.dll:
+#   public static string UserAgent =
+#       "Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; WOW64; Trident/4.0;
+#        SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; .NET CLR 3.0.30729;
+#        Media Center PC 6.0; .NET4.0C; .NET4.0E)";
+# The download request uses only this UA + KeepAlive=false; no extra headers.
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.1; WOW64; Trident/4.0; "
+    "SLCC2; .NET CLR 2.0.50727; .NET CLR 3.5.30729; .NET CLR 3.0.30729; "
+    "Media Center PC 6.0; .NET4.0C; .NET4.0E)"
+)
+
 # ---------------------------------------------------------------------------
 # Endpoint paths (from ``WebApiUrl.cs``)
 # ---------------------------------------------------------------------------
@@ -93,14 +106,19 @@ _EP_ROM_MATCH_PARAMS = "/rescueDevice/getRomMatchParams.jhtml"
 # ---------------------------------------------------------------------------
 _BASE_HEADERS: dict[str, str] = {
     "User-Agent": (
+        # Confirmed from WebApiHttpRequest.cs line 433 in LMSA 7.4.3.4 source:
+        # httpWebRequest.UserAgent = "Mozilla/5.0 (Windows NT 6.3; WOW64) ...Chrome/51..."
         "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36"
     ),
     "Content-Type": "application/json",
     "Accept": "application/json",
     "Cache-Control": "no-cache",
     "Request-Tag": "lmsa",
     "Connection": "close",      # KeepAlive = false in source
+    # From Software Fix.exe.config → <add key="ConnectionField" value="PLJoR50KSVLIIiQC"/>
+    # Required by initToken and other authenticated endpoints.
+    "ConnectionField": "PLJoR50KSVLIIiQC",
 }
 
 # Standard API response code for success.
@@ -249,21 +267,46 @@ class LMSASession:
             "dparams":     dparams,
         }
 
-    def _request_headers(self) -> dict[str, str]:
-        """Return per-request headers including auth tokens when available."""
+    def _request_headers(self, *, author: bool = True) -> dict[str, str]:
+        """Return per-request headers.
+
+        Parameters
+        ----------
+        author:
+            When ``True`` (default) include the ``guid`` and ``Authorization``
+            headers, matching ``addAuthorizationHeader=true`` in the source.
+            Set to ``False`` for calls that use ``author: false`` (e.g.
+            ``lenovoIdLogin.jhtml`` per ``ApiBaseService.RequestBase`` line 1204).
+        """
+        if not author:
+            return {}
         hdrs: dict[str, str] = {"guid": self.guid}
         if self._jwt_token:
             hdrs["Authorization"] = f"Bearer {self._jwt_token}"
         return hdrs
 
-    def _post(self, endpoint: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """POST a RequestModel to *endpoint* and return the parsed JSON body."""
+    def _post(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        *,
+        author: bool = True,
+    ) -> Optional[dict[str, Any]]:
+        """POST a RequestModel to *endpoint* and return the parsed JSON body.
+
+        Parameters
+        ----------
+        author:
+            Passed to :meth:`_request_headers`.  Use ``False`` for endpoints
+            that explicitly set ``author: false`` in the C# source (e.g.
+            ``lenovoIdLogin.jhtml``).
+        """
         body = self._build_request_model(params)
         try:
             resp = self._session.post(
                 self._url(endpoint),
                 json=body,
-                headers=self._request_headers(),
+                headers=self._request_headers(author=author),
                 timeout=30,
             )
         except requests.RequestException as exc:
@@ -279,9 +322,7 @@ class LMSASession:
         auth_hdr = resp.headers.get("Authorization", "")
         if guid_hdr == self.guid and auth_hdr:
             self._jwt_token = auth_hdr
-        elif auth_hdr.startswith("Bearer "):
-            # Fallback: accept any Authorization header with Bearer prefix
-            self._jwt_token = auth_hdr[len("Bearer "):]
+            _log(f"[LMSA] JWT token updated from {endpoint} response")
 
         if resp.status_code != 200:
             _log(f"[LMSA] POST {endpoint} → HTTP {resp.status_code}: {resp.text[:200]}")
