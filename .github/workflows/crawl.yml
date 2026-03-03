@@ -20,27 +20,27 @@ on:
       no_robots:
         description: "Ignore robots.txt restrictions"
         required: false
-        default: false
+        default: true
         type: boolean
       no_verify_ssl:
         description: "Disable TLS certificate verification"
         required: false
-        default: false
+        default: true
         type: boolean
       force:
         description: "Re-download files even if they already exist on disk"
         required: false
-        default: false
+        default: true
         type: boolean
       create_repo:
         description: "Create a new repository with the crawled site"
         required: false
-        default: false
+        default: true
         type: boolean
       repo_owner:
         description: "User or organization for the new repository (required if create_repo is true)"
         required: false
-        default: ""
+        default: "Uaemextop"
         type: string
       git_push_every:
         description: "Commit and push crawled files every N saved files (0 = disabled, requires create_repo)"
@@ -94,7 +94,7 @@ permissions:
 jobs:
   crawl:
     name: "Crawl ${{ inputs.url }}"
-    runs-on: aapt
+    runs-on: aapt2
 
     steps:
       - name: Checkout repository
