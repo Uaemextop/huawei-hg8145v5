@@ -95,8 +95,9 @@ from web_crawler.config import (
 )
 from web_crawler.session import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_sg_captcha_response, is_tomcat_ip_restricted,
-    random_headers, solve_cf_challenge, solve_sg_captcha,
+    is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
+    is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
+    solve_sg_captcha,
 )
 from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
