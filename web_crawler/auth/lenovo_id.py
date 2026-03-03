@@ -32,6 +32,9 @@ Security notes
 
 from __future__ import annotations
 
+import json as _json
+import uuid as _uuid
+
 import os
 import re
 import uuid
@@ -199,7 +202,6 @@ class LenovoIDAuth:
         )
         try:
             from web_crawler.auth.lmsa import _BASE_HEADERS
-            import uuid as _uuid, json as _json
             guid = str(_uuid.uuid4()).lower()
             hdrs = dict(_BASE_HEADERS)
             hdrs["guid"] = guid
@@ -357,20 +359,27 @@ class LenovoIDAuth:
                 # Allow JS challenges to run (Akamai sensor_data generation).
                 page.wait_for_timeout(3000)
 
-                # The Lenovo ID page is a two-step SPA:
-                # Step A: fill email in the visible text input → click Next
-                # Step B: fill password in the visible password input → click Sign In
-                # Confirmed from live page: id="emailOrPhoneInput" (type=text, visible)
+                # The Lenovo ID page (glbwebauthnv6) is a two-step SPA:
+                # Step A: type email in #emailOrPhoneInput (first, since there
+                #         are two with that id) then press Enter/click Next.
+                # Step B: wait for #emailOrPhonePswInput to become visible
+                #         then fill password → click the submit button.
+                # Confirmed from live HTML inspection on glbwebauthnv6/preLogin.
                 filled_email = False
                 for sel in [
                     '#emailOrPhoneInput',
-                    'input[id="emailOrPhoneInput"]',
                     'input[type="text"]:visible',
                     'input[type="email"]:visible',
-                    'input[id*="email" i]:visible',
                 ]:
                     try:
-                        page.locator(sel).first.fill(email, timeout=5000)
+                        loc = page.locator(sel).first
+                        loc.wait_for(state="visible", timeout=5000)
+                        loc.click(timeout=3000)
+                        # Type slowly (60 ms/char) so the SPA's JS event
+                        # handlers (input, keydown, keyup) fire as they would
+                        # for a real user — required for the Next button to
+                        # become active and submit the email to the server.
+                        loc.type(email, delay=60)
                         filled_email = True
                         break
                     except Exception:
@@ -379,40 +388,37 @@ class LenovoIDAuth:
                 if not filled_email:
                     _log("[LenovoID] Browser: could not locate email field")
 
-                # Click "Next" / "Continuar" to proceed to password step.
-                for sel in [
-                    'button[type="submit"]:visible',
-                    'button:visible',
-                    '#loginBtn',
-                ]:
-                    try:
-                        page.locator(sel).first.click(timeout=3000)
-                        break
-                    except Exception:
-                        continue
+                # Press Enter to advance to the password step.
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(1000)
 
-                # Wait for password field to appear (SPA transition).
-                page.wait_for_timeout(3000)
+                # Wait for password field (SPA transition after email submit).
+                try:
+                    page.wait_for_selector(
+                        '#emailOrPhonePswInput, input[type="password"]:visible',
+                        timeout=10000,
+                    )
+                except Exception:
+                    _log("[LenovoID] Browser: password field never appeared "
+                         "(Akamai may have blocked the request)")
 
                 # Fill password field.
                 try:
-                    page.locator('input[type="password"]:visible').first.fill(
-                        password, timeout=5000
-                    )
+                    for sel in ['#emailOrPhonePswInput',
+                                'input[type="password"]:visible']:
+                        try:
+                            loc = page.locator(sel).first
+                            loc.wait_for(state="visible", timeout=4000)
+                            loc.fill(password, timeout=5000)
+                            break
+                        except Exception:
+                            continue
                 except Exception:
-                    _log("[LenovoID] Browser: could not locate password field")
+                    _log("[LenovoID] Browser: could not fill password field")
 
                 # Submit credentials.
-                for sel in [
-                    'button[type="submit"]:visible',
-                    '#loginBtn',
-                    'button:visible',
-                ]:
-                    try:
-                        page.locator(sel).first.click(timeout=3000)
-                        break
-                    except Exception:
-                        continue
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(1000)
 
                 # Wait for redirect / WUST extraction.
                 page.wait_for_timeout(8000)
@@ -437,12 +443,19 @@ class LenovoIDAuth:
                     except Exception:
                         pass
                     body_lower = body.lower()
-                    if "incorrect" in body_lower or "invalid" in body_lower:
+                    # Specific phrases from Lenovo ID error messages (not generic "invalid")
+                    if any(p in body_lower for p in (
+                        "incorrect password", "wrong password",
+                        "account or password is incorrect",
+                        "contraseña incorrecta",
+                    )):
                         _log("[LenovoID] Browser: invalid credentials")
-                    elif "captcha" in body_lower or "verify" in body_lower:
+                    elif "captcha" in body_lower or "robot" in body_lower:
                         _log("[LenovoID] Browser: CAPTCHA shown — manual action required")
+                    elif "blocked" in body_lower and "akamai" in body_lower:
+                        _log("[LenovoID] Browser: blocked by Akamai Bot Manager")
                     else:
-                        _log(f"[LenovoID] Browser: no WUST in URL {page.url[:80]}")
+                        _log(f"[LenovoID] Browser: no WUST — final URL: {page.url[:80]}")
 
                 browser.close()
         except Exception as exc:

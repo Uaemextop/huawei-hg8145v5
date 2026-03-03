@@ -1685,6 +1685,14 @@ class Crawler:
                     url,
                 )
                 self._stats["restricted"] += 1
+                # Disable probing immediately — S3 buckets never expose
+                # hidden files at public paths; every probe URL would 403.
+                if not self._probing_disabled:
+                    self._probing_disabled = True
+                    log.info(
+                        "[S3-403] Disabling hidden-file probing "
+                        "(S3 bucket – all probe paths return 403)"
+                    )
                 # Fall through to content-saving code
 
             # Tomcat IP-restriction: detected by a distinctive body phrase.
