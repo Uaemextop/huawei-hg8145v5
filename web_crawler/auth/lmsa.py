@@ -64,8 +64,9 @@ except ImportError:  # pragma: no cover
 # Constants extracted from decompiled assemblies
 # ---------------------------------------------------------------------------
 
-#: Production API server (``WebApiUrl.cs`` → ``BASE_URL``).
-LMSA_BASE_URL = "https://lsa.lenovo.com"
+#: Production API server — the LMSA webapp is deployed under ``/Interface/``.
+#: Confirmed live by curl: /Interface/common/rsa.jhtml → 200, code 0000.
+LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
 
 #: LMSA desktop application version (``ClientInfo.cs``).
 CLIENT_VERSION = "7.4.3.4"

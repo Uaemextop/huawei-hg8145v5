@@ -29,6 +29,10 @@ import urllib.robotparser
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from web_crawler.auth.lmsa import LMSASession
 
 import requests
 
@@ -132,6 +136,7 @@ class Crawler:
         cf_clearance: str = "",
         allow_external: bool = True,
         skip_media_files: bool = False,
+        lmsa_session: "Optional[LMSASession]" = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -160,6 +165,10 @@ class Crawler:
         self.session = build_session(verify_ssl=verify_ssl)
         if cf_clearance:
             inject_cf_clearance(self.session, parsed.netloc, cf_clearance)
+        # Inject LMSA auth headers when an authenticated session is provided.
+        if lmsa_session is not None and lmsa_session.is_authenticated:
+            lmsa_session.inject_into_requests_session(self.session, parsed.netloc)
+            log.info("[LMSA] Auth headers injected into crawler session")
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
@@ -1611,6 +1620,17 @@ class Crawler:
                 log.debug("  [PROBE] 403 for %s – skipping (no retry)", url)
                 self._stats["probe"] += 1
                 return
+
+            # Amazon S3 private-bucket AccessDenied — enforced at the bucket
+            # policy level.  No header trick can bypass it; skip retries and
+            # count as restricted (the XML error body is saved below).
+            elif is_s3_access_denied(resp):
+                log.info(
+                    "[S3-403] Private bucket – saving AccessDenied body: %s",
+                    url,
+                )
+                self._stats["restricted"] += 1
+                # Fall through to content-saving code
 
             # Tomcat IP-restriction: detected by a distinctive body phrase.
             # Header rotation never helps for server-level IP whitelists, so

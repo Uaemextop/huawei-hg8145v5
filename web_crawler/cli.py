@@ -114,6 +114,23 @@ def parse_args() -> argparse.Namespace:
              "when Playwright is not available.",
     )
     parser.add_argument(
+        "--lmsa-email", default="", metavar="EMAIL",
+        help="Lenovo ID email for LMSA authentication.  Also readable from "
+             "the LMSA_EMAIL environment variable.  Used to obtain a WUST "
+             "token from passport.lenovo.com and a JWT for the LMSA API.",
+    )
+    parser.add_argument(
+        "--lmsa-password", default="", metavar="PASSWORD",
+        help="Lenovo ID password for LMSA authentication.  Also readable "
+             "from the LMSA_PASSWORD environment variable.",
+    )
+    parser.add_argument(
+        "--lmsa-wust", default="", metavar="TOKEN",
+        help="Pre-obtained LMSA WUST token.  Skips the Lenovo ID OAuth step "
+             "and goes directly to JWT exchange.  Use this when you already "
+             "have a valid WUST from a previous session.",
+    )
+    parser.add_argument(
         "--no-external", dest="allow_external", action="store_false",
         default=True,
         help="Disable downloading media files from external CDN hosts "
@@ -196,6 +213,37 @@ def main() -> None:
             log.info("Upload filter: only %s extensions pushed to git",
                      ", ".join(sorted(upload_exts)))
 
+    # ------------------------------------------------------------------ #
+    # LMSA authentication (optional)
+    # ------------------------------------------------------------------ #
+    lmsa_session = None
+    lmsa_email    = args.lmsa_email    or os.environ.get("LMSA_EMAIL", "")
+    lmsa_password = args.lmsa_password or os.environ.get("LMSA_PASSWORD", "")
+    lmsa_wust     = args.lmsa_wust     or os.environ.get("LMSA_WUST", "")
+
+    if lmsa_wust or lmsa_email:
+        try:
+            from web_crawler.auth.lenovo_id import LenovoIDAuth
+            auth_client = LenovoIDAuth(verify_ssl=args.verify_ssl)
+            if lmsa_wust:
+                log.info("[LMSA] Using pre-obtained WUST token")
+                lmsa_session = auth_client.login_with_wust(lmsa_wust)
+            elif lmsa_email and lmsa_password:
+                log.info("[LMSA] Authenticating with Lenovo ID: %s", lmsa_email)
+                lmsa_session = auth_client.login(lmsa_email, lmsa_password)
+            else:
+                log.warning(
+                    "[LMSA] --lmsa-email provided but --lmsa-password missing "
+                    "(also check LMSA_PASSWORD env var)"
+                )
+            if lmsa_session and lmsa_session.is_authenticated:
+                log.info("[LMSA] ✓ Authentication successful — JWT active")
+            elif lmsa_session is not None:
+                log.warning("[LMSA] Session obtained but not authenticated "
+                            "(no JWT) — crawl continues without auth")
+        except Exception as exc:
+            log.warning("[LMSA] Auth error (continuing without auth): %s", exc)
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -213,6 +261,7 @@ def main() -> None:
         cf_clearance=args.cf_clearance,
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
+        lmsa_session=lmsa_session,
     )
 
     t0 = time.monotonic()
