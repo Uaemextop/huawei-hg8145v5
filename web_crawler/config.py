@@ -273,6 +273,8 @@ SOFT_404_TITLE_KEYWORDS = [
     "no encontrada",
     "página no encontrada",
     "pagina no encontrada",
+    # Apache Tomcat 404 error page title
+    "http status 404",
 ]
 
 SOFT_404_SIZE_RATIO = 0.15

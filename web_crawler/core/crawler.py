@@ -95,8 +95,8 @@ from web_crawler.config import (
 )
 from web_crawler.session import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_sg_captcha_response, random_headers,
-    solve_cf_challenge, solve_sg_captcha,
+    is_cf_managed_challenge, is_sg_captcha_response, is_tomcat_ip_restricted,
+    random_headers, solve_cf_challenge, solve_sg_captcha,
 )
 from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
@@ -131,6 +131,7 @@ class Crawler:
         cf_clearance: str = "",
         allow_external: bool = True,
         skip_media_files: bool = False,
+        save_error_pages: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -144,6 +145,7 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.skip_media_files = skip_media_files
+        self.save_error_pages = save_error_pages
         self.download_extensions = download_extensions or frozenset()
         self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
@@ -174,7 +176,8 @@ class Crawler:
         self._sg_solve_lock = threading.Lock()  # serialize concurrent CAPTCHA solves
         self._url_retries: dict[str, int] = {}  # per-URL retry count for transient errors
         self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0,
-                       "soft404": 0, "waf": 0, "retry_ok": 0, "probe": 0}
+                       "soft404": 0, "waf": 0, "retry_ok": 0, "probe": 0,
+                       "restricted": 0}
 
         # Soft-404 detection
         self._soft404_size: int | None = None
