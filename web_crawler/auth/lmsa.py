@@ -41,7 +41,6 @@ import base64
 import json
 import re
 import uuid
-import xml.etree.ElementTree as ET
 from typing import Any, Optional
 from urllib.parse import urljoin
 
@@ -112,27 +111,23 @@ _CODE_OK = "0000"
 # RSA helpers
 # ---------------------------------------------------------------------------
 
-def _parse_rsa_xml(xml_text: str) -> Optional[RSA.RsaKey]:
-    """Parse an XML RSA public key into an :class:`RSA.RsaKey`.
+def _parse_rsa_key(key_b64: str) -> Optional[RSA.RsaKey]:
+    """Parse the server-returned RSA public key.
 
-    The LMSA server returns the public key as an XML fragment::
+    The LMSA server returns a PKCS#8 SubjectPublicKeyInfo key encoded as
+    Base64 (confirmed by decompiling ``lenovo.mbg.service.common.webservices.dll``
+    and calling ``RSAPublicKeyJava2DotNet`` on it).  The key arrives in the
+    JSON ``desc`` field, e.g.::
 
-        <RSAKeyValue>
-          <Modulus>BASE64…</Modulus>
-          <Exponent>AQAB</Exponent>
-        </RSAKeyValue>
+        {"code": "0000", "desc": "MIGfMA0GCSqGSIb3DQEBAQUAA4GN…"}
 
     Returns ``None`` when *pycryptodome* is not installed or parsing fails.
     """
     if not _CRYPTO_AVAILABLE:
         return None
     try:
-        root = ET.fromstring(xml_text.strip())
-        mod_b64  = root.findtext("Modulus", "").strip()
-        exp_b64  = root.findtext("Exponent", "AQAB").strip()
-        n = int.from_bytes(base64.b64decode(mod_b64), "big")
-        e = int.from_bytes(base64.b64decode(exp_b64), "big")
-        return RSA.construct((n, e))
+        key_der = base64.b64decode(key_b64.strip())
+        return RSA.import_key(key_der)
     except Exception:
         return None
 
@@ -219,7 +214,7 @@ class LMSASession:
         verify_ssl: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.guid = guid or str(uuid.uuid4()).upper()
+        self.guid = guid or str(uuid.uuid4()).lower()
         self.language = language
         self.windows_info = windows_info
         self._verify_ssl = verify_ssl
@@ -275,9 +270,17 @@ class LMSASession:
             _log(f"[LMSA] POST {endpoint} failed: {exc}")
             return None
 
-        # Extract JWT from response headers when present
+        # Extract JWT from response headers when the server echoes our GUID back.
+        # From RequestBase in WebApiHttpRequest.cs:
+        #   if (response.GetResponseHeader("Guid") == WebApiContext.GUID
+        #       && !string.IsNullOrEmpty(response.GetResponseHeader("Authorization")))
+        #       WebApiContext.JWT_TOKEN = response.GetResponseHeader("Authorization");
+        guid_hdr = resp.headers.get("Guid", "")
         auth_hdr = resp.headers.get("Authorization", "")
-        if auth_hdr.startswith("Bearer "):
+        if guid_hdr == self.guid and auth_hdr:
+            self._jwt_token = auth_hdr
+        elif auth_hdr.startswith("Bearer "):
+            # Fallback: accept any Authorization header with Bearer prefix
             self._jwt_token = auth_hdr[len("Bearer "):]
 
         if resp.status_code != 200:
@@ -297,47 +300,46 @@ class LMSASession:
     def get_rsa_public_key(self) -> Optional[str]:
         """Fetch the server's RSA public key.
 
-        Returns the raw XML string on success, ``None`` on failure.
+        Confirmed by decompiling ``lenovo.mbg.service.common.webservices.dll``:
+        - Endpoint requires HTTP POST (not GET).
+        - Response JSON: ``{"code": "0000", "desc": "<PKCS8-base64>"}``
+          The key is in ``desc``, **not** ``data``.
+        - Key format: PKCS#8 SubjectPublicKeyInfo, Base64-encoded.
+
+        Returns the raw Base64 string on success, ``None`` on failure.
         Caches the parsed key internally for :meth:`authenticate`.
         """
-        try:
-            resp = self._session.get(
-                self._url(_EP_RSA_KEY),
-                headers=self._request_headers(),
-                timeout=10,
-            )
-        except requests.RequestException as exc:
-            _log(f"[LMSA] GET {_EP_RSA_KEY} failed: {exc}")
+        # The endpoint requires POST with an empty RequestModel body.
+        data = self._post(_EP_RSA_KEY, {})
+        if data is None:
             return None
 
-        if resp.status_code != 200:
-            _log(f"[LMSA] RSA key endpoint → HTTP {resp.status_code}")
+        if data.get("code") != _CODE_OK:
+            _log(f"[LMSA] RSA key error code: {data.get('code')} "
+                 f"desc: {data.get('desc', '')}")
             return None
 
-        # Response is a JSON envelope: {"code": "0000", "data": "<XML>"}
-        try:
-            payload = resp.json()
-            if payload.get("code") != _CODE_OK:
-                _log(f"[LMSA] RSA key error code: {payload.get('code')} "
-                     f"msg: {payload.get('msg', '')}")
-                return None
-            xml_key: str = payload["data"]
-        except (ValueError, KeyError):
-            # Fallback: treat entire body as raw XML
-            xml_key = resp.text
+        # Key is in the ``desc`` field as PKCS#8 Base64 (Java format).
+        key_b64: str = data.get("desc", "")
+        if not key_b64:
+            _log("[LMSA] RSA key response missing 'desc' field")
+            return None
 
         if _CRYPTO_AVAILABLE:
-            self._rsa_key = _parse_rsa_xml(xml_key)
+            self._rsa_key = _parse_rsa_key(key_b64)
             if self._rsa_key is None:
-                _log("[LMSA] Warning: RSA key XML could not be parsed")
+                _log("[LMSA] Warning: RSA public key could not be parsed")
 
-        return xml_key
+        return key_b64
 
     def authenticate(self) -> bool:
-        """Full authentication flow: fetch RSA key → encrypt GUID → init token.
+        """Full anonymous auth flow: fetch RSA key → encrypt GUID → init token.
 
         Returns ``True`` when a JWT token is successfully obtained.
         Requires *pycryptodome* (``pip install pycryptodome``).
+
+        Note: For Lenovo ID (user) authentication, use
+        :class:`~web_crawler.auth.lenovo_id.LenovoIDAuth` instead.
         """
         if not _CRYPTO_AVAILABLE:
             _log(
@@ -347,8 +349,8 @@ class LMSASession:
             return False
 
         _log("[LMSA] Fetching RSA public key …")
-        xml_key = self.get_rsa_public_key()
-        if xml_key is None:
+        key_b64 = self.get_rsa_public_key()
+        if key_b64 is None:
             return False
         if self._rsa_key is None:
             _log("[LMSA] RSA key parse failed – cannot encrypt GUID")
@@ -367,22 +369,19 @@ class LMSASession:
             return False
 
         if data.get("code") != _CODE_OK:
-            _log(f"[LMSA] initToken error: {data.get('code')} – {data.get('msg', '')}")
+            _log(f"[LMSA] initToken error: {data.get('code')} – {data.get('desc', '')}")
             return False
 
-        # JWT may be in the response body instead of the Authorization header
-        token = (
-            data.get("data", {}).get("token")
-            or data.get("token")
-            or self._jwt_token
-        )
+        # JWT arrives in the response Authorization header when the server
+        # echoes back the client GUID in the Guid response header.
+        # (From RequestBase in WebApiHttpRequest.cs decompiled source.)
+        token = self._jwt_token   # populated by _post() from Authorization header
         if token:
-            self._jwt_token = token
             self._session.headers["Authorization"] = f"Bearer {token}"
             _log("[LMSA] ✓ Token initialised successfully")
             return True
 
-        _log("[LMSA] Warning: initToken succeeded but no token in response")
+        _log("[LMSA] Warning: initToken succeeded but no JWT in response headers")
         return True
 
     def get_firmware(

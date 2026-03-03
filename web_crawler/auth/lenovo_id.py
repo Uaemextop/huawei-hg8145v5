@@ -52,6 +52,15 @@ from web_crawler.auth.lmsa import (
     _log,
 )
 
+# Optional Playwright import for Akamai Bot Manager bypass.
+# The Lenovo ID login page is protected by Akamai and requires a real browser
+# to solve the JS challenge and obtain a valid ``_abck`` cookie.
+try:
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -217,10 +226,160 @@ class LenovoIDAuth:
     def _obtain_wust(self, email: str, password: str) -> Optional[str]:
         """Run the Lenovo ID login form flow and return the WUST token.
 
-        Uses the ``/wauthen5/`` endpoints confirmed by DotNetBrowserLog analysis
-        of LMSA 7.4.3.4.  The callback URL points to the internal
-        ``lmsa.prod.cloud.lenovo.com`` host; WUST is extracted from the redirect
-        URL before the browser (or requests) actually loads it.
+        Tries Playwright browser automation first (bypasses Akamai Bot Manager),
+        falling back to plain HTTP requests when Playwright is not installed.
+        """
+        if _PLAYWRIGHT_AVAILABLE:
+            wust = self._obtain_wust_browser(email, password)
+            if wust:
+                return wust
+            _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
+
+        return self._obtain_wust_requests(email, password)
+
+    def _obtain_wust_browser(self, email: str, password: str) -> Optional[str]:
+        """Use Playwright (headless Chromium) to complete the Lenovo ID OAuth.
+
+        The Lenovo passport is protected by Akamai Bot Manager which sets an
+        ``_abck`` cookie that can only be validated by executing JavaScript in
+        a real browser context.  This method launches a headless Chromium instance,
+        navigates to the gateway, fills in credentials, and intercepts the WUST
+        from the redirect URL before the browser tries to load the callback host.
+        """
+        _log("[LenovoID] Launching headless browser for Akamai-protected login…")
+        wust: Optional[str] = None
+        captured: list[str] = []
+
+        try:
+            with _sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-http2",
+                    ],
+                )
+                ctx = browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=_BROWSER_UA,
+                    locale="en-US",
+                    ignore_https_errors=True,
+                )
+                page = ctx.new_page()
+
+                # Intercept every navigation and capture WUST from callback URL.
+                def _on_nav(frame: object) -> None:
+                    url: str = frame.url  # type: ignore[attr-defined]
+                    if _LMSA_CB_URL in url or "lenovoid.wust" in url:
+                        captured.append(url)
+
+                page.on("framenavigated", _on_nav)
+
+                gateway_url = (
+                    f"{PASSPORT_BASE}{_GATEWAY_PATH}"
+                    f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
+                    f"&lenovoid.lang=en_US"
+                    f"&lenovoid.cb={_LMSA_CB_URL}"
+                )
+                _log(f"[LenovoID] Browser → gateway: {gateway_url[:80]}")
+                try:
+                    page.goto(gateway_url, timeout=10_000,
+                              wait_until="domcontentloaded")
+                except Exception as exc:
+                    _log(f"[LenovoID] Browser goto error (Akamai may be blocking): {exc}")
+                    # If goto failed, close and return None immediately.
+                    browser.close()
+                    return None
+
+                # Allow JS challenges to run.
+                page.wait_for_timeout(3000)
+
+                # Fill email field.
+                email_selectors = [
+                    'input[name="username"]',
+                    'input[type="email"]',
+                    'input[id*="email" i]',
+                    'input[id*="user" i]',
+                    'input[placeholder*="email" i]',
+                ]
+                filled_email = False
+                for sel in email_selectors:
+                    try:
+                        page.fill(sel, email, timeout=3000)
+                        filled_email = True
+                        break
+                    except Exception:
+                        continue
+
+                if not filled_email:
+                    _log("[LenovoID] Browser: could not locate email field")
+
+                # Fill password field.
+                try:
+                    page.fill('input[type="password"]', password, timeout=3000)
+                except Exception:
+                    _log("[LenovoID] Browser: could not locate password field")
+
+                # Submit.
+                submit_selectors = [
+                    'button[type="submit"]',
+                    'input[type="submit"]',
+                    '#loginBtn',
+                    '.login-submit',
+                    'button:has-text("Sign in")',
+                    'button:has-text("Log in")',
+                ]
+                for sel in submit_selectors:
+                    try:
+                        page.click(sel, timeout=3000)
+                        break
+                    except Exception:
+                        continue
+
+                # Wait for redirect / WUST extraction.
+                page.wait_for_timeout(6000)
+
+                # Check captured navigation events.
+                for url in captured:
+                    w = _find_wust(url)
+                    if w:
+                        wust = w
+                        _log("[LenovoID] ✓ WUST token captured from browser redirect")
+                        break
+
+                if not wust:
+                    wust = _find_wust(page.url)
+                    if wust:
+                        _log("[LenovoID] ✓ WUST token found in final browser URL")
+
+                if not wust:
+                    # Check if there's an error message on page.
+                    body = ""
+                    try:
+                        body = page.content()
+                    except Exception:
+                        pass
+                    body_lower = body.lower()
+                    if "incorrect" in body_lower or "invalid" in body_lower:
+                        _log("[LenovoID] Browser: invalid credentials")
+                    elif "captcha" in body_lower or "verify" in body_lower:
+                        _log("[LenovoID] Browser: CAPTCHA shown — manual action required")
+                    else:
+                        _log(f"[LenovoID] Browser: no WUST in URL {page.url[:80]}")
+
+                browser.close()
+        except Exception as exc:
+            _log(f"[LenovoID] Browser login exception: {exc}")
+
+        return wust
+
+    def _obtain_wust_requests(self, email: str, password: str) -> Optional[str]:
+        """Requests-based fallback for ``_obtain_wust_browser``.
+
+        Only succeeds when the Akamai ``_abck`` cookie is not required
+        (e.g. on lsatest.lenovo.com or when the session is already trusted).
         """
         # --- Step 1: Gateway → preLogin (collects JSESSIONID + sign-key) ---
         gateway_url = (
@@ -266,7 +425,7 @@ class LenovoIDAuth:
                     "Referer":      r.url,
                     "Origin":       PASSPORT_BASE,
                 },
-                timeout=30,
+                timeout=15,
                 # Don't auto-follow past the callback host — we intercept
                 # the WUST from the Location header of the redirect.
                 allow_redirects=False,
@@ -341,9 +500,19 @@ class LenovoIDAuth:
 
     def _exchange_wust_for_jwt(self, wust: str) -> Optional[LMSASession]:
         """POST the WUST to ``lenovoIdLogin.jhtml`` and return an
-        authenticated :class:`LMSASession`."""
-        guid = str(uuid.uuid4()).upper()
-        url = f"{self._lmsa_base}/Interface/user/lenovoIdLogin.jhtml"
+        authenticated :class:`LMSASession`.
+
+        Confirmed by decompiling ``Software Fix.exe``:
+        - ``author: false`` → NO ``guid`` header in the HTTP request.
+        - ``dparams`` contains ``{wust: WUST, guid: PLAIN_GUID}``.
+        - JWT is extracted from the ``Authorization`` response header
+          when the server echoes back the client GUID in the ``Guid``
+          response header.
+        """
+        guid = str(uuid.uuid4()).lower()
+        # _lmsa_base is already "https://lsa.lenovo.com/Interface"
+        # so we must NOT add another "/Interface" prefix here.
+        url = f"{self._lmsa_base}/user/lenovoIdLogin.jhtml"
 
         body = {
             "client":      {"version": "7.4.3.4"},
@@ -351,10 +520,8 @@ class LenovoIDAuth:
             "language":    "en-US",
             "windowsInfo": "Windows 10, 64bit",
         }
-        hdrs = {
-            **_BASE_HEADERS,
-            "guid": guid,
-        }
+        # author: false in C# source — do NOT send guid request header
+        hdrs = dict(_BASE_HEADERS)
 
         _log(f"[LenovoID] Exchanging WUST for JWT: {url}")
         try:
@@ -364,10 +531,16 @@ class LenovoIDAuth:
             _log(f"[LenovoID] lenovoIdLogin POST failed: {exc}")
             return None
 
-        # JWT may arrive in the Authorization header.
+        # JWT arrives in Authorization response header when server echoes GUID.
+        # From RequestBase in WebApiHttpRequest.cs (decompiled):
+        #   if (Guid_header == WebApiContext.GUID && Authorization_header != "")
+        #       JWT_TOKEN = Authorization_header;
         jwt = None
-        auth_hdr = r.headers.get("Authorization", "")
-        if auth_hdr.startswith("Bearer "):
+        guid_resp = r.headers.get("Guid", "")
+        auth_hdr  = r.headers.get("Authorization", "")
+        if guid_resp.lower() == guid and auth_hdr:
+            jwt = auth_hdr
+        elif auth_hdr.startswith("Bearer "):
             jwt = auth_hdr[len("Bearer "):]
 
         try:
@@ -376,6 +549,9 @@ class LenovoIDAuth:
             _log(f"[LenovoID] Non-JSON response from lenovoIdLogin: "
                  f"{r.text[:200]}")
             return None
+
+        _log(f"[LenovoID] lenovoIdLogin HTTP {r.status_code}, code={data.get('code')}, "
+             f"desc={data.get('desc','')[:100]}")
 
         code = data.get("code", "")
         if code == "402":
@@ -389,7 +565,7 @@ class LenovoIDAuth:
                  f"{data.get('desc', '')}")
             return None
 
-        # JWT may also be embedded in the response body.
+        # JWT may also be embedded in the response body content.
         if not jwt:
             content = data.get("content") or data.get("data") or {}
             if isinstance(content, dict):
