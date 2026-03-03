@@ -131,7 +131,6 @@ class Crawler:
         cf_clearance: str = "",
         allow_external: bool = True,
         skip_media_files: bool = False,
-        save_error_pages: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -145,7 +144,6 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.skip_media_files = skip_media_files
-        self.save_error_pages = save_error_pages
         self.download_extensions = download_extensions or frozenset()
         self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
@@ -281,6 +279,7 @@ class Crawler:
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Visited     : %d URLs", len(self._visited))
         log.info("Saved (OK)  : %d  (%.1f%%)", s["ok"], pct_ok)
+        log.info("Restricted  : %d  (IP/WAF – body saved)", s["restricted"])
         log.info("Skipped     : %d", s["skip"])
         log.info("Duplicates  : %d", s["dup"])
         log.info("Soft-404    : %d", s["soft404"])
@@ -348,6 +347,7 @@ class Crawler:
         return {
             "Q": len(self._queue),
             "OK": self._stats["ok"],
+            "RESTR": self._stats["restricted"],
             "ERR": self._stats["err"],
             "SKIP": self._stats["skip"],
             "DUP": self._stats["dup"],
@@ -1578,15 +1578,20 @@ class Crawler:
 
         # Handle 403 / 402 – retry with rotated headers + cache busting
         if resp.status_code in RETRY_STATUS_CODES:
-            # Cloudflare Managed Challenge – re-solve with Playwright
+            # Cloudflare Managed Challenge – re-solve with Playwright/curl_cffi.
+            # CF challenge pages are JS-rendered stubs with no real content;
+            # saving them is pointless, so keep the existing re-solve logic.
             if is_cf_managed_challenge(resp):
                 log.info("[CF] Challenge on %s – re-solving …", url)
                 if self._solve_cf_and_inject():
                     self._visited.discard(key)
                     self._enqueue(url, depth, priority=True)
                     return
+                # Could not bypass CF – fall through to save the CF page body
+                log.debug("  [CF] Bypass failed – saving CF page body: %s", url)
+
             # Skip expensive retries for speculative probe URLs
-            if is_probe:
+            elif is_probe:
                 self._probe_403_count += 1
                 # Track per-directory failures
                 probe_dir = self._dir_from_url(url)
@@ -1606,60 +1611,79 @@ class Crawler:
                 self._stats["probe"] += 1
                 return
 
-            log.debug("  [%d] Blocked – retrying with rotated headers: %s",
-                     resp.status_code, url)
-            retry_resp = self._retry_with_headers(url)
-            if retry_resp is not None:
-                resp = retry_resp
+            # Tomcat IP-restriction: detected by a distinctive body phrase.
+            # Header rotation never helps for server-level IP whitelists, so
+            # skip retries entirely and fall through to save the HTML body
+            # (which IS real content – the Tomcat "access denied" error page).
+            elif is_tomcat_ip_restricted(resp):
+                log.info(
+                    "[TOMCAT-403] IP-restricted page – saving body: %s", url
+                )
+                self._stats["restricted"] += 1
+                # Fall through to the content-saving code below
+
             else:
-                # Only attempt SG-CAPTCHA solve when the 403 response body
-                # contains actual CAPTCHA markers.  Calling solve_sg_captcha
-                # unconditionally is wrong because it hits the CAPTCHA endpoint
-                # directly, which ALWAYS returns a challenge – causing the
-                # crawler to waste 20 s solving a useless PoW for every plain
-                # nginx 403 (e.g. woocommerce_uploads/ directory block).
-                body_text = resp.content.decode("utf-8", errors="replace")
-                if is_sg_captcha_response(resp):
-                    # Serialize to avoid concurrent PoW solves.
-                    with self._sg_solve_lock:
-                        if solve_sg_captcha(self.session, self.base,
-                                            parsed_url.path):
-                            try:
-                                retry_resp = self.session.get(
-                                    url, timeout=REQUEST_TIMEOUT,
-                                    allow_redirects=True,
-                                )
-                            except _NETWORK_ERRORS:
-                                retry_resp = None
-                            if (retry_resp is not None and retry_resp.ok
-                                    and not is_sg_captcha_response(retry_resp)):
-                                log.debug("  [SG-CAPTCHA] Solved 403 for %s",
-                                          url)
-                                resp = retry_resp
+                # Rotate headers and retry.  If the retry succeeds the new
+                # response replaces resp and processing continues normally.
+                # If all retries fail we fall through to save whatever HTML
+                # body the server returned rather than discarding it.
+                log.debug("  [%d] Blocked – retrying with rotated headers: %s",
+                         resp.status_code, url)
+                retry_resp = self._retry_with_headers(url)
+                if retry_resp is not None:
+                    resp = retry_resp
+                else:
+                    # All retries exhausted.
+                    body_text = resp.content.decode("utf-8", errors="replace")
+                    if is_sg_captcha_response(resp):
+                        # Serialize to avoid concurrent PoW solves.
+                        with self._sg_solve_lock:
+                            if solve_sg_captcha(self.session, self.base,
+                                                parsed_url.path):
+                                try:
+                                    retry_resp = self.session.get(
+                                        url, timeout=REQUEST_TIMEOUT,
+                                        allow_redirects=True,
+                                    )
+                                except _NETWORK_ERRORS:
+                                    retry_resp = None
+                                if (retry_resp is not None and retry_resp.ok
+                                        and not is_sg_captcha_response(retry_resp)):
+                                    log.debug(
+                                        "  [SG-CAPTCHA] Solved 403 for %s", url
+                                    )
+                                    resp = retry_resp
+                                else:
+                                    # CAPTCHA page is not real content – skip
+                                    self._stats["err"] += 1
+                                    return
                             else:
+                                log.warning(
+                                    "  [SG-CAPTCHA] Failed to solve for %s", url
+                                )
                                 self._stats["err"] += 1
                                 return
-                        else:
-                            log.warning("  [SG-CAPTCHA] Failed to solve for %s",
-                                        url)
-                            self._stats["err"] += 1
-                            return
-                else:
-                    # Regular WAF / nginx 403 – detect protection type and skip
-                    protections = self.detect_protection(
-                        dict(resp.headers), body_text
-                    )
-                    if protections:
-                        self._stats["waf"] += 1
-                        log.warning(
-                            "  [WAF] %s detected on %s",
-                            ", ".join(protections), url,
-                        )
                     else:
-                        log.warning("HTTP %s for %s – skipping",
-                                    resp.status_code, url)
-                    self._stats["err"] += 1
-                    return
+                        # Not a CAPTCHA.  Detect WAF type for logging, but
+                        # always fall through to save the HTML response body –
+                        # the server DID return content, even if access is
+                        # restricted.
+                        protections = self.detect_protection(
+                            dict(resp.headers), body_text
+                        )
+                        if protections:
+                            log.info(
+                                "  [WAF-%s] Saving body despite protection: %s",
+                                "+".join(protections), url,
+                            )
+                            self._stats["waf"] += 1
+                        else:
+                            log.info(
+                                "  [403] Saving body for restricted page: %s",
+                                url,
+                            )
+                        self._stats["restricted"] += 1
+                        # Fall through to content-saving code
 
         # Reset probe 403/404 streak on any successful probe response
         if is_probe and resp.ok:
@@ -1689,9 +1713,17 @@ class Crawler:
                 log.debug("  [PROBE] 404 for %s – skipping", url)
                 self._stats["probe"] += 1
                 return
-            log.warning("HTTP %s for %s – skipping", resp.status_code, url)
-            self._stats["err"] += 1
-            return
+            # For non-probe 4xx/5xx responses that have an HTML body, fall
+            # through to save the content – the response IS a page (error or
+            # access-denied), and skipping it loses information.
+            ct_check = resp.headers.get("Content-Type", "").lower()
+            if "html" not in ct_check or not resp.content:
+                log.warning("HTTP %s for %s – skipping (no HTML body)",
+                            resp.status_code, url)
+                self._stats["err"] += 1
+                return
+            log.debug("  [%s] HTML body present – saving: %s",
+                      resp.status_code, url)
 
         # SG-Captcha challenge: solve the PoW and retry the request
         # to get the real content behind the captcha.
