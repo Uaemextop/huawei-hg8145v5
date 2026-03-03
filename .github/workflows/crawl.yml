@@ -219,9 +219,10 @@ jobs:
           cd downloaded_site
           git init -b main
           git lfs install --local
+          git config lfs.locksverify false
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
           git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
 
           # Allow pushing large binary firmware files (up to 500 MB)
@@ -254,7 +255,7 @@ jobs:
           # Re-apply git credentials if repo was created
           if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
             cd downloaded_site
-            git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+            git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
             cd ..
           fi
 
@@ -331,7 +332,7 @@ jobs:
           ONT_TOKEN: ${{ secrets.ONT }}
         run: |
           cd downloaded_site
-          git config credential.helper '!f() { echo "password=$ONT_TOKEN"; }; f'
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
 
           # Track files > 50 MB with Git LFS automatically
           LARGE_FILES=$(find . -not -path './.git/*' -type f -size +50M 2>/dev/null)
