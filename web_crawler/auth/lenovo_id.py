@@ -5,23 +5,20 @@ Implements the multi-step OAuth flow used by the LMSA desktop app to
 obtain a WUST token from ``passport.lenovo.com`` and exchange it for a
 LMSA JWT via ``lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml``.
 
-OAuth flow (reverse-engineered from LMSA .NET assemblies + DotNetBrowserLog)
------------------------------------------------------------------------------
-1. GET  /wauthen5/gateway?…&lenovoid.realm=lmsaclient
-         → 302 to /wauthen5/preLogin
-         Collect session cookies: JSESSIONID, lenovoid.webLoginSignkey, _abck.
+OAuth flow (reverse-engineered from LMSA .NET assemblies + decompiled Software Fix.exe)
+----------------------------------------------------------------------------------------
+1. POST /Interface/dictionary/getApiInfo.jhtml  (key="TIP_URL")
+         → Returns ``login_url`` = passport.lenovo.com/glbwebauthnv6/preLogin?...
+           with ``lenovoid.cb=https://lsa.lenovo.com/Tips/lenovoIdSuccess.html``.
 
-2. POST /wauthen5/userLogin  (form-encoded, replays cookies from step 1)
-         Hidden fields: lenovoid.action, lenovoid.realm, lenovoid.cb, …
-         lenovoid.cb = https://lmsa.prod.cloud.lenovo.com/Tips/lenovoIdSuccess.html
-         On success: server redirects to the callback URL with
-         ``?lenovoid.wust=<TOKEN>`` as a query parameter.
-         LMSA's embedded Chromium (DotNetBrowser) intercepts this navigation
-         before the request fires and extracts the WUST token from the URL.
+2. Load  login_url in a real browser (LMSA uses WebView2 / DotNetBrowser).
+         User logs in; on success the browser is redirected to:
+         ``https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=<TOKEN>``
+         LMSA's embedded browser intercepts this navigation and extracts the WUST.
 
 3. POST lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml
-         RequestModel body with dparams.wust + dparams.guid.
-         On success: 200, code "0000", JWT in ``Authorization`` header.
+         RequestModel body with dparams.wust + dparams.guid  (author: false).
+         On success: 200, code "0000", JWT in ``Authorization`` response header.
 
 Security notes
 --------------
@@ -29,9 +26,8 @@ Security notes
   ``LMSA_EMAIL`` / ``LMSA_PASSWORD`` environment variables or the
   ``--lmsa-email`` / ``--lmsa-password`` CLI flags.
 * The Akamai _abck cookie is issued by the server and replayed
-  transparently by the requests.Session cookie jar; no injection needed.
-* passport.lenovo.com sets ``HttpOnly; Secure`` on all auth cookies so
-  they are never readable from JavaScript.
+  transparently; Firefox (Playwright) is used to execute the JS challenge.
+* passport.lenovo.com sets ``HttpOnly; Secure`` on all auth cookies.
 """
 
 from __future__ import annotations
@@ -40,7 +36,7 @@ import os
 import re
 import uuid
 from typing import Optional
-from urllib.parse import urlencode, urljoin, urlparse, parse_qs
+from urllib.parse import urljoin
 
 import requests
 
@@ -66,24 +62,26 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 PASSPORT_BASE = "https://passport.lenovo.com"
-# Real paths confirmed from DotNetBrowser log (LMSA 7.4.3.4)
-_GATEWAY_PATH   = "/wauthen5/gateway"
-_PRELOGIN_PATH  = "/wauthen5/preLogin"
-_USERLOGIN_PATH = "/wauthen5/userLogin"
 _LMSA_REALM = "lmsaclient"
 
-# OAuth success callback URL (internal Lenovo host, never actually loaded).
-# LMSA's embedded Chromium (DotNetBrowser) intercepts navigation to this URL
-# and extracts lenovoid.wust from the query string before the request fires.
-_LMSA_CB_URL = "https://lmsa.prod.cloud.lenovo.com/Tips/lenovoIdSuccess.html"
+# OAuth success callback URL.
+# Confirmed from Software Fix.exe decompilation (LoginCallback method):
+#   if (uri.LocalPath != "/Tips/lenovoIdSuccess.html") return;
+# The host is lsa.lenovo.com (not lmsa.prod.cloud.lenovo.com — that was wrong).
+_LMSA_CB_URL = "https://lsa.lenovo.com/Tips/lenovoIdSuccess.html"
+
+# Real login URL obtained from /Interface/dictionary/getApiInfo.jhtml (key=TIP_URL).
+# Confirmed by decompiling Software Fix.exe (LenovoIdWindowViewModel):
+#   login_url: passport.lenovo.com/glbwebauthnv6/preLogin?...&lenovoid.cb=lsa.lenovo.com/Tips/...
+# The old wauthen5/gateway endpoint is legacy; glbwebauthnv6/preLogin is current.
+_PRELOGIN_PATH  = "/glbwebauthnv6/preLogin"
+_USERLOGIN_PATH = "/glbwebauthnv6/userLogin"
 
 # Hidden form fields the LMSA app sets when initiating OAuth.
-# Source: DotNetBrowserLog URLs observed in LMSA 7.4.3.4 session data.
+# Confirmed from glbwebauthnv6/preLogin page HTML (name attributes).
 _LMSA_FORM_DEFAULTS: dict[str, str] = {
     "lenovoid.action":       "uilogin",
     "lenovoid.realm":        _LMSA_REALM,
-    # Confirmed from DotNetBrowserLog (LMSA 7.4.3.4 session):
-    # lenovoid.lang=es_ES in the gateway URL
     "lenovoid.lang":         "es_ES",
     "lenovoid.ctx":          "null",
     "lenovoid.uinfo":        "null",
@@ -175,12 +173,59 @@ class LenovoIDAuth:
         self._sess.verify = verify_ssl
         self._sess.headers.update({
             "User-Agent":      _BROWSER_UA,
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "es-419,es;q=0.9",
             "Accept":          (
                 "text/html,application/xhtml+xml,application/xml;"
                 "q=0.9,*/*;q=0.8"
             ),
         })
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_login_url(self) -> str:
+        """Fetch the real Lenovo ID OAuth login URL from the LMSA API.
+
+        Confirmed by decompiling ``Software Fix.exe`` (LenovoIdWindowViewModel):
+            login_url comes from ``/Interface/dictionary/getApiInfo.jhtml``
+            with ``key="TIP_URL"``.
+        Falls back to a hardcoded URL if the API call fails.
+        """
+        _default = (
+            f"{PASSPORT_BASE}{_PRELOGIN_PATH}"
+            f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
+            f"&lenovoid.cb={_LMSA_CB_URL}"
+        )
+        try:
+            from web_crawler.auth.lmsa import _BASE_HEADERS
+            import uuid as _uuid, json as _json
+            guid = str(_uuid.uuid4()).lower()
+            hdrs = dict(_BASE_HEADERS)
+            hdrs["guid"] = guid
+            body = {
+                "client":      {"version": "7.4.3.4"},
+                "language":    "es-ES",
+                "windowsInfo": "Windows 10, 64bit",
+                "dparams":     {"key": "TIP_URL"},
+            }
+            r = requests.post(
+                f"{self._lmsa_base}/dictionary/getApiInfo.jhtml",
+                json=body, headers=hdrs, timeout=10,
+                verify=self._verify_ssl,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("code") == "0000":
+                    content = _json.loads(data["content"])
+                    url = content.get("login_url", "")
+                    if url:
+                        _log(f"[LenovoID] Login URL from server: {url[:80]}")
+                        return url
+        except Exception as exc:
+            _log(f"[LenovoID] getApiInfo failed ({exc}), using hardcoded login URL")
+        _log(f"[LenovoID] Using hardcoded login URL: {_default[:80]}")
+        return _default
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,25 +275,30 @@ class LenovoIDAuth:
     def _obtain_wust(self, email: str, password: str) -> Optional[str]:
         """Run the Lenovo ID login form flow and return the WUST token.
 
-        Tries Playwright browser automation first (bypasses Akamai Bot Manager),
+        Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
+        then tries Playwright browser automation (bypasses Akamai Bot Manager),
         falling back to plain HTTP requests when Playwright is not installed.
         """
+        login_url = self._get_login_url()
+
         if _PLAYWRIGHT_AVAILABLE:
-            wust = self._obtain_wust_browser(email, password)
+            wust = self._obtain_wust_browser(email, password, login_url)
             if wust:
                 return wust
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
-        return self._obtain_wust_requests(email, password)
+        return self._obtain_wust_requests(email, password, login_url)
 
-    def _obtain_wust_browser(self, email: str, password: str) -> Optional[str]:
-        """Use Playwright (headless Chromium) to complete the Lenovo ID OAuth.
+    def _obtain_wust_browser(
+        self, email: str, password: str, login_url: str
+    ) -> Optional[str]:
+        """Use Playwright (headless Firefox) to complete the Lenovo ID OAuth.
 
         The Lenovo passport is protected by Akamai Bot Manager which sets an
         ``_abck`` cookie that can only be validated by executing JavaScript in
-        a real browser context.  This method launches a headless Chromium instance,
-        navigates to the gateway, fills in credentials, and intercepts the WUST
-        from the redirect URL before the browser tries to load the callback host.
+        a real browser context.  This method launches a headless Firefox instance,
+        navigates to the real login URL (from getApiInfo.jhtml), fills in
+        credentials, and intercepts the WUST from the redirect URL.
         """
         _log("[LenovoID] Launching headless browser for Akamai-protected login…")
         wust: Optional[str] = None
@@ -277,37 +327,27 @@ class LenovoIDAuth:
                 ctx = browser.new_context(
                     viewport={"width": 1280, "height": 800},
                     user_agent=_BROWSER_UA,
-                    # Confirmed from DotNetBrowserLog:
-                    # Accept-Language: es-419,es;q=0.9
                     locale="es-419",
                     ignore_https_errors=True,
                     extra_http_headers={
                         "Accept-Language": "es-419,es;q=0.9",
-                        "Sec-Fetch-Site": "none",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-User": "?1",
                         "Upgrade-Insecure-Requests": "1",
                     },
                 )
                 page = ctx.new_page()
 
                 # Intercept every navigation and capture WUST from callback URL.
+                # LoginCallback in Software Fix.exe checks for path /Tips/lenovoIdSuccess.html
                 def _on_nav(frame: object) -> None:
                     url: str = frame.url  # type: ignore[attr-defined]
-                    if _LMSA_CB_URL in url or "lenovoid.wust" in url:
+                    if "/Tips/lenovoIdSuccess.html" in url or "lenovoid.wust" in url:
                         captured.append(url)
 
                 page.on("framenavigated", _on_nav)
 
-                gateway_url = (
-                    f"{PASSPORT_BASE}{_GATEWAY_PATH}"
-                    f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
-                    f"&lenovoid.lang=es_ES"
-                    f"&lenovoid.cb={_LMSA_CB_URL}"
-                )
-                _log(f"[LenovoID] Browser → gateway: {gateway_url[:80]}")
+                _log(f"[LenovoID] Browser → login: {login_url[:80]}")
                 try:
-                    page.goto(gateway_url, timeout=20_000,
+                    page.goto(login_url, timeout=20_000,
                               wait_until="networkidle")
                 except Exception as exc:
                     _log(f"[LenovoID] Browser goto error (Akamai may be blocking): {exc}")
@@ -410,28 +450,25 @@ class LenovoIDAuth:
 
         return wust
 
-    def _obtain_wust_requests(self, email: str, password: str) -> Optional[str]:
+    def _obtain_wust_requests(
+        self, email: str, password: str, login_url: str
+    ) -> Optional[str]:
         """Requests-based fallback for ``_obtain_wust_browser``.
 
         Only succeeds when the Akamai ``_abck`` cookie is not required
         (e.g. on lsatest.lenovo.com or when the session is already trusted).
+        Uses the real login URL from ``getApiInfo.jhtml``.
         """
-        # --- Step 1: Gateway → preLogin (collects JSESSIONID + sign-key) ---
-        gateway_url = (
-            f"{PASSPORT_BASE}{_GATEWAY_PATH}"
-            f"?lenovoid.action=uilogin&lenovoid.realm={_LMSA_REALM}"
-            f"&lenovoid.lang=es_ES"
-            f"&lenovoid.cb={requests.utils.quote(_LMSA_CB_URL, safe='')}"
-        )
-        _log(f"[LenovoID] Loading OAuth gateway: {gateway_url}")
+        # --- Step 1: preLogin — collects JSESSIONID + sign-key ---
+        _log(f"[LenovoID] Loading OAuth login page: {login_url[:80]}")
         try:
             r = self._sess.get(
-                gateway_url,
+                login_url,
                 timeout=30,
                 allow_redirects=True,
             )
         except requests.RequestException as exc:
-            _log(f"[LenovoID] gateway request failed: {exc}")
+            _log(f"[LenovoID] login page request failed: {exc}")
             return None
 
         if r.status_code != 200:
@@ -441,8 +478,7 @@ class LenovoIDAuth:
         # Merge server-supplied hidden fields over our defaults.
         form_fields = dict(_LMSA_FORM_DEFAULTS)
         form_fields.update(_extract_hidden_fields(r.text))
-        # Override lenovoid.cb to the real callback value in case the server
-        # injected a different one.
+        # Ensure callback URL is always correct.
         form_fields["lenovoid.cb"] = _LMSA_CB_URL
         form_fields["username"] = email
         form_fields["password"] = password
@@ -485,8 +521,8 @@ class LenovoIDAuth:
             if wust:
                 _log("[LenovoID] ✓ WUST token extracted from redirect URL")
                 return wust
-            # Stop if we hit the callback host (the LMSA app never loads it).
-            if "lmsa.prod.cloud.lenovo.com" in loc:
+            # Stop if we reach the callback URL (LMSA never loads it).
+            if "/Tips/lenovoIdSuccess.html" in loc:
                 _log("[LenovoID] Reached LMSA callback URL but no WUST found")
                 break
             try:
