@@ -1445,14 +1445,34 @@ class Crawler:
 
         local = smart_local_path(url, self.output_dir, "")
 
-        # Skip already-downloaded files
+        # Load cached HTTP headers (ETag / Last-Modified) for conditional
+        # requests so we can avoid re-downloading unchanged resources.
+        _cached_headers: dict[str, str] = {}
+        _headers_path = local.parent / (local.name + ".headers")
+        if not self.force and _headers_path.exists():
+            try:
+                _cached_headers = json.loads(
+                    _headers_path.read_text(encoding="utf-8")
+                ).get("headers", {})
+            except Exception:
+                pass
+
+        # Skip already-downloaded files (no force, file on disk).
+        # If a cached ETag or Last-Modified is available we will make a
+        # conditional request instead of a hard skip so that changed
+        # resources are refreshed.
+        _has_validators = bool(
+            _cached_headers.get("ETag") or _cached_headers.get("Last-Modified")
+        )
         if not self.force and local.exists() and local.stat().st_size > 0:
-            log.debug("[SKIP] Already on disk: %s", url)
-            self._stats["skip"] += 1
-            added = self._parse_local_file(local, url)
-            if added:
-                log.debug("  +%d new URLs from cached %s", added, local.name)
-            return
+            if not _has_validators:
+                log.debug("[SKIP] Already on disk: %s", url)
+                self._stats["skip"] += 1
+                added = self._parse_local_file(local, url)
+                if added:
+                    log.debug("  +%d new URLs from cached %s", added, local.name)
+                return
+            # Fall through to make a conditional request
 
         log.debug("[Q:%d OK:%d ERR:%d] GET %s",
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
@@ -1461,6 +1481,14 @@ class Crawler:
         # manages its own UA via TLS impersonation)
         if not self._cf_bypass_done:
             self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+
+        # Build conditional request headers from cached ETag / Last-Modified
+        _conditional: dict[str, str] = {}
+        if _has_validators:
+            if _cached_headers.get("ETag"):
+                _conditional["If-None-Match"] = _cached_headers["ETag"]
+            if _cached_headers.get("Last-Modified"):
+                _conditional["If-Modified-Since"] = _cached_headers["Last-Modified"]
 
         # Use streaming mode for URLs that look like large binary files so we
         # don't buffer the entire response in RAM before saving to disk.
@@ -1482,6 +1510,7 @@ class Crawler:
             resp = self.session.get(
                 url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                 stream=_use_stream,
+                headers=_conditional if _conditional else None,
             )
         except _NETWORK_ERRORS as exc:
             # Re-enqueue on transient network errors up to MAX_URL_RETRIES
@@ -1524,6 +1553,16 @@ class Crawler:
             final_key = url_key(final_url)
             self._visited.add(final_key)
             log.debug("  Redirect: %s → %s", url, final_url)
+
+        # Handle 304 Not Modified – cached copy is still current
+        if resp.status_code == 304:
+            log.debug("[304] Not modified – reusing cached: %s", url)
+            self._stats["skip"] += 1
+            if local.exists():
+                added = self._parse_local_file(local, url)
+                if added:
+                    log.debug("  +%d new URLs from 304 cache %s", added, local.name)
+            return
 
         # Handle 429 (rate limiting) with exponential backoff + re-enqueue
         if resp.status_code == 429:

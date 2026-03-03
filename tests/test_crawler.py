@@ -2321,6 +2321,201 @@ class TestSkipMediaFiles(unittest.TestCase):
         self.assertIn(".m3u8", _MEDIA_EXTENSIONS)
 
 
+
+
+# ------------------------------------------------------------------ #
+# Accept-Encoding includes Brotli
+# ------------------------------------------------------------------ #
+
+class TestAcceptEncodingBrotli(unittest.TestCase):
+    """build_session and random_headers must advertise Brotli support."""
+
+    def test_build_session_includes_brotli(self):
+        from web_crawler.session import build_session
+        session = build_session()
+        enc = session.headers.get("Accept-Encoding", "")
+        self.assertIn("br", enc)
+
+    def test_random_headers_includes_brotli(self):
+        hdrs = random_headers("https://example.com")
+        enc = hdrs.get("Accept-Encoding", "")
+        self.assertIn("br", enc)
+
+
+# ------------------------------------------------------------------ #
+# Conditional requests (ETag / Last-Modified)
+# ------------------------------------------------------------------ #
+
+class TestConditionalRequests(unittest.TestCase):
+    """Crawler sends If-None-Match / If-Modified-Since and handles 304."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_conditional"),
+                respect_robots=False,
+            )
+
+    def test_304_increments_skip_stat(self):
+        """A 304 Not Modified response should be counted as a skip."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/image.png"
+
+            # Create a fake cached file and .headers file with an ETag
+            local = Path(tmp) / "image.png"
+            local.write_bytes(b"fake image data")
+            headers_path = Path(tmp) / "image.png.headers"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {
+                        "ETag": '"abc123"',
+                        "Last-Modified": "Wed, 01 Oct 2025 07:01:28 GMT",
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            resp_304 = MagicMock()
+            resp_304.status_code = 304
+            resp_304.url = url
+            resp_304.ok = True
+
+            with patch.object(crawler.session, "get", return_value=resp_304):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertEqual(crawler._stats["skip"], 1)
+            self.assertEqual(crawler._stats["ok"], 0)
+
+    def test_etag_sent_as_if_none_match(self):
+        """When a cached ETag exists, If-None-Match header is sent."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/style.css"
+            local = Path(tmp) / "style.css"
+            local.write_bytes(b"body {}")
+            headers_path = Path(tmp) / "style.css.headers"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {"ETag": '"etag-value"'},
+                }),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_get(u, **kwargs):
+                captured["headers"] = kwargs.get("headers") or {}
+                resp = MagicMock()
+                resp.status_code = 304
+                resp.url = u
+                resp.ok = True
+                return resp
+
+            with patch.object(crawler.session, "get", side_effect=fake_get):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertIn("If-None-Match", captured["headers"])
+            self.assertEqual(captured["headers"]["If-None-Match"], '"etag-value"')
+
+    def test_last_modified_sent_as_if_modified_since(self):
+        """When a cached Last-Modified exists (no ETag), If-Modified-Since is sent."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/logo.png"
+            local = Path(tmp) / "logo.png"
+            local.write_bytes(b"\x89PNG")
+            headers_path = Path(tmp) / "logo.png.headers"
+            lm_value = "Wed, 01 Oct 2025 07:01:28 GMT"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {"Last-Modified": lm_value},
+                }),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_get(u, **kwargs):
+                captured["headers"] = kwargs.get("headers") or {}
+                resp = MagicMock()
+                resp.status_code = 304
+                resp.url = u
+                resp.ok = True
+                return resp
+
+            with patch.object(crawler.session, "get", side_effect=fake_get):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertIn("If-Modified-Since", captured["headers"])
+            self.assertEqual(captured["headers"]["If-Modified-Since"], lm_value)
+
+    def test_no_validators_skips_without_request(self):
+        """Files on disk with no ETag/Last-Modified are skipped without HTTP request."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/page.html"
+            local = Path(tmp) / "page.html"
+            local.write_text("<html></html>", encoding="utf-8")
+            # No .headers file – no validators
+
+            with patch.object(crawler.session, "get") as mock_get:
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            mock_get.assert_not_called()
+            self.assertEqual(crawler._stats["skip"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
