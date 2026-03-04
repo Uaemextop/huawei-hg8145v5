@@ -404,7 +404,7 @@ class LMSASession:
         auth_hdr = resp.headers.get("Authorization", "")
         if guid_hdr == self.guid and auth_hdr and auth_hdr != self._jwt_token:
             self._jwt_token = auth_hdr
-            _log(f"[LMSA] JWT token updated from {endpoint} response")
+            _log_debug(f"[LMSA] JWT token updated from {endpoint} response")
 
         if resp.status_code != 200:
             _log(f"[LMSA] POST {endpoint} → HTTP {resp.status_code}: {resp.text[:200]}")
@@ -1052,3 +1052,12 @@ def _log(msg: str) -> None:
         log.info(msg)
     except Exception:
         print(msg)
+
+
+def _log_debug(msg: str) -> None:
+    # Debug messages are best-effort; silent failure is acceptable.
+    try:
+        from web_crawler.utils.log import log
+        log.debug(msg)
+    except Exception:
+        pass
