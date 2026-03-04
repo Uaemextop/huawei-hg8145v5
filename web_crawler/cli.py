@@ -313,8 +313,14 @@ def main() -> None:
             from web_crawler.auth.lmsa import _FIRMWARE_COUNTRIES
             country_filter = getattr(args, "lmsa_country", "")
             if country_filter:
-                scan_countries = (country_filter,)
-                log.info("[LMSA] Firmware scan limited to country: %s", country_filter)
+                # Support comma-separated countries, e.g. "Mexico,China"
+                scan_countries = tuple(
+                    c.strip() for c in country_filter.split(",") if c.strip()
+                )
+                log.info(
+                    "[LMSA] Firmware scan limited to %d country/countries: %s",
+                    len(scan_countries), ", ".join(scan_countries),
+                )
             else:
                 scan_countries = _FIRMWARE_COUNTRIES
             resources = lmsa_session.scan_all_firmware(countries=scan_countries)
@@ -327,16 +333,39 @@ def main() -> None:
             plugin_pairs = lmsa_session.get_plugin_urls()
             if plugin_pairs:
                 log.info("[LMSA] Plugin/tool URLs: %d", len(plugin_pairs))
-                url_pairs = url_pairs + plugin_pairs
 
-            # Write discovered URLs to a manifest file for reference.
+            # Write typed URL manifest files (rom, tool, other).
+            typed = lmsa_session.collect_download_urls_by_type(resources)
+            for cat_name, cat_pairs in typed.items():
+                if cat_pairs:
+                    typed_path = output_dir / f"lmsa_{cat_name}_urls.txt"
+                    with typed_path.open("w", encoding="utf-8") as tf:
+                        for dl_url, dl_name in cat_pairs:
+                            tf.write(f"{dl_url}\t{dl_name}\n")
+                    log.info(
+                        "[LMSA] %s URL manifest: %s (%d URLs)",
+                        cat_name, typed_path, len(cat_pairs),
+                    )
+            # Write plugin URLs to a dedicated manifest file.
+            if plugin_pairs:
+                plugin_path = output_dir / "lmsa_plugin_urls.txt"
+                with plugin_path.open("w", encoding="utf-8") as pf:
+                    for dl_url, dl_name in plugin_pairs:
+                        pf.write(f"{dl_url}\t{dl_name}\n")
+                log.info(
+                    "[LMSA] Plugin URL manifest: %s (%d URLs)",
+                    plugin_path, len(plugin_pairs),
+                )
+
+            # Write combined manifest with all URLs (backward compatibility).
+            all_pairs = url_pairs + plugin_pairs
             manifest_path = output_dir / "lmsa_firmware_urls.txt"
             with manifest_path.open("w", encoding="utf-8") as mf:
-                for dl_url, dl_name in url_pairs:
+                for dl_url, dl_name in all_pairs:
                     mf.write(f"{dl_url}\t{dl_name}\n")
-            log.info("[LMSA] Firmware URL manifest saved: %s", manifest_path)
+            log.info("[LMSA] Combined firmware URL manifest saved: %s", manifest_path)
             # Collect pre-signed URLs as seeds for the crawler.
-            extra_seed_urls = [u for u, _ in url_pairs]
+            extra_seed_urls = [u for u, _ in all_pairs]
         except Exception as exc:
             log.warning("[LMSA] Firmware scan failed (continuing): %s", exc)
 
