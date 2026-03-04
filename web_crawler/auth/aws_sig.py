@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import sys
 import urllib.parse
 from typing import Optional
 
@@ -337,3 +338,153 @@ def compute_presigned_signature(
         signing_key, sts.encode("utf-8"), hashlib.sha256
     ).digest()
     return sig_bytes.hex()
+
+
+def curl_command(url: str) -> Optional[str]:
+    """Return a ready-to-run ``curl`` command that downloads *url*.
+
+    For pre-signed S3 URLs the pre-signing query parameters are already
+    embedded in the URL, so no extra headers are required — ``curl`` just
+    needs the URL itself.  The command uses ``-L`` (follow redirects) and
+    ``-O`` (write to a file named after the remote object key).
+
+    Returns ``None`` when *url* is not a recognised HTTPS URL.
+
+    Example output::
+
+        curl -L -O "https://rsddownload-secure.lenovo.com/firmware.zip
+        ?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=…"
+
+    For non-pre-signed URLs on the same host the command is identical in
+    structure but will return HTTP 403 (private bucket requires signing).
+    """
+    if not url.startswith(("http://", "https://")):
+        return None
+    # Escape any double-quotes inside the URL (rare but safe practice)
+    safe_url = url.replace('"', '\\"')
+    return f'curl -L -O "{safe_url}"'
+
+
+def print_analysis(url: str, secret_key: str = "", *, file=None) -> None:
+    """Print a human-readable AWS Signature V4 analysis for *url*.
+
+    Writes to *file* (default ``sys.stdout``).
+
+    The analysis covers every step of the signature calculation:
+
+    1. Parsed URL components (credential scope, access key ID, date …)
+    2. Canonical request (``Task 1`` of the AWS spec)
+    3. String-to-sign (``Task 2``)
+    4. Signing-key derivation chain (``Task 3`` — no secret needed to show
+       the derivation *structure*)
+    5. Expected signature — only when *secret_key* is supplied
+    6. Signature match result — only when *secret_key* is supplied
+    7. Ready-to-run ``curl`` command
+
+    Parameters
+    ----------
+    url:
+        The pre-signed (or plain) S3 URL to analyse.
+    secret_key:
+        Optional AWS Secret Access Key.  When supplied the expected
+        ``X-Amz-Signature`` is computed and compared against the captured
+        value in *url*.
+    file:
+        Output stream (default ``sys.stdout``).
+    """
+    out = file or sys.stdout
+
+    def _p(line: str = "") -> None:
+        print(line, file=out)
+
+    _p("=" * 72)
+    _p("AWS Signature V4 — Pre-Signed URL Analysis")
+    _p("=" * 72)
+    _p(f"URL: {url}")
+    _p()
+
+    parsed = parse_presigned_s3_url(url)
+    if parsed is None:
+        _p("[!] Not a valid pre-signed S3 URL (missing required X-Amz-* params)")
+        cmd = curl_command(url)
+        if cmd:
+            _p()
+            _p("curl command:")
+            _p(f"  {cmd}")
+        _p("=" * 72)
+        return
+
+    # ------------------------------------------------------------------ #
+    # 1. Parsed components
+    # ------------------------------------------------------------------ #
+    _p("1. PARSED COMPONENTS")
+    _p("-" * 40)
+    _p(f"  Host            : {parsed['host']}")
+    _p(f"  Object key      : {parsed['path']}")
+    _p(f"  Algorithm       : {parsed['algorithm']}")
+    _p(f"  Access Key ID   : {parsed['access_key_id']}")
+    _p(f"  Region          : {parsed['region']}")
+    _p(f"  Service         : {parsed['service']}")
+    _p(f"  Credential scope: {parsed['credential_scope']}")
+    _p(f"  Date (ISO-8601) : {parsed['date']}")
+    _p(f"  Expires         : {parsed['expires']} s "
+       f"({parsed['expires'] // 3600}h {(parsed['expires'] % 3600) // 60}m)")
+    _p(f"  Signed headers  : {parsed['signed_headers']}")
+    if parsed["security_token"]:
+        _p(f"  Security token  : {parsed['security_token'][:20]}…")
+    _p(f"  Captured sig    : {parsed['signature']}")
+    _p()
+
+    # ------------------------------------------------------------------ #
+    # 2. Canonical request  (Task 1)
+    # ------------------------------------------------------------------ #
+    cr = presigned_canonical_request(parsed)
+    cr_hash = hashlib.sha256(cr.encode()).hexdigest()
+    _p("2. CANONICAL REQUEST  (Task 1 — AWS Signature V4 spec)")
+    _p("-" * 40)
+    _p(cr)
+    _p()
+    _p(f"  SHA-256(CanonicalRequest) = {cr_hash}")
+    _p()
+
+    # ------------------------------------------------------------------ #
+    # 3. String-to-sign  (Task 2)
+    # ------------------------------------------------------------------ #
+    sts = presigned_string_to_sign(parsed, cr)
+    _p("3. STRING-TO-SIGN  (Task 2)")
+    _p("-" * 40)
+    _p(sts)
+    _p()
+
+    # ------------------------------------------------------------------ #
+    # 4. Signing-key derivation  (Task 3)
+    # ------------------------------------------------------------------ #
+    _p("4. SIGNING KEY DERIVATION  (Task 3)")
+    _p("-" * 40)
+    _p(f"  kDate    = HMAC( b'AWS4' + secret_key,       '{parsed['date_short']}' )")
+    _p(f"  kRegion  = HMAC( kDate,                      '{parsed['region']}' )")
+    _p(f"  kService = HMAC( kRegion,                    '{parsed['service']}' )")
+    _p( "  kSigning = HMAC( kService,                   'aws4_request' )")
+    _p( "  Signature = HEX( HMAC( kSigning, StringToSign ) )")
+    _p()
+
+    # ------------------------------------------------------------------ #
+    # 5 & 6. Computed signature + match (only when secret_key is given)
+    # ------------------------------------------------------------------ #
+    if secret_key:
+        computed = compute_presigned_signature(secret_key, parsed)
+        match = computed == parsed["signature"]
+        _p("5. COMPUTED SIGNATURE")
+        _p("-" * 40)
+        _p(f"  Computed : {computed}")
+        _p(f"  Captured : {parsed['signature']}")
+        _p(f"  Match    : {'✓ YES — secret key is correct' if match else '✗ NO — wrong secret key'}")
+        _p()
+
+    # ------------------------------------------------------------------ #
+    # 7. curl command
+    # ------------------------------------------------------------------ #
+    _p("curl COMMAND (downloads the file — valid while URL has not expired)")
+    _p("-" * 40)
+    _p(f"  {curl_command(url)}")
+    _p("=" * 72)

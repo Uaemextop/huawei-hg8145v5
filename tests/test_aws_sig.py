@@ -20,10 +20,12 @@ from web_crawler.auth.aws_sig import (
     AWS4_ALGORITHM,
     compute_presigned_signature,
     compute_signing_key,
+    curl_command,
     is_presigned_s3_url,
     parse_presigned_s3_url,
     presigned_canonical_request,
     presigned_string_to_sign,
+    print_analysis,
 )
 
 # ---------------------------------------------------------------------------
@@ -575,6 +577,121 @@ class TestSameCredentialDifferentPath(unittest.TestCase):
             self.parsed_json["service"],
         )
         self.assertEqual(key_zip, key_json)
+
+
+# ---------------------------------------------------------------------------
+# curl_command() tests
+# ---------------------------------------------------------------------------
+
+class TestCurlCommand(unittest.TestCase):
+    """curl_command() produces a correct, ready-to-run curl invocation."""
+
+    def test_presigned_url_produces_curl_command(self):
+        cmd = curl_command(_PRESIGNED_URL)
+        self.assertIsNotNone(cmd)
+        self.assertTrue(cmd.startswith("curl -L -O"))
+
+    def test_curl_command_contains_full_url(self):
+        cmd = curl_command(_PRESIGNED_URL)
+        # The pre-signed URL (with X-Amz params) must appear verbatim
+        self.assertIn("X-Amz-Signature=", cmd)
+        self.assertIn("rsddownload-secure.lenovo.com", cmd)
+
+    def test_unsigned_url_also_produces_curl_command(self):
+        cmd = curl_command(_UNSIGNED_URL)
+        self.assertIsNotNone(cmd)
+        self.assertIn(_UNSIGNED_URL, cmd)
+
+    def test_json_url_produces_curl_command(self):
+        cmd = curl_command(_JSON_URL)
+        self.assertIsNotNone(cmd)
+        self.assertIn(".json", cmd)
+
+    def test_non_http_url_returns_none(self):
+        self.assertIsNone(curl_command("ftp://bucket/file.zip"))
+
+    def test_empty_url_returns_none(self):
+        self.assertIsNone(curl_command(""))
+
+    def test_url_is_double_quoted(self):
+        cmd = curl_command(_PRESIGNED_URL)
+        # URL must be wrapped in double-quotes so shell special chars are safe
+        self.assertRegex(cmd, r'curl -L -O ".*"')
+
+
+# ---------------------------------------------------------------------------
+# print_analysis() tests
+# ---------------------------------------------------------------------------
+
+class TestPrintAnalysis(unittest.TestCase):
+    """print_analysis() produces correct human-readable output."""
+
+    def _capture(self, url: str, secret: str = "") -> str:
+        import io
+        buf = io.StringIO()
+        print_analysis(url, secret_key=secret, file=buf)
+        return buf.getvalue()
+
+    def test_output_contains_parsed_components_section(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("PARSED COMPONENTS", out)
+
+    def test_output_contains_host(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("rsddownload-secure.lenovo.com", out)
+
+    def test_output_contains_access_key(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("AKIAS37TSJMJUUCJCY4T", out)
+
+    def test_output_contains_canonical_request_section(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("CANONICAL REQUEST", out)
+
+    def test_output_contains_string_to_sign_section(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("STRING-TO-SIGN", out)
+
+    def test_output_contains_signing_key_section(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("SIGNING KEY DERIVATION", out)
+
+    def test_output_contains_curl_command(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("curl -L -O", out)
+
+    def test_output_contains_curl_command_for_json_url(self):
+        out = self._capture(_JSON_URL)
+        self.assertIn("curl -L -O", out)
+        self.assertIn(".json", out)
+
+    def test_no_computed_sig_section_without_secret(self):
+        out = self._capture(_PRESIGNED_URL)
+        self.assertNotIn("COMPUTED SIGNATURE", out)
+
+    def test_computed_sig_section_with_secret(self):
+        out = self._capture(_PRESIGNED_URL, secret="any_key")
+        self.assertIn("COMPUTED SIGNATURE", out)
+        self.assertIn("Computed :", out)
+        self.assertIn("Captured :", out)
+        self.assertIn("Match    :", out)
+
+    def test_wrong_secret_shows_no_match(self):
+        out = self._capture(_PRESIGNED_URL, secret="wrong_key")
+        self.assertIn("NO", out)
+
+    def test_unsigned_url_shows_not_presigned_message(self):
+        out = self._capture(_UNSIGNED_URL)
+        self.assertIn("Not a valid pre-signed S3 URL", out)
+
+    def test_unsigned_url_still_shows_curl(self):
+        out = self._capture(_UNSIGNED_URL)
+        self.assertIn("curl -L -O", out)
+
+    def test_expires_human_readable(self):
+        """604800 s = 168h 0m should appear in the output."""
+        out = self._capture(_PRESIGNED_URL)
+        self.assertIn("168h", out)
 
 
 if __name__ == "__main__":

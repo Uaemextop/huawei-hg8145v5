@@ -10,6 +10,8 @@ from web_crawler.auth.aws_sig import (
     presigned_string_to_sign,
     compute_signing_key,
     compute_presigned_signature,
+    curl_command,
+    print_analysis,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "presigned_string_to_sign",
     "compute_signing_key",
     "compute_presigned_signature",
+    "curl_command",
+    "print_analysis",
 ]
