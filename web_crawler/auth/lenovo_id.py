@@ -262,6 +262,10 @@ class LenovoIDAuth:
 
         Returns an authenticated :class:`~web_crawler.auth.lmsa.LMSASession`
         on success, or ``None`` on failure.
+
+        The returned session stores the credentials internally so that
+        :meth:`~web_crawler.auth.lmsa.LMSASession.refresh_token` can
+        re-authenticate automatically if the JWT expires.
         """
         email    = email    or os.environ.get("LMSA_EMAIL", "")
         password = password or os.environ.get("LMSA_PASSWORD", "")
@@ -277,7 +281,12 @@ class LenovoIDAuth:
         if not wust:
             return None
 
-        return self._exchange_wust_for_jwt(wust)
+        session = self._exchange_wust_for_jwt(wust)
+        if session is not None:
+            # Store credentials so the session can refresh itself automatically.
+            session._email    = email
+            session._password = password
+        return session
 
     def login_with_wust(self, wust: str) -> Optional[LMSASession]:
         """Skip OAuth and exchange an already-obtained WUST for a JWT.

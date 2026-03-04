@@ -47,6 +47,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import uuid
 from typing import Any, Optional
 from urllib.parse import urljoin
@@ -167,6 +168,12 @@ _BASE_HEADERS: dict[str, str] = {
 # Standard API response code for success.
 _CODE_OK = "0000"
 
+# JSON response codes that indicate an expired or invalid auth token.
+# "402" = WUST rejected/expired (also returned for bad JWT in practice).
+# "403" = Token invalid server-side.
+# "401" = Unauthorised (some endpoints).
+_AUTH_ERROR_CODES = frozenset({"401", "402", "403"})
+
 
 # ---------------------------------------------------------------------------
 # RSA helpers
@@ -283,6 +290,15 @@ class LMSASession:
         self._jwt_token: Optional[str] = None
         self._rsa_key: Optional[Any] = None   # RSA.RsaKey when crypto available
 
+        # Stored Lenovo ID credentials — set by LenovoIDAuth.login() so that
+        # refresh_token() can re-authenticate automatically when the JWT expires.
+        self._email: str = ""
+        self._password: str = ""
+
+        # Lock to serialise concurrent token-refresh attempts (thread-safe).
+        self._reauth_lock = threading.Lock()
+        self._reauth_in_progress: bool = False
+
         self._session = requests.Session()
         self._session.headers.update(_BASE_HEADERS)
         self._session.verify = verify_ssl
@@ -376,6 +392,7 @@ class LMSASession:
         params: dict[str, Any],
         *,
         author: bool = True,
+        _retrying: bool = False,
     ) -> Optional[dict[str, Any]]:
         """POST a RequestModel to *endpoint* and return the parsed JSON body.
 
@@ -385,6 +402,10 @@ class LMSASession:
             Passed to :meth:`_request_headers`.  Use ``False`` for endpoints
             that explicitly set ``author: false`` in the C# source (e.g.
             ``lenovoIdLogin.jhtml``).
+        _retrying:
+            Internal flag set to ``True`` on the single automatic retry that
+            follows a successful :meth:`refresh_token` call.  Prevents
+            infinite-loop re-authentication.
         """
         body = self._build_request_model(params)
         try:
@@ -409,15 +430,39 @@ class LMSASession:
             self._jwt_token = auth_hdr
             _log_debug(f"[LMSA] JWT token updated from {endpoint} response")
 
+        # HTTP 401 on an authenticated call — try to refresh the token once.
+        if resp.status_code == 401 and author and not _retrying:
+            _log(f"[LMSA] HTTP 401 on {endpoint} — attempting token refresh")
+            if self.refresh_token():
+                return self._post(endpoint, params, author=author, _retrying=True)
+            return None
+
         if resp.status_code != 200:
             _log(f"[LMSA] POST {endpoint} → HTTP {resp.status_code}: {resp.text[:200]}")
             return None
 
         try:
-            return resp.json()
+            data = resp.json()
         except ValueError:
             _log(f"[LMSA] POST {endpoint} → non-JSON response: {resp.text[:200]}")
             return None
+
+        # Detect API-level auth errors and refresh the token automatically.
+        # Codes 402/403 mean the JWT or WUST has expired; retry once after
+        # obtaining fresh credentials via the full OAuth flow.
+        if (
+            data.get("code") in _AUTH_ERROR_CODES
+            and author
+            and not _retrying
+        ):
+            _log(
+                f"[LMSA] Auth error {data.get('code')!r} on {endpoint} "
+                "— attempting token refresh"
+            )
+            if self.refresh_token():
+                return self._post(endpoint, params, author=author, _retrying=True)
+
+        return data
 
     # ------------------------------------------------------------------
     # Public API
@@ -1053,6 +1098,59 @@ class LMSASession:
             sess.headers["Authorization"] = f"Bearer {self._jwt_token}"
         sess.headers["guid"] = self.guid
         sess.headers["Request-Tag"] = "lmsa"
+
+    def refresh_token(self) -> bool:
+        """Re-authenticate using stored Lenovo ID credentials.
+
+        Called automatically by :meth:`_post` when the server returns an auth
+        error (JSON codes ``402``/``403`` or HTTP 401).  Runs the full Lenovo
+        ID OAuth flow to obtain a fresh WUST and JWT, generating a new GUID.
+
+        Returns ``True`` when a new JWT was successfully obtained.  Returns
+        ``False`` when no credentials are stored or re-authentication fails.
+
+        Credentials are stored automatically by
+        :meth:`~web_crawler.auth.lenovo_id.LenovoIDAuth.login` when the
+        session is first created with email/password.
+        """
+        if not self._email or not self._password:
+            _log(
+                "[LMSA] refresh_token: no credentials stored — "
+                "set LMSA_EMAIL / LMSA_PASSWORD or use --lmsa-email / --lmsa-password"
+            )
+            return False
+
+        # Serialise concurrent refresh attempts: only one thread runs the
+        # OAuth flow; others wait and then reuse the new token.
+        with self._reauth_lock:
+            if self._reauth_in_progress:
+                # Another thread is already refreshing — wait for it to finish.
+                return bool(self._jwt_token)
+            self._reauth_in_progress = True
+
+        try:
+            _log("[LMSA] JWT expired — re-authenticating with Lenovo ID …")
+            # Import here to avoid a circular-import at module load time.
+            from web_crawler.auth.lenovo_id import LenovoIDAuth  # noqa: PLC0415
+            auth = LenovoIDAuth(
+                lmsa_base_url=self.base_url,
+                verify_ssl=self._verify_ssl,
+            )
+            new_sess = auth.login(self._email, self._password)
+            if new_sess is None or not new_sess._jwt_token:
+                _log("[LMSA] refresh_token: re-authentication failed")
+                return False
+
+            # Update credentials in-place so all callers see the new token.
+            self.guid        = new_sess.guid
+            self._jwt_token  = new_sess._jwt_token
+            self._session.headers["Authorization"] = f"Bearer {self._jwt_token}"
+            self._session.headers["guid"] = self.guid
+            _log("[LMSA] ✓ Token refreshed — new GUID and JWT active")
+            return True
+        finally:
+            with self._reauth_lock:
+                self._reauth_in_progress = False
 
     @property
     def is_authenticated(self) -> bool:
