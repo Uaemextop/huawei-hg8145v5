@@ -131,6 +131,21 @@ def parse_args() -> argparse.Namespace:
              "have a valid WUST from a previous session.",
     )
     parser.add_argument(
+        "--lmsa-jwt", default="", metavar="GUID:JWT",
+        help="Pre-obtained LMSA JWT and GUID from a HAR/proxy capture, "
+             "separated by ':'.  Format: GUID:JWT_TOKEN.  Skips OAuth and "
+             "token exchange entirely — the captured token is used directly.  "
+             "Also readable from the LMSA_JWT environment variable "
+             "(same GUID:JWT format).  Example: "
+             "--lmsa-jwt 98e2895b-...:Ek6TINIruEV6...",
+    )
+    parser.add_argument(
+        "--lmsa-country", default="", metavar="COUNTRY",
+        help="Limit LMSA firmware scan to a single country (e.g. 'Mexico').  "
+             "When omitted, all built-in regions are scanned.  Only used "
+             "when the target URL is rsddownload-secure.lenovo.com.",
+    )
+    parser.add_argument(
         "--no-external", dest="allow_external", action="store_false",
         default=True,
         help="Disable downloading media files from external CDN hosts "
@@ -220,8 +235,34 @@ def main() -> None:
     lmsa_email    = args.lmsa_email    or os.environ.get("LMSA_EMAIL", "")
     lmsa_password = args.lmsa_password or os.environ.get("LMSA_PASSWORD", "")
     lmsa_wust     = args.lmsa_wust     or os.environ.get("LMSA_WUST", "")
+    lmsa_jwt_raw  = args.lmsa_jwt      or os.environ.get("LMSA_JWT", "")
 
-    if lmsa_wust or lmsa_email:
+    if lmsa_jwt_raw:
+        # Direct JWT injection from HAR/proxy capture: GUID:JWT_TOKEN
+        try:
+            from web_crawler.auth.lmsa import LMSASession
+            if ":" not in lmsa_jwt_raw:
+                raise ValueError(
+                    "--lmsa-jwt value must contain ':' separator "
+                    "(format: GUID:JWT_TOKEN)"
+                )
+            sep = lmsa_jwt_raw.index(":")
+            jwt_guid = lmsa_jwt_raw[:sep]
+            jwt_token = lmsa_jwt_raw[sep + 1:]
+            lmsa_session = LMSASession.from_jwt(
+                jwt=jwt_token, guid=jwt_guid, verify_ssl=args.verify_ssl
+            )
+            log.info(
+                "[LMSA] ✓ Session initialised from injected JWT "
+                "(GUID: %s…)", jwt_guid[:8]
+            )
+        except (ValueError, Exception) as exc:
+            log.warning(
+                "[LMSA] --lmsa-jwt parse error (expected GUID:JWT format): %s",
+                exc,
+            )
+
+    elif lmsa_wust or lmsa_email:
         try:
             from web_crawler.auth.lenovo_id import LenovoIDAuth
             auth_client = LenovoIDAuth(verify_ssl=args.verify_ssl)
@@ -244,6 +285,45 @@ def main() -> None:
         except Exception as exc:
             log.warning("[LMSA] Auth error (continuing without auth): %s", exc)
 
+    # ------------------------------------------------------------------ #
+    # LMSA firmware scan (when target is rsddownload-secure.lenovo.com)
+    # ------------------------------------------------------------------ #
+    extra_seed_urls: list[str] = []
+    _LMSA_S3_HOST = "rsddownload-secure.lenovo.com"
+    if (
+        lmsa_session is not None
+        and lmsa_session.is_authenticated
+        and _LMSA_S3_HOST in target_url
+    ):
+        log.info(
+            "[LMSA] Target is LMSA S3 bucket — scanning firmware API to "
+            "discover pre-signed download URLs …"
+        )
+        try:
+            from web_crawler.auth.lmsa import _FIRMWARE_COUNTRIES
+            country_filter = getattr(args, "lmsa_country", "")
+            if country_filter:
+                scan_countries = (country_filter,)
+                log.info("[LMSA] Firmware scan limited to country: %s", country_filter)
+            else:
+                scan_countries = _FIRMWARE_COUNTRIES
+            resources = lmsa_session.scan_all_firmware(countries=scan_countries)
+            url_pairs  = lmsa_session.collect_download_urls(resources)
+            log.info(
+                "[LMSA] Firmware scan found %d unique download URLs (%d resources)",
+                len(url_pairs), len(resources),
+            )
+            # Write discovered URLs to a manifest file for reference.
+            manifest_path = output_dir / "lmsa_firmware_urls.txt"
+            with manifest_path.open("w", encoding="utf-8") as mf:
+                for dl_url, dl_name in url_pairs:
+                    mf.write(f"{dl_url}\t{dl_name}\n")
+            log.info("[LMSA] Firmware URL manifest saved: %s", manifest_path)
+            # Collect pre-signed URLs as seeds for the crawler.
+            extra_seed_urls = [u for u, _ in url_pairs]
+        except Exception as exc:
+            log.warning("[LMSA] Firmware scan failed (continuing): %s", exc)
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -262,6 +342,7 @@ def main() -> None:
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
         lmsa_session=lmsa_session,
+        extra_seed_urls=extra_seed_urls,
     )
 
     t0 = time.monotonic()

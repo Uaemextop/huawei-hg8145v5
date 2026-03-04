@@ -32,6 +32,7 @@ Security notes
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import uuid as _uuid
 
@@ -46,6 +47,7 @@ import requests
 from web_crawler.auth.lmsa import (
     LMSASession,
     LMSA_BASE_URL,
+    CLIENT_VERSION,
     _BASE_HEADERS,
     _CODE_OK,
     _log,
@@ -139,6 +141,21 @@ def _find_wust(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _hash_password(password: str) -> str:
+    """Hash a Lenovo ID password for form submission.
+
+    Confirmed from ``login.98d3f3bb25a8.js`` on passport.lenovo.com:
+
+        CryptoJS.MD5(CryptoJS.MD5(a).toString().toUpperCase())
+                     .toString().toUpperCase()
+
+    i.e. double MD5 with the intermediate result upper-cased before the
+    second hash, and the final result upper-cased as well.
+    """
+    inner = hashlib.md5(password.encode("utf-8")).hexdigest().upper()
+    return hashlib.md5(inner.encode("utf-8")).hexdigest().upper()
+
+
 # ---------------------------------------------------------------------------
 # LenovoIDAuth
 # ---------------------------------------------------------------------------
@@ -206,9 +223,9 @@ class LenovoIDAuth:
             hdrs = dict(_BASE_HEADERS)
             hdrs["guid"] = guid
             body = {
-                "client":      {"version": "7.4.3.4"},
-                "language":    "es-ES",
-                "windowsInfo": "Windows 10, 64bit",
+                "client":      {"version": CLIENT_VERSION},
+                "language":    "en-US",
+                "windowsInfo": "Microsoft Windows 11 Pro, x64-based PC",
                 "dparams":     {"key": "TIP_URL"},
             }
             r = requests.post(
@@ -494,7 +511,7 @@ class LenovoIDAuth:
         # Ensure callback URL is always correct.
         form_fields["lenovoid.cb"] = _LMSA_CB_URL
         form_fields["username"] = email
-        form_fields["password"] = password
+        form_fields["password"] = _hash_password(password)
 
         post_url = urljoin(PASSPORT_BASE, _USERLOGIN_PATH)
         _log(f"[LenovoID] Submitting credentials: {post_url}")
@@ -599,10 +616,10 @@ class LenovoIDAuth:
         url = f"{self._lmsa_base}/user/lenovoIdLogin.jhtml"
 
         body = {
-            "client":      {"version": "7.4.3.4"},
+            "client":      {"version": CLIENT_VERSION},
             "dparams":     {"wust": wust, "guid": guid},
             "language":    "en-US",
-            "windowsInfo": "Windows 10, 64bit",
+            "windowsInfo": "Microsoft Windows 11 Pro, x64-based PC",
         }
         # author: false in C# source — do NOT send guid request header
         hdrs = dict(_BASE_HEADERS)

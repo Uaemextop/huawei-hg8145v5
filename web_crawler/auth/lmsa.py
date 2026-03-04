@@ -1,7 +1,8 @@
 """
 LMSA (Lenovo Moto Smart Assistant) authentication and firmware-download client.
 
-Reverse-engineered from LMSA 7.4.3.4 .NET assemblies:
+Reverse-engineered from LMSA .NET assemblies and confirmed against live HAR
+traffic capture (HTTPToolkit, 2026-03-03):
   - Software Fix.exe
   - lenovo.mbg.service.common.webservices.dll
   - lenovo.mbg.service.framework.download.dll
@@ -9,30 +10,36 @@ Reverse-engineered from LMSA 7.4.3.4 .NET assemblies:
 
 Authentication flow
 -------------------
-1. GET  /common/rsa.jhtml          → RSA public key (XML, 216-char modulus)
-2. POST /client/initToken.jhtml    → JWT token (Authorization header)
-   Body: RequestModel with RSA-encrypted GUID in dparams.guid
-3. POST /rescueDevice/getNewResource.jhtml  → firmware metadata + download URL
-4. GET  <download_url>             → signed CloudFront URL on
-                                     rsddownload-secure.lenovo.com
+1. POST /user/lenovoIdLogin.jhtml (WUST + GUID, author: false)
+      → JWT token in ``Authorization`` response header when ``Guid`` header
+        matches the request GUID.  Token rotates on every subsequent call.
+2. POST /rescueDevice/getResource.jhtml  → firmware metadata + pre-signed S3 URL
+3. GET  <pre-signed S3 URL>              → firmware binary on
+                                           rsddownload-secure.lenovo.com
 
-Configuration extracted from ``Software Fix.exe.config``:
+Configuration confirmed from HAR traffic (LMSA 7.5.4.2):
 
     BASE_URL        = "https://lsa.lenovo.com"
-    CLIENT_VERSION  = "7.4.3.4"
-    AES_KEY         = "jdkei3ffkjijut46#$%6y7U8km4p<mdT"
-    AES_IV          = "52,*u^yhNjk<./O0"
+    CLIENT_VERSION  = "7.5.4.2"
+    AES_KEY         = "jdkei3ffkjijut46#$%6y7U8km4p<mdT"  (from exe.config)
+    AES_IV          = "52,*u^yhNjk<./O0"                   (from exe.config)
     DEFAULT_PASSWORD= "OSD"
 
-HTTP headers from ``WebApiHttpRequest.cs``:
+HTTP headers confirmed from HAR (replaces earlier decompile analysis):
 
-    User-Agent    : Mozilla/5.0 (Windows NT 6.3; WOW64) ...
+    User-Agent    : Mozilla/5.0 (Windows NT 6.3; WOW64) ...Chrome/51...
     Content-Type  : application/json
-    Cache-Control : no-cache
+    Cache-Control : no-store,no-cache
+    Pragma        : no-cache
     Request-Tag   : lmsa
-    Connection    : close      (KeepAlive = false per source)
-    guid          : <UUID>     (authenticated requests)
-    Authorization : Bearer <JWT>
+    clientVersion : 7.5.4.2          (separate header, also in body)
+    guid          : <UUID>            (authenticated requests)
+    Authorization : Bearer <JWT>      (rotates per response)
+    Connection    : Close             (KeepAlive = false per source)
+
+Note: ``ConnectionField`` and ``Accept`` headers are NOT sent by the actual
+LMSA app (confirmed by HAR — they were present in older decompile analysis
+but absent from all live authenticated traffic).
 """
 
 from __future__ import annotations
@@ -67,8 +74,9 @@ except ImportError:  # pragma: no cover
 #: Confirmed live by curl: /Interface/common/rsa.jhtml → 200, code 0000.
 LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
 
-#: LMSA desktop application version (``ClientInfo.cs``).
-CLIENT_VERSION = "7.4.3.4"
+#: LMSA desktop application version.
+#: Confirmed from live HAR traffic capture (LMSA 7.5.4.2, 2026-03-03).
+CLIENT_VERSION = "7.5.4.2"
 
 # AES-128-CBC parameters from ``Software Fix.exe.config``.
 AES_KEY: bytes = b"jdkei3ffkjijut46#$%6y7U8km4p<mdT"[:16]   # first 16 bytes → AES-128
@@ -98,27 +106,46 @@ _EP_INIT_TOKEN       = "/client/initToken.jhtml"
 _EP_DELETE_TOKEN     = "/client/deleteToken.jhtml"
 _EP_RENEW_LINK       = "/client/renewFileLink.jhtml"
 _EP_GET_RESOURCE     = "/rescueDevice/getNewResource.jhtml"
+_EP_GET_MODEL_NAMES  = "/rescueDevice/getModelNames.jhtml"
+_EP_GET_RESOURCE_V2  = "/rescueDevice/getResource.jhtml"
 _EP_ROM_LIST         = "/priv/getRomList.jhtml"
 _EP_ROM_MATCH_PARAMS = "/rescueDevice/getRomMatchParams.jhtml"
 
+# All categories and regions known to be used by LMSA (from HAR + decompile).
+_FIRMWARE_CATEGORIES = ("Phone",)
+_FIRMWARE_COUNTRIES  = (
+    "Mexico", "US", "Brazil", "Argentina", "Colombia", "Chile",
+    "Peru", "Ecuador", "Guatemala", "Paraguay", "Dominican Republic",
+    "India", "Germany", "UK", "France", "Italy", "Spain", "Australia",
+    "Canada", "Japan", "China",
+)
+
+# Maximum recursion depth for _resolve_resource() paramProperty chains.
+# The deepest observed chain is 3 steps (simCount → country → resolved).
+_MAX_RESOLVE_DEPTH = 4
+
 # ---------------------------------------------------------------------------
-# HTTP headers from ``WebApiHttpRequest.cs``
+# HTTP headers confirmed from live HAR traffic capture (LMSA 7.5.4.2)
 # ---------------------------------------------------------------------------
 _BASE_HEADERS: dict[str, str] = {
     "User-Agent": (
-        # Confirmed from WebApiHttpRequest.cs line 433 in LMSA 7.4.3.4 source:
+        # Confirmed from WebApiHttpRequest.cs and HAR traffic:
         # httpWebRequest.UserAgent = "Mozilla/5.0 (Windows NT 6.3; WOW64) ...Chrome/51..."
         "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36"
     ),
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "Cache-Control": "no-cache",
-    "Request-Tag": "lmsa",
-    "Connection": "close",      # KeepAlive = false in source
-    # From Software Fix.exe.config → <add key="ConnectionField" value="PLJoR50KSVLIIiQC"/>
-    # Required by initToken and other authenticated endpoints.
-    "ConnectionField": "PLJoR50KSVLIIiQC",
+    "Content-Type":  "application/json",
+    # Confirmed from HAR: "Cache-Control: no-store,no-cache" (not just no-cache)
+    "Cache-Control": "no-store,no-cache",
+    # Confirmed from HAR: Pragma header is always present
+    "Pragma":        "no-cache",
+    "Request-Tag":   "lmsa",
+    # Confirmed from HAR: clientVersion is sent as a separate request header
+    # in addition to being in the request body's client.version field.
+    "clientVersion": CLIENT_VERSION,
+    "Connection":    "Close",   # KeepAlive = false in source; HAR shows "Close"
+    # Note: "ConnectionField" and "Accept" headers are NOT sent by the actual
+    # LMSA app — confirmed absent in all HAR-captured authenticated requests.
 }
 
 # Standard API response code for success.
@@ -228,7 +255,7 @@ class LMSASession:
         base_url: str = LMSA_BASE_URL,
         guid: Optional[str] = None,
         language: str = "en-US",
-        windows_info: str = "Windows 10, 64bit",
+        windows_info: str = "Microsoft Windows 11 Pro, x64-based PC",
         verify_ssl: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -243,6 +270,48 @@ class LMSASession:
         self._session = requests.Session()
         self._session.headers.update(_BASE_HEADERS)
         self._session.verify = verify_ssl
+
+    @classmethod
+    def from_jwt(
+        cls,
+        jwt: str,
+        guid: str,
+        base_url: str = LMSA_BASE_URL,
+        verify_ssl: bool = True,
+    ) -> "LMSASession":
+        """Create an already-authenticated session from a known JWT and GUID.
+
+        Use this when you have captured a live token from a HAR / proxy
+        capture and want to skip the OAuth login step entirely.
+
+        Parameters
+        ----------
+        jwt:
+            The ``Authorization`` header value (without the ``Bearer `` prefix)
+            from a recent LMSA API response.  The token is valid for the
+            current session GUID and rotates on every API call.
+        guid:
+            The device GUID that was used to obtain *jwt*.  Must match what
+            the server has on record; using a different GUID yields 403.
+        base_url:
+            Override the production API base URL.
+        verify_ssl:
+            Pass ``False`` to disable TLS certificate verification.
+
+        Example::
+
+            # Extracted from HTTPToolkit HAR capture:
+            session = LMSASession.from_jwt(
+                jwt="Ek6TINIruEV6jLTn…",
+                guid="98e2895b-2e0a-4830-b5fe-eab0ab2c3f84",
+            )
+        """
+        sess = cls(base_url=base_url, guid=guid, verify_ssl=verify_ssl)
+        # Strip "Bearer " prefix if present so we store only the raw token.
+        sess._jwt_token = jwt.removeprefix("Bearer ").strip()
+        sess._session.headers["Authorization"] = f"Bearer {sess._jwt_token}"
+        sess._session.headers["guid"] = guid
+        return sess
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -547,6 +616,177 @@ class LMSASession:
             return None
         result = data.get("data")
         return result if isinstance(result, str) else None
+
+    def get_model_names(
+        self, country: str = "Mexico", category: str = "Phone"
+    ) -> list[dict[str, Any]]:
+        """Return the list of supported device models for *country*.
+
+        Corresponds to ``rescueDevice/getModelNames.jhtml`` — confirmed from
+        HAR: ``dparams: {country, category}`` → ``content.models``.
+        """
+        data = self._post(
+            _EP_GET_MODEL_NAMES,
+            {"country": country, "category": category},
+        )
+        if data is None or data.get("code") != _CODE_OK:
+            return []
+        content = data.get("content") or {}
+        models = content.get("models") if isinstance(content, dict) else []
+        return models if isinstance(models, list) else []
+
+    def get_resource(
+        self, model_name: str, market_name: str, **extra_params: str
+    ) -> list[dict[str, Any]]:
+        """Return firmware resources for a specific device model.
+
+        Calls ``rescueDevice/getResource.jhtml``.  The API may respond with
+        a list of items that have ``paramProperty`` (requiring additional
+        params) or fully-resolved items with ``romResource`` / ``toolResource``
+        pre-signed S3 URLs.  Extra key=value pairs (e.g. ``simCount``,
+        ``country``) can be passed as keyword arguments.
+        """
+        params: dict[str, Any] = {
+            "modelName":  model_name,
+            "marketName": market_name,
+        }
+        params.update(extra_params)
+        data = self._post(_EP_GET_RESOURCE_V2, params)
+        if data is None or data.get("code") != _CODE_OK:
+            return []
+        content = data.get("content")
+        if isinstance(content, list):
+            return content
+        return []
+
+    def _resolve_resource(
+        self,
+        model_name: str,
+        market_name: str,
+        depth: int = 0,
+        **params: str,
+    ) -> list[dict[str, Any]]:
+        """Recursively resolve paramProperty selections until we get S3 URLs."""
+        if depth > _MAX_RESOLVE_DEPTH:  # guard against infinite loops
+            return []
+        items = self.get_resource(model_name, market_name, **params)
+        resolved = []
+        for item in items:
+            if item.get("romResource") or item.get("toolResource") or item.get("flashFlow"):
+                # Fully resolved — has download URLs
+                resolved.append(item)
+            elif item.get("paramProperty") and item.get("paramValues"):
+                # Need to pick one param value — use first available
+                prop = item["paramProperty"].get("property", "")
+                values = item["paramValues"]
+                if prop and values:
+                    for val in values:
+                        sub = self._resolve_resource(
+                            model_name, market_name,
+                            depth=depth + 1,
+                            **params,
+                            **{prop: val},
+                        )
+                        resolved.extend(sub)
+        return resolved
+
+    def scan_all_firmware(
+        self,
+        countries: tuple[str, ...] = _FIRMWARE_COUNTRIES,
+        categories: tuple[str, ...] = _FIRMWARE_CATEGORIES,
+    ) -> list[dict[str, Any]]:
+        """Scan the LMSA API for all available firmware download URLs.
+
+        Iterates over every supported model in every requested country and
+        resolves any multi-step ``paramProperty`` selections until S3
+        pre-signed URLs are available.
+
+        Returns a flat list of resolved resource dicts, each containing at
+        minimum one of ``romResource``, ``toolResource``, or ``flashFlow``.
+        Each resource dict is augmented with ``_country`` and ``_category``
+        keys for traceability.
+
+        This method makes many authenticated API calls — expect it to take
+        several minutes for a full scan (281+ models × 20+ countries).
+        Use ``countries=("Mexico",)`` for a fast single-region scan.
+        """
+        seen_models: set[str] = set()
+        all_resources: list[dict[str, Any]] = []
+
+        for country in countries:
+            for category in categories:
+                models = self.get_model_names(country=country, category=category)
+                _log(
+                    f"[LMSA] {country}/{category}: {len(models)} models"
+                )
+                for m in models:
+                    model_name  = m.get("modelName", "")
+                    market_name = m.get("marketName", "")
+                    key = f"{model_name}|{country}"
+                    if key in seen_models or not model_name:
+                        continue
+                    seen_models.add(key)
+
+                    items = self._resolve_resource(
+                        model_name, market_name, country=country
+                    )
+                    for item in items:
+                        item["_country"]  = country
+                        item["_category"] = category
+                    all_resources.extend(items)
+                    if items:
+                        _log(
+                            f"[LMSA]   {model_name} ({market_name}): "
+                            f"{len(items)} resource(s)"
+                        )
+
+        _log(
+            f"[LMSA] scan_all_firmware complete: "
+            f"{len(all_resources)} total resources, "
+            f"{len(seen_models)} unique (model, country) pairs"
+        )
+        return all_resources
+
+    def collect_download_urls(
+        self,
+        resources: list[dict[str, Any]],
+    ) -> list[tuple[str, str]]:
+        """Extract all pre-signed S3 download URLs from *resources*.
+
+        Returns a list of ``(url, filename)`` tuples for every
+        ``romResource``, ``toolResource``, ``flashFlow``, ``otaResource``, and
+        ``countryCodeResource`` found in the list returned by
+        :meth:`scan_all_firmware`.
+        """
+        urls: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(url_val: Any, default_name: str) -> None:
+            if not url_val or not isinstance(url_val, str):
+                return
+            # Normalise protocol-relative or scheme-less URLs.
+            if url_val.startswith("//"):
+                url_val = "https:" + url_val
+            elif not url_val.startswith(("http://", "https://")):
+                url_val = "https://" + url_val
+            # Strip query string for dedup (different signed tokens, same file)
+            base = url_val.split("?")[0]
+            if base in seen:
+                return
+            seen.add(base)
+            name = base.rstrip("/").rsplit("/", 1)[-1] or default_name
+            urls.append((url_val, name))
+
+        for item in resources:
+            model = item.get("modelName") or item.get("_model", "unknown")
+            for res_key in ("romResource", "toolResource", "otaResource",
+                            "countryCodeResource"):
+                res = item.get(res_key)
+                if isinstance(res, dict):
+                    _add(res.get("uri"), res.get("name") or f"{model}_{res_key}")
+            _add(item.get("flashFlow"), f"{model}_flashFlow.json")
+
+        return urls
 
     def logout(self) -> bool:
         """Invalidate the current session token on the server."""

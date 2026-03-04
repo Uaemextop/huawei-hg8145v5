@@ -137,6 +137,7 @@ class Crawler:
         allow_external: bool = True,
         skip_media_files: bool = False,
         lmsa_session: "Optional[LMSASession]" = None,
+        extra_seed_urls: list[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -169,6 +170,10 @@ class Crawler:
         if lmsa_session is not None and lmsa_session.is_authenticated:
             lmsa_session.inject_into_requests_session(self.session, parsed.netloc)
             log.info("[LMSA] Auth headers injected into crawler session")
+
+        # Pre-seeded URLs added before crawl starts (e.g. LMSA firmware scan).
+        self._extra_seed_urls: list[str] = list(extra_seed_urls or [])
+
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
@@ -263,6 +268,15 @@ class Crawler:
 
         # Seed the queue
         self._enqueue(self.start_url, 0)
+
+        # Add extra seed URLs from LMSA firmware scan (pre-signed S3 URLs).
+        if self._extra_seed_urls:
+            log.info(
+                "[LMSA] Seeding crawler with %d firmware download URLs",
+                len(self._extra_seed_urls),
+            )
+            for seed_url in self._extra_seed_urls:
+                self._enqueue(seed_url, 0, priority=True)
 
         log.info("Crawl started. Dynamic discovery begins.")
 
