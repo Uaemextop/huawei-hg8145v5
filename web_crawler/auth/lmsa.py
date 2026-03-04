@@ -1152,7 +1152,8 @@ class LMSASession:
             with self._reauth_lock:
                 self._reauth_in_progress = False
 
-
+    @property
+    def is_authenticated(self) -> bool:
         """``True`` after a successful :meth:`authenticate` call."""
         return bool(self._jwt_token)
 
