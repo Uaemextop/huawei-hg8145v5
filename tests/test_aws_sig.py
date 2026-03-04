@@ -352,5 +352,230 @@ class TestAws4AlgorithmConstant(unittest.TestCase):
         self.assertEqual(AWS4_ALGORITHM, "AWS4-HMAC-SHA256")
 
 
+# ---------------------------------------------------------------------------
+# Second reference URL — JSON config file (same credential scope, new path)
+# ---------------------------------------------------------------------------
+# https://rsddownload-secure.lenovo.com/
+#   Rescue_MTK_Lamu_FastbootConnect_V1_DAUpdate_DriverPrompt_20260112.json
+#   ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+#   &X-Amz-Date=20260304T032129Z
+#   &X-Amz-SignedHeaders=host
+#   &X-Amz-Expires=604800
+#   &X-Amz-Credential=AKIAS37TSJMJUUCJCY4T%2F20260304%2Fus-east-1%2Fs3%2Faws4_request
+#   &X-Amz-Signature=08544f3db0b47996b3332387a6001d78f543218d7021b4a8f7f57b178ea398ff
+_JSON_URL = (
+    "https://rsddownload-secure.lenovo.com"
+    "/Rescue_MTK_Lamu_FastbootConnect_V1_DAUpdate_DriverPrompt_20260112.json"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Date=20260304T032129Z"
+    "&X-Amz-SignedHeaders=host"
+    "&X-Amz-Expires=604800"
+    "&X-Amz-Credential=AKIAS37TSJMJUUCJCY4T%2F20260304%2Fus-east-1%2Fs3%2Faws4_request"
+    "&X-Amz-Signature=08544f3db0b47996b3332387a6001d78f543218d7021b4a8f7f57b178ea398ff"
+)
+
+
+class TestParseJsonPresignedUrl(unittest.TestCase):
+    """parse_presigned_s3_url() correctly parses the JSON config URL."""
+
+    def setUp(self):
+        self.parsed = parse_presigned_s3_url(_JSON_URL)
+
+    def test_returns_dict_for_valid_url(self):
+        self.assertIsNotNone(self.parsed)
+        self.assertIsInstance(self.parsed, dict)
+
+    def test_is_presigned_detected(self):
+        self.assertTrue(is_presigned_s3_url(_JSON_URL))
+
+    def test_algorithm(self):
+        self.assertEqual(self.parsed["algorithm"], "AWS4-HMAC-SHA256")
+
+    def test_host(self):
+        self.assertEqual(self.parsed["host"], "rsddownload-secure.lenovo.com")
+
+    def test_path(self):
+        self.assertEqual(
+            self.parsed["path"],
+            "/Rescue_MTK_Lamu_FastbootConnect_V1_DAUpdate_DriverPrompt_20260112.json",
+        )
+
+    def test_date(self):
+        self.assertEqual(self.parsed["date"], "20260304T032129Z")
+
+    def test_date_short(self):
+        self.assertEqual(self.parsed["date_short"], "20260304")
+
+    def test_access_key_id(self):
+        self.assertEqual(self.parsed["access_key_id"], "AKIAS37TSJMJUUCJCY4T")
+
+    def test_region(self):
+        self.assertEqual(self.parsed["region"], "us-east-1")
+
+    def test_service(self):
+        self.assertEqual(self.parsed["service"], "s3")
+
+    def test_credential_scope(self):
+        self.assertEqual(
+            self.parsed["credential_scope"],
+            "20260304/us-east-1/s3/aws4_request",
+        )
+
+    def test_expires(self):
+        self.assertEqual(self.parsed["expires"], 604800)
+
+    def test_signature(self):
+        self.assertEqual(
+            self.parsed["signature"],
+            "08544f3db0b47996b3332387a6001d78f543218d7021b4a8f7f57b178ea398ff",
+        )
+
+    def test_security_token_none(self):
+        self.assertIsNone(self.parsed["security_token"])
+
+
+class TestJsonUrlCanonicalRequest(unittest.TestCase):
+    """presigned_canonical_request() is correct for the JSON URL."""
+
+    def setUp(self):
+        self.parsed = parse_presigned_s3_url(_JSON_URL)
+        self.cr = presigned_canonical_request(self.parsed)
+
+    def test_starts_with_get(self):
+        self.assertTrue(self.cr.startswith("GET\n"))
+
+    def test_contains_json_path(self):
+        self.assertIn(
+            "/Rescue_MTK_Lamu_FastbootConnect_V1_DAUpdate_DriverPrompt_20260112.json",
+            self.cr,
+        )
+
+    def test_contains_host_header(self):
+        self.assertIn("host:rsddownload-secure.lenovo.com", self.cr)
+
+    def test_ends_with_unsigned_payload(self):
+        self.assertTrue(self.cr.endswith("UNSIGNED-PAYLOAD"))
+
+    def test_excludes_signature_param(self):
+        lines = self.cr.split("\n")
+        self.assertNotIn("X-Amz-Signature", lines[2])
+
+    def test_query_string_sorted(self):
+        lines = self.cr.split("\n")
+        keys = [p.split("=", 1)[0] for p in lines[2].split("&")]
+        self.assertEqual(keys, sorted(keys))
+
+
+class TestSameCredentialDifferentPath(unittest.TestCase):
+    """Two URLs that share a credential scope but differ only in path must
+    produce different canonical requests, different strings-to-sign, and
+    therefore different signatures — even when signed with the same key.
+
+    This is the core property that makes pre-signed URLs object-specific:
+    the signature binds to the exact S3 object key (path).
+    """
+
+    def setUp(self):
+        self.parsed_zip  = parse_presigned_s3_url(_PRESIGNED_URL)
+        self.parsed_json = parse_presigned_s3_url(_JSON_URL)
+
+    # ------------------------------------------------------------------
+    # Shared credential components
+    # ------------------------------------------------------------------
+
+    def test_same_access_key_id(self):
+        self.assertEqual(
+            self.parsed_zip["access_key_id"],
+            self.parsed_json["access_key_id"],
+        )
+
+    def test_same_credential_scope(self):
+        self.assertEqual(
+            self.parsed_zip["credential_scope"],
+            self.parsed_json["credential_scope"],
+        )
+
+    def test_same_date(self):
+        self.assertEqual(self.parsed_zip["date"], self.parsed_json["date"])
+
+    def test_same_region(self):
+        self.assertEqual(self.parsed_zip["region"], self.parsed_json["region"])
+
+    def test_same_service(self):
+        self.assertEqual(self.parsed_zip["service"], self.parsed_json["service"])
+
+    def test_same_host(self):
+        self.assertEqual(self.parsed_zip["host"], self.parsed_json["host"])
+
+    def test_same_expires(self):
+        self.assertEqual(self.parsed_zip["expires"], self.parsed_json["expires"])
+
+    # ------------------------------------------------------------------
+    # Path-specific differences
+    # ------------------------------------------------------------------
+
+    def test_different_paths(self):
+        self.assertNotEqual(self.parsed_zip["path"], self.parsed_json["path"])
+
+    def test_different_signatures(self):
+        """Captured signatures must differ because the paths differ."""
+        self.assertNotEqual(
+            self.parsed_zip["signature"],
+            self.parsed_json["signature"],
+        )
+
+    def test_different_canonical_requests(self):
+        """Canonical requests differ because they embed the object path."""
+        cr_zip  = presigned_canonical_request(self.parsed_zip)
+        cr_json = presigned_canonical_request(self.parsed_json)
+        self.assertNotEqual(cr_zip, cr_json)
+
+    def test_different_strings_to_sign(self):
+        """Strings-to-sign differ because they hash the canonical request."""
+        cr_zip  = presigned_canonical_request(self.parsed_zip)
+        cr_json = presigned_canonical_request(self.parsed_json)
+        sts_zip  = presigned_string_to_sign(self.parsed_zip,  cr_zip)
+        sts_json = presigned_string_to_sign(self.parsed_json, cr_json)
+        self.assertNotEqual(sts_zip, sts_json)
+
+    def test_same_signing_key_different_signatures(self):
+        """With an identical signing key the two paths still yield unique sigs.
+
+        This round-trip uses a synthetic secret key.  The same
+        ``compute_signing_key()`` call (same date/region/service) produces
+        one shared signing key, yet ``compute_presigned_signature()`` returns
+        a different hex value for each URL because the string-to-sign differs.
+        """
+        secret = "synthetic_test_secret_key"
+        sig_zip  = compute_presigned_signature(secret, self.parsed_zip)
+        sig_json = compute_presigned_signature(secret, self.parsed_json)
+
+        # Both must be well-formed 64-char hex strings …
+        self.assertRegex(sig_zip,  r"^[0-9a-f]{64}$")
+        self.assertRegex(sig_json, r"^[0-9a-f]{64}$")
+
+        # … but they must differ because the paths differ.
+        self.assertNotEqual(sig_zip, sig_json)
+
+    def test_same_signing_key_derived_for_both(self):
+        """compute_signing_key() returns the identical key for both URLs
+        because the credential scope (date, region, service) is shared.
+        """
+        secret = "synthetic_test_secret_key"
+        key_zip  = compute_signing_key(
+            secret,
+            self.parsed_zip["date_short"],
+            self.parsed_zip["region"],
+            self.parsed_zip["service"],
+        )
+        key_json = compute_signing_key(
+            secret,
+            self.parsed_json["date_short"],
+            self.parsed_json["region"],
+            self.parsed_json["service"],
+        )
+        self.assertEqual(key_zip, key_json)
+
+
 if __name__ == "__main__":
     unittest.main()
