@@ -107,9 +107,9 @@ on:
         type: string
       lmsa_country:
         description: >
-          Limit LMSA firmware scan to one country (e.g. Mexico, US, Brazil).
-          Leave empty to scan ALL built-in regions (~20 countries).
-          Only applies when URL is rsddownload-secure.lenovo.com.
+          Limit LMSA firmware scan to specific countries (comma-separated, e.g.
+          "Mexico,China,US,Brazil"). Leave empty to scan ALL built-in regions
+          (~20 countries). Only applies when URL is rsddownload-secure.lenovo.com.
         required: false
         default: ""
         type: string

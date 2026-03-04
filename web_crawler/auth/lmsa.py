@@ -702,7 +702,9 @@ class LMSASession:
         items = self.get_resource(model_name, market_name, **params)
         resolved = []
         for item in items:
-            if item.get("romResource") or item.get("toolResource") or item.get("flashFlow"):
+            if (item.get("romResource") or item.get("toolResource")
+                    or item.get("flashFlow") or item.get("otaResource")
+                    or item.get("countryCodeResource")):
                 # Fully resolved — has download URLs
                 resolved.append(item)
             elif item.get("paramProperty") and item.get("paramValues"):
@@ -914,6 +916,65 @@ class LMSASession:
             _add(item.get("flashFlow"), f"{model}_flashFlow.json")
 
         return urls
+
+    def collect_download_urls_by_type(
+        self,
+        resources: list[dict[str, Any]],
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Categorise download URLs by resource type.
+
+        Returns a dict with keys:
+
+        ``rom``
+            ROM firmware files (``romResource``, ``otaResource``,
+            ``countryCodeResource``, and ``getRomList`` entries with ``type=0``).
+        ``tool``
+            Flash-tool archives (``toolResource`` and ``getRomList`` entries
+            with ``type=1``).
+        ``other``
+            Flash-flow JSON URLs and any unclassified entries.
+
+        All URLs are globally deduplicated across categories (base URL without
+        query string is used as the dedup key, same as
+        :meth:`collect_download_urls`).
+        """
+        categories: dict[str, list[tuple[str, str]]] = {
+            "rom": [], "tool": [], "other": []
+        }
+        seen: set[str] = set()
+
+        def _add(url_val: Any, default_name: str, category: str) -> None:
+            if not url_val or not isinstance(url_val, str):
+                return
+            if url_val.startswith("//"):
+                url_val = "https:" + url_val
+            elif not url_val.startswith(("http://", "https://")):
+                url_val = "https://" + url_val
+            base = url_val.split("?")[0]
+            if base in seen:
+                return
+            seen.add(base)
+            name = base.rstrip("/").rsplit("/", 1)[-1] or default_name
+            categories[category].append((url_val, name))
+
+        for item in resources:
+            # Raw getRomList catalogue entries — type=1 means tool, else ROM.
+            if item.get("_rom_uri"):
+                cat = "tool" if item.get("_rom_type") == 1 else "rom"
+                _add(item["_rom_uri"], item.get("_rom_name") or "unknown.zip", cat)
+                continue
+            # Resolved getResource entries.
+            model = item.get("modelName") or item.get("_model", "unknown")
+            for res_key in ("romResource", "otaResource", "countryCodeResource"):
+                res = item.get(res_key)
+                if isinstance(res, dict):
+                    _add(res.get("uri"), res.get("name") or f"{model}_{res_key}", "rom")
+            res = item.get("toolResource")
+            if isinstance(res, dict):
+                _add(res.get("uri"), res.get("name") or f"{model}_toolResource", "tool")
+            _add(item.get("flashFlow"), f"{model}_flashFlow.json", "other")
+
+        return categories
 
     def get_plugin_urls(self) -> list[tuple[str, str]]:
         """Return download URLs for LMSA-related tool downloads.
