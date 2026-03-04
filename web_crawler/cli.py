@@ -313,6 +313,12 @@ def main() -> None:
                 "[LMSA] Firmware scan found %d unique download URLs (%d resources)",
                 len(url_pairs), len(resources),
             )
+            # Also collect plugin/toolbox URLs.
+            plugin_pairs = lmsa_session.get_plugin_urls()
+            if plugin_pairs:
+                log.info("[LMSA] Plugin/tool URLs: %d", len(plugin_pairs))
+                url_pairs = url_pairs + plugin_pairs
+
             # Write discovered URLs to a manifest file for reference.
             manifest_path = output_dir / "lmsa_firmware_urls.txt"
             with manifest_path.open("w", encoding="utf-8") as mf:

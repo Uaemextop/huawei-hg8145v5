@@ -99,20 +99,27 @@ DOWNLOAD_USER_AGENT = (
 )
 
 # ---------------------------------------------------------------------------
-# Endpoint paths (from ``WebApiUrl.cs``)
+# Endpoint paths (from ``WebApiUrl.cs`` and ``WebServicesContext.cs``, both
+# confirmed against live HAR and decompiled LMSA 7.5.4.2 assemblies)
 # ---------------------------------------------------------------------------
-_EP_RSA_KEY          = "/common/rsa.jhtml"
-_EP_INIT_TOKEN       = "/client/initToken.jhtml"
-_EP_DELETE_TOKEN     = "/client/deleteToken.jhtml"
-_EP_RENEW_LINK       = "/client/renewFileLink.jhtml"
-_EP_GET_RESOURCE     = "/rescueDevice/getNewResource.jhtml"
-_EP_GET_MODEL_NAMES  = "/rescueDevice/getModelNames.jhtml"
-_EP_GET_RESOURCE_V2  = "/rescueDevice/getResource.jhtml"
-_EP_ROM_LIST         = "/priv/getRomList.jhtml"
-_EP_ROM_MATCH_PARAMS = "/rescueDevice/getRomMatchParams.jhtml"
+_EP_RSA_KEY             = "/common/rsa.jhtml"
+_EP_INIT_TOKEN          = "/client/initToken.jhtml"
+_EP_DELETE_TOKEN        = "/client/deleteToken.jhtml"
+_EP_RENEW_LINK          = "/client/renewFileLink.jhtml"
+_EP_GET_RESOURCE        = "/rescueDevice/getNewResource.jhtml"   # auto-match by hw params
+_EP_GET_RESOURCE_BY_IMEI= "/rescueDevice/getNewResourceByImei.jhtml"
+_EP_GET_RESOURCE_BY_SN  = "/rescueDevice/getNewResourceBySN.jhtml"
+_EP_GET_MODEL_NAMES     = "/rescueDevice/getModelNames.jhtml"    # all models
+_EP_GET_MARKET_NAMES    = "/rescueDevice/getRescueModelNames.jhtml"  # rescue-only
+_EP_GET_RESOURCE_V2     = "/rescueDevice/getResource.jhtml"      # manual match
+_EP_GET_RECIPE          = "/rescueDevice/getRescueModelRecipe.jhtml"
+_EP_ROM_LIST            = "/priv/getRomList.jhtml"               # full ROM catalogue
+_EP_ROM_MATCH_PARAMS    = "/rescueDevice/getRomMatchParams.jhtml"
 
 # All categories and regions known to be used by LMSA (from HAR + decompile).
-_FIRMWARE_CATEGORIES = ("Phone",)
+# getModelNames returns both Phone and Tablet. Each response also contains a
+# ``moreModels`` list with additional/legacy models.
+_FIRMWARE_CATEGORIES = ("Phone", "Tablet")
 _FIRMWARE_COUNTRIES  = (
     "Mexico", "US", "Brazil", "Argentina", "Colombia", "Chile",
     "Peru", "Ecuador", "Guatemala", "Paraguay", "Dominican Republic",
@@ -123,6 +130,12 @@ _FIRMWARE_COUNTRIES  = (
 # Maximum recursion depth for _resolve_resource() paramProperty chains.
 # The deepest observed chain is 3 steps (simCount → country → resolved).
 _MAX_RESOLVE_DEPTH = 4
+
+# Hosts whose firmware URLs are publicly accessible (no presigning needed).
+# Confirmed by live HEAD request: HTTP 200 without any auth headers.
+_PUBLIC_FIRMWARE_HOSTS = frozenset({
+    "download.lenovo.com",
+})
 
 # ---------------------------------------------------------------------------
 # HTTP headers confirmed from live HAR traffic capture (LMSA 7.5.4.2)
@@ -624,6 +637,10 @@ class LMSASession:
 
         Corresponds to ``rescueDevice/getModelNames.jhtml`` — confirmed from
         HAR: ``dparams: {country, category}`` → ``content.models``.
+
+        The API response also contains a ``moreModels`` key with additional
+        legacy/regional models not shown in the main list.  Both lists are
+        combined and deduplicated by ``modelName``.
         """
         data = self._post(
             _EP_GET_MODEL_NAMES,
@@ -632,8 +649,18 @@ class LMSASession:
         if data is None or data.get("code") != _CODE_OK:
             return []
         content = data.get("content") or {}
-        models = content.get("models") if isinstance(content, dict) else []
-        return models if isinstance(models, list) else []
+        if not isinstance(content, dict):
+            return []
+        models: list[dict[str, Any]] = list(content.get("models") or [])
+        more:   list[dict[str, Any]] = list(content.get("moreModels") or [])
+        # Combine and deduplicate by modelName, preserving main-list priority.
+        seen: set[str] = {m.get("modelName", "") for m in models}
+        for m in more:
+            name = m.get("modelName", "")
+            if name and name not in seen:
+                seen.add(name)
+                models.append(m)
+        return models
 
     def get_resource(
         self, model_name: str, market_name: str, **extra_params: str
@@ -690,6 +717,52 @@ class LMSASession:
                         resolved.extend(sub)
         return resolved
 
+    def get_all_roms(self) -> list[dict[str, Any]]:
+        """Return the complete LMSA ROM catalogue via ``/priv/getRomList.jhtml``.
+
+        This endpoint returns **all** firmware files known to the LMSA service
+        in a single API call (2 299 items as of 2026-03-04), including entries
+        on multiple storage hosts:
+
+        - ``download.lenovo.com`` — **publicly accessible** (no auth needed).
+          Confirmed: HTTP 200 without any signed headers.
+        - ``rsddownload-secure.lenovo.com`` — Lenovo S3, requires AWS
+          pre-signed URL obtained via :meth:`get_resource`.  Base URLs from
+          this list return HTTP 403 without signing.
+        - ``moto-rsd-prod-secure.s3.us-east-1.amazonaws.com`` — Motorola S3,
+          requires separate Motorola API presigning (not available via LMSA).
+        - ``rsdsecure-cloud.motorola.com`` — hostname does not resolve on the
+          public internet (internal Motorola network only).
+
+        Each returned dict has at minimum:
+            ``name``  — original filename (without path)
+            ``uri``   — download URL (may lack ``https://`` scheme for some legacy entries)
+            ``type``  — 0 = ROM, 1 = Tool
+            ``md5``   — MD5 hex digest (empty string when not available)
+
+        Returns a list of normalised resource dicts with the ``uri`` field
+        always carrying a full ``https://`` URL.
+        """
+        data = self._post(_EP_ROM_LIST, {})
+        if data is None or data.get("code") != _CODE_OK:
+            _log(f"[LMSA] getRomList failed: {data}")
+            return []
+        roms = data.get("content") or []
+        if not isinstance(roms, list):
+            return []
+
+        # Normalise scheme-less URIs (a subset of entries omit "https://")
+        normalised: list[dict[str, Any]] = []
+        for item in roms:
+            uri = item.get("uri", "") or ""
+            if uri and not uri.startswith(("http://", "https://")):
+                item = dict(item)
+                item["uri"] = "https://" + uri.lstrip("/")
+            normalised.append(item)
+
+        _log(f"[LMSA] getRomList: {len(normalised)} ROM entries")
+        return normalised
+
     def scan_all_firmware(
         self,
         countries: tuple[str, ...] = _FIRMWARE_COUNTRIES,
@@ -697,21 +770,47 @@ class LMSASession:
     ) -> list[dict[str, Any]]:
         """Scan the LMSA API for all available firmware download URLs.
 
-        Iterates over every supported model in every requested country and
-        resolves any multi-step ``paramProperty`` selections until S3
-        pre-signed URLs are available.
+        Two complementary strategies are combined:
 
-        Returns a flat list of resolved resource dicts, each containing at
-        minimum one of ``romResource``, ``toolResource``, or ``flashFlow``.
-        Each resource dict is augmented with ``_country`` and ``_category``
-        keys for traceability.
+        **1. Full ROM catalogue** (``/priv/getRomList.jhtml``):
+           Returns all ~2 299 ROM file entries in a single API call.
+           Entries on ``download.lenovo.com`` are publicly accessible and
+           included directly.  S3 entries (``rsddownload-secure.lenovo.com``,
+           Motorola S3) are included as *base* (unsigned) URLs — the crawler
+           will attempt HEAD requests and skip 403s automatically.
+
+        **2. Per-model pre-signed scan** (``/rescueDevice/getResource.jhtml``):
+           Iterates over every supported model in every requested country and
+           resolves any multi-step ``paramProperty`` selections until AWS
+           pre-signed S3 URLs are returned.  Each pre-signed URL is valid for
+           7 days (``X-Amz-Expires=604800``).
+
+        Returns a flat list of resource dicts, each containing at minimum one
+        of ``romResource``, ``toolResource``, ``flashFlow``, or a ``_rom_uri``
+        key (for raw entries from the full catalogue).  Each dict is augmented
+        with ``_country`` and ``_category`` keys for traceability.
 
         This method makes many authenticated API calls — expect it to take
         several minutes for a full scan (281+ models × 20+ countries).
         Use ``countries=("Mexico",)`` for a fast single-region scan.
         """
-        seen_models: set[str] = set()
         all_resources: list[dict[str, Any]] = []
+
+        # --- Strategy 1: full ROM catalogue ---
+        roms = self.get_all_roms()
+        for rom in roms:
+            all_resources.append({
+                "_rom_uri":    rom.get("uri", ""),
+                "_rom_name":   rom.get("name", ""),
+                "_rom_md5":    rom.get("md5", ""),
+                "_rom_type":   rom.get("type", 0),
+                "_country":    "",
+                "_category":   "",
+            })
+
+        # --- Strategy 2: per-model presigned scan ---
+        seen_models: set[str] = set()
+        presigned: list[dict[str, Any]] = []
 
         for country in countries:
             for category in categories:
@@ -733,17 +832,19 @@ class LMSASession:
                     for item in items:
                         item["_country"]  = country
                         item["_category"] = category
-                    all_resources.extend(items)
+                    presigned.extend(items)
                     if items:
                         _log(
                             f"[LMSA]   {model_name} ({market_name}): "
                             f"{len(items)} resource(s)"
                         )
 
+        all_resources.extend(presigned)
         _log(
             f"[LMSA] scan_all_firmware complete: "
-            f"{len(all_resources)} total resources, "
-            f"{len(seen_models)} unique (model, country) pairs"
+            f"{len(roms)} catalogue entries + "
+            f"{len(presigned)} presigned resources "
+            f"({len(seen_models)} unique model/country pairs)"
         )
         return all_resources
 
@@ -757,6 +858,9 @@ class LMSASession:
         ``romResource``, ``toolResource``, ``flashFlow``, ``otaResource``, and
         ``countryCodeResource`` found in the list returned by
         :meth:`scan_all_firmware`.
+
+        Engineering / debug builds are included — callers can identify them by
+        filename patterns such as ``_userdebug_``, ``_eng_``, ``_test-keys``.
         """
         urls: list[tuple[str, str]] = []
         seen: set[str] = set()
@@ -778,6 +882,11 @@ class LMSASession:
             urls.append((url_val, name))
 
         for item in resources:
+            # Raw getRomList catalogue entries use _rom_uri/_rom_name.
+            if item.get("_rom_uri"):
+                _add(item["_rom_uri"], item.get("_rom_name") or "unknown.zip")
+                continue
+            # Resolved getResource entries have structured resource sub-dicts.
             model = item.get("modelName") or item.get("_model", "unknown")
             for res_key in ("romResource", "toolResource", "otaResource",
                             "countryCodeResource"):
@@ -785,6 +894,61 @@ class LMSASession:
                 if isinstance(res, dict):
                     _add(res.get("uri"), res.get("name") or f"{model}_{res_key}")
             _add(item.get("flashFlow"), f"{model}_flashFlow.json")
+
+        return urls
+
+    def get_plugin_urls(self) -> list[tuple[str, str]]:
+        """Return download URLs for LMSA-related tool downloads.
+
+        Gathers downloadable URLs from two sources:
+
+        1. ``/client/getPluginCategoryList.jhtml`` — plugin category metadata.
+           Only ``iconUrl`` fields with a recognisable ``download.lenovo.com``
+           prefix are used; ``assemblyPath`` values are local DLL/EXE names,
+           not network URLs, and are skipped.
+
+        2. Known static tool URLs confirmed to return HTTP 200 without auth:
+           - ``https://download.lenovo.com/lsa/ma.apk`` — Moto Assistant APK
+           - Tool ZIPs referenced by model firmware resources are already
+             included via :meth:`collect_download_urls`; duplicates are
+             deduped automatically by the caller.
+
+        Returns ``(url, name)`` pairs with valid ``https://`` URLs only.
+        """
+        urls: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(raw: str, default_name: str = "") -> None:
+            """Normalise and add *raw* URL if it is a real HTTPS URL."""
+            if not raw:
+                return
+            if raw.startswith("//"):
+                raw = "https:" + raw
+            elif not raw.startswith(("http://", "https://")):
+                # Local paths like "lenovo.mbg.service.lmsa.toolbox.exe" — skip
+                if "." in raw and "/" not in raw:
+                    return
+                raw = "https://" + raw
+            # Skip obvious junk/non-download hosts
+            host = raw.split("/")[2] if raw.startswith("http") else ""
+            if host in {"www.baidu.com", ""}:
+                return
+            base = raw.split("?")[0]
+            if base in seen:
+                return
+            seen.add(base)
+            name = base.rstrip("/").rsplit("/", 1)[-1] or default_name
+            if name:
+                urls.append((raw, name))
+
+        # 1. Plugin category list — icon images only (real download.lenovo.com)
+        data = self._post("/client/getPluginCategoryList.jhtml", {"country": "US"})
+        if data and data.get("code") == _CODE_OK:
+            for p in (data.get("content") or []):
+                _add(p.get("iconUrl", ""), p.get("categoryName", "plugin"))
+
+        # 2. Static known-public tool URLs (confirmed HTTP 200, no auth)
+        _add("https://download.lenovo.com/lsa/ma.apk", "ma.apk")
 
         return urls
 
