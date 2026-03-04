@@ -131,6 +131,9 @@ _FIRMWARE_COUNTRIES  = (
 # The deepest observed chain is 3 steps (simCount → country → resolved).
 _MAX_RESOLVE_DEPTH = 4
 
+# How often to emit an INFO-level progress heartbeat during scan_all_firmware.
+_SCAN_HEARTBEAT_INTERVAL = 10
+
 # Hosts whose firmware URLs are publicly accessible (no presigning needed).
 # Confirmed by live HEAD request: HTTP 200 without any auth headers.
 _PUBLIC_FIRMWARE_HOSTS = frozenset({
@@ -404,7 +407,7 @@ class LMSASession:
         auth_hdr = resp.headers.get("Authorization", "")
         if guid_hdr == self.guid and auth_hdr and auth_hdr != self._jwt_token:
             self._jwt_token = auth_hdr
-            _log(f"[LMSA] JWT token updated from {endpoint} response")
+            _log_debug(f"[LMSA] JWT token updated from {endpoint} response")
 
         if resp.status_code != 200:
             _log(f"[LMSA] POST {endpoint} → HTTP {resp.status_code}: {resp.text[:200]}")
@@ -811,12 +814,14 @@ class LMSASession:
         # --- Strategy 2: per-model presigned scan ---
         seen_models: set[str] = set()
         presigned: list[dict[str, Any]] = []
+        scanned_count = 0  # counts newly-scanned model/country pairs
 
         for country in countries:
             for category in categories:
                 models = self.get_model_names(country=country, category=category)
+                n_models = len(models)
                 _log(
-                    f"[LMSA] {country}/{category}: {len(models)} models"
+                    f"[LMSA] {country}/{category}: {n_models} models"
                 )
                 for m in models:
                     model_name  = m.get("modelName", "")
@@ -825,6 +830,19 @@ class LMSASession:
                     if key in seen_models or not model_name:
                         continue
                     seen_models.add(key)
+                    scanned_count += 1
+
+                    _log_debug(
+                        f"[LMSA]   Scanning {model_name} ({market_name}) "
+                        f"[{scanned_count} scanned so far]"
+                    )
+                    # Emit a periodic INFO heartbeat so the scan is visibly
+                    # progressing even without --debug.
+                    if scanned_count % _SCAN_HEARTBEAT_INTERVAL == 0:
+                        _log(
+                            f"[LMSA]   … {scanned_count} models scanned "
+                            f"({len(presigned)} resource(s) found so far)"
+                        )
 
                     items = self._resolve_resource(
                         model_name, market_name, country=country
@@ -1052,3 +1070,12 @@ def _log(msg: str) -> None:
         log.info(msg)
     except Exception:
         print(msg)
+
+
+def _log_debug(msg: str) -> None:
+    # Debug messages are best-effort; silent failure is acceptable.
+    try:
+        from web_crawler.utils.log import log
+        log.debug(msg)
+    except Exception:
+        pass
