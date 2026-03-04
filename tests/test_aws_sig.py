@@ -15,6 +15,10 @@ The reference URL from the LMSA firmware download service is::
 import hashlib
 import hmac
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import requests
 
 from web_crawler.auth.aws_sig import (
     AWS4_ALGORITHM,
@@ -692,6 +696,190 @@ class TestPrintAnalysis(unittest.TestCase):
         """604800 s = 168h 0m should appear in the output."""
         out = self._capture(_PRESIGNED_URL)
         self.assertIn("168h", out)
+
+
+# ---------------------------------------------------------------------------
+# download_file() and sig_tool CLI tests
+# ---------------------------------------------------------------------------
+
+class TestDownloadFile(unittest.TestCase):
+    """download_file() streams content to disk and returns the saved path."""
+
+    def _make_response(self, content: bytes, content_length: bool = True):
+        """Build a minimal mock streaming response."""
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        if content_length:
+            resp.headers = {"Content-Length": str(len(content))}
+        else:
+            resp.headers = {}
+        resp.iter_content = MagicMock(return_value=iter([content]))
+        return resp
+
+    def test_file_saved_with_correct_name(self):
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from web_crawler.auth.sig_tool import download_file
+
+        content = b"FAKE_FIRMWARE_DATA"
+        resp = self._make_response(content, content_length=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess_mock = MagicMock()
+            sess_mock.get.return_value = resp
+            with patch("web_crawler.auth.sig_tool.requests.Session",
+                       return_value=sess_mock):
+                saved = download_file(_PRESIGNED_URL, Path(tmp))
+
+        self.assertEqual(
+            saved.name,
+            "LamuC_FlashTool_Console_LMSA_5.2404.03_release.zip",
+        )
+
+    def test_file_content_written_correctly(self):
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from web_crawler.auth.sig_tool import download_file
+
+        content = b"FAKE_FIRMWARE_DATA_XYZ"
+        resp = self._make_response(content, content_length=False)
+
+        tmp_dir = tempfile.mkdtemp()
+        sess_mock = MagicMock()
+        sess_mock.get.return_value = resp
+        with patch("web_crawler.auth.sig_tool.requests.Session",
+                   return_value=sess_mock):
+            saved = download_file(_PRESIGNED_URL, Path(tmp_dir))
+
+        self.assertEqual(saved.read_bytes(), content)
+
+    def test_uses_lmsa_download_user_agent(self):
+        import tempfile
+        from unittest.mock import patch, MagicMock, call
+        from web_crawler.auth.sig_tool import download_file
+        from web_crawler.auth.lmsa import DOWNLOAD_USER_AGENT
+
+        content = b"data"
+        resp = self._make_response(content, content_length=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess_mock = MagicMock()
+            sess_mock.get.return_value = resp
+            with patch("web_crawler.auth.sig_tool.requests.Session",
+                       return_value=sess_mock):
+                download_file(_PRESIGNED_URL, Path(tmp))
+
+        self.assertEqual(sess_mock.headers.__setitem__.call_args,
+                         call("User-Agent", DOWNLOAD_USER_AGENT))
+
+    def test_http_error_propagates(self):
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from web_crawler.auth.sig_tool import download_file
+
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError(
+            response=MagicMock(status_code=403)
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess_mock = MagicMock()
+            sess_mock.get.return_value = resp
+            with patch("web_crawler.auth.sig_tool.requests.Session",
+                       return_value=sess_mock):
+                with self.assertRaises(requests.HTTPError):
+                    download_file(_PRESIGNED_URL, Path(tmp))
+
+    def test_output_dir_created_if_missing(self):
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from web_crawler.auth.sig_tool import download_file
+
+        content = b"data"
+        resp = self._make_response(content, content_length=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            new_dir = Path(tmp) / "deep" / "nested"
+            self.assertFalse(new_dir.exists())
+            sess_mock = MagicMock()
+            sess_mock.get.return_value = resp
+            with patch("web_crawler.auth.sig_tool.requests.Session",
+                       return_value=sess_mock):
+                download_file(_PRESIGNED_URL, new_dir)
+            self.assertTrue(new_dir.exists())
+
+
+class TestSigToolCli(unittest.TestCase):
+    """sig_tool.main() correctly drives analyze + download."""
+
+    def test_no_args_returns_error(self):
+        from web_crawler.auth.sig_tool import main
+        rc = main([])
+        self.assertEqual(rc, 1)
+
+    def test_no_download_flag_skips_download(self):
+        """--no-download must not call download_file."""
+        import io
+        from unittest.mock import patch
+        from web_crawler.auth.sig_tool import main
+
+        with patch("web_crawler.auth.sig_tool.download_file") as dl_mock:
+            with patch("sys.stdout", new_callable=io.StringIO):
+                rc = main([_PRESIGNED_URL, "--no-download"])
+        dl_mock.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_download_called_for_presigned_url(self):
+        """download_file must be called exactly once for a pre-signed URL."""
+        import io
+        import tempfile
+        from unittest.mock import patch, MagicMock
+        from web_crawler.auth.sig_tool import main
+
+        mock_path = MagicMock()
+        mock_path.name = "firmware.zip"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("web_crawler.auth.sig_tool.download_file",
+                       return_value=mock_path) as dl_mock:
+                with patch("sys.stdout", new_callable=io.StringIO):
+                    rc = main([_PRESIGNED_URL, "--output-dir", tmp])
+
+        dl_mock.assert_called_once()
+        self.assertEqual(rc, 0)
+
+    def test_unsigned_url_returns_nonzero_without_download(self):
+        """An unsigned URL (missing X-Amz params) must return rc=1."""
+        import io
+        from unittest.mock import patch
+        from web_crawler.auth.sig_tool import main
+
+        with patch("web_crawler.auth.sig_tool.download_file") as dl_mock:
+            with patch("sys.stdout", new_callable=io.StringIO):
+                rc = main([_UNSIGNED_URL])
+        dl_mock.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    def test_http_error_returns_nonzero(self):
+        """HTTP 403 during download must return rc=1."""
+        import io
+        import tempfile
+        from unittest.mock import patch
+        from web_crawler.auth.sig_tool import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "web_crawler.auth.sig_tool.download_file",
+                side_effect=requests.HTTPError(
+                    response=MagicMock(status_code=403)
+                ),
+            ):
+                with patch("sys.stdout", new_callable=io.StringIO):
+                    rc = main([_PRESIGNED_URL, "--output-dir", tmp])
+
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":
