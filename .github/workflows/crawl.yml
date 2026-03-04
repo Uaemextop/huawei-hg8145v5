@@ -316,7 +316,7 @@ jobs:
           EOF
           git add -A
           git commit -m "Initial commit – crawl starting"
-          git push -u origin main
+          git -c lfs.locksverify=false push -u origin main
 
           echo "repo_ready=true" >> "$GITHUB_OUTPUT"
           echo "repo_full=${OWNER}/${REPO_NAME}" >> "$GITHUB_OUTPUT"
@@ -325,6 +325,7 @@ jobs:
         env:
           ONT_TOKEN:       ${{ secrets.ONT }}
           LMSA_JWT:        ${{ inputs.lmsa_jwt }}
+          LMSA_WUST:       ${{ inputs.lmsa_wust }}
           LMSA_EMAIL:      ${{ inputs.lmsa_email }}
           LMSA_PASSWORD:   ${{ inputs.lmsa_password }}
         run: |
@@ -360,8 +361,8 @@ jobs:
           # Secrets are passed via env vars to avoid leaking in logs.
           if [ -n "$LMSA_JWT" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --lmsa-jwt \"$LMSA_JWT\""
-          elif [ -n "${{ inputs.lmsa_wust }}" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --lmsa-wust '${{ inputs.lmsa_wust }}'"
+          elif [ -n "$LMSA_WUST" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --lmsa-wust \"$LMSA_WUST\""
           elif [ -n "$LMSA_EMAIL" ] && [ -n "$LMSA_PASSWORD" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --lmsa-email \"$LMSA_EMAIL\" --lmsa-password \"$LMSA_PASSWORD\""
           fi
@@ -465,7 +466,7 @@ jobs:
           fi
 
           git diff --cached --quiet || git commit -m "Crawl complete: ${{ inputs.url }}"
-          git push
+          git -c lfs.locksverify=false push
 
       - name: Zip downloaded site
         run: |
