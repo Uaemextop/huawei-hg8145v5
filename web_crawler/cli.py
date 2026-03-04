@@ -156,6 +156,16 @@ def parse_args() -> argparse.Namespace:
         help="Skip downloading media files (video/audio) but still record "
              "their URLs in video_urls.txt",
     )
+    parser.add_argument(
+        "--skip-download-exts", metavar="EXTS", default="",
+        help="Comma-separated file extensions (e.g. zip,exe,rar) for which "
+             "the actual file download is skipped.  Instead, a ready-to-run "
+             "curl command (including all auth headers) is written to "
+             "download_links.txt in the output directory.  "
+             "Use 'all' to skip downloading every binary file and only record "
+             "their links.  Pre-signed LMSA S3 URLs matching this list are "
+             "also recorded directly without queuing.",
+    )
     return parser.parse_args()
 
 
@@ -330,6 +340,20 @@ def main() -> None:
         except Exception as exc:
             log.warning("[LMSA] Firmware scan failed (continuing): %s", exc)
 
+    # Parse skip_download_exts
+    skip_dl_exts_raw = getattr(args, "skip_download_exts", "") or ""
+    if skip_dl_exts_raw.strip().lower() == "all":
+        # "all" means skip downloading every binary/archive extension
+        skip_dl_exts: frozenset[str] | None = frozenset(
+            "zip exe rar 7z bin tar gz bz2 xz iso img msi apk ipa deb rpm jar war ear".split()
+        )
+    elif skip_dl_exts_raw.strip():
+        skip_dl_exts = frozenset(
+            e.strip().lower().lstrip(".") for e in skip_dl_exts_raw.split(",") if e.strip()
+        )
+    else:
+        skip_dl_exts = None
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -347,6 +371,7 @@ def main() -> None:
         cf_clearance=args.cf_clearance,
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
+        skip_download_exts=skip_dl_exts,
         lmsa_session=lmsa_session,
         extra_seed_urls=extra_seed_urls,
     )

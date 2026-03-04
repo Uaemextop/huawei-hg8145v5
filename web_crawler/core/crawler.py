@@ -136,6 +136,7 @@ class Crawler:
         cf_clearance: str = "",
         allow_external: bool = True,
         skip_media_files: bool = False,
+        skip_download_exts: frozenset[str] | None = None,
         lmsa_session: "Optional[LMSASession]" = None,
         extra_seed_urls: list[str] | None = None,
     ) -> None:
@@ -151,6 +152,12 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.skip_media_files = skip_media_files
+        # Extensions for which we record the download link but skip the actual
+        # download.  Links are written to download_links.txt with ready-to-run
+        # curl commands including all required authentication headers.
+        self.skip_download_exts: frozenset[str] = frozenset(
+            e.lower().lstrip(".") for e in (skip_download_exts or [])
+        )
         self.download_extensions = download_extensions or frozenset()
         self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
@@ -215,6 +222,11 @@ class Crawler:
         self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
         self._saved_urls: list[str] = []
 
+        # download_links.txt – populated when skip_download_exts is set.
+        # Each line is a ready-to-run curl command with all auth headers.
+        self._download_links_path = self.output_dir / "download_links.txt"
+        self._download_links_seen: set[str] = set()
+
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._respect_robots = respect_robots
@@ -241,6 +253,11 @@ class Crawler:
             log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
         if self.skip_media_files:
             log.info("Skip media files : ON (media URLs recorded but files not saved)")
+        if self.skip_download_exts:
+            log.info(
+                "Skip download    : %s (links recorded in download_links.txt)",
+                ", ".join(sorted(self.skip_download_exts)),
+            )
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         ci_endgroup()
 
@@ -271,12 +288,23 @@ class Crawler:
 
         # Add extra seed URLs from LMSA firmware scan (pre-signed S3 URLs).
         if self._extra_seed_urls:
-            log.info(
-                "[LMSA] Seeding crawler with %d firmware download URLs",
-                len(self._extra_seed_urls),
-            )
+            # When skip_download_exts is set, record S3 URLs matching the
+            # skip list directly (without making a HEAD request) since they
+            # are pre-signed direct-download links, then only enqueue the rest.
+            skip_recorded = 0
             for seed_url in self._extra_seed_urls:
-                self._enqueue(seed_url, 0, priority=True)
+                seed_ext = urllib.parse.urlparse(seed_url).path.rsplit(".", 1)[-1].lower()
+                if self.skip_download_exts and seed_ext in self.skip_download_exts:
+                    self._record_download_link(seed_url)
+                    skip_recorded += 1
+                else:
+                    self._enqueue(seed_url, 0, priority=True)
+            enqueued = len(self._extra_seed_urls) - skip_recorded
+            log.info(
+                "[LMSA] Seeding crawler with %d firmware download URLs "
+                "(%d enqueued, %d recorded in download_links.txt)",
+                len(self._extra_seed_urls), enqueued, skip_recorded,
+            )
 
         log.info("Crawl started. Dynamic discovery begins.")
 
@@ -387,6 +415,61 @@ class Crawler:
         path_lower = urllib.parse.urlparse(url).path.lower()
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
+
+    def _record_download_link(self, url: str) -> None:
+        """Write *url* to ``download_links.txt`` as a ready-to-run curl command.
+
+        The command includes all session headers (Authorization, guid,
+        Request-Tag, etc.) so users can paste it into a terminal and download
+        the file directly.
+
+        Must be called while ``self._lock`` is held.
+        """
+        if url in self._download_links_seen:
+            return
+        self._download_links_seen.add(url)
+
+        # Build curl header flags from the current session headers.
+        header_parts: list[str] = []
+        for name, value in self.session.headers.items():
+            # Skip headers that curl adds automatically or that vary per request
+            if name.lower() in ("host", "content-length", "transfer-encoding",
+                                 "connection", "accept-encoding"):
+                continue
+            # Escape single quotes in header values
+            safe_value = value.replace("'", "'\\''")
+            header_parts.append(f"-H '{name}: {safe_value}'")
+
+        # Derive a safe output filename from the URL path
+        path = urllib.parse.urlparse(url).path
+        filename = path.rstrip("/").rsplit("/", 1)[-1] or "download"
+        # URL-decode special characters in the filename
+        filename = urllib.parse.unquote(filename)
+
+        headers_str = " \\\n  ".join(header_parts)
+        if headers_str:
+            cmd = f"curl -L -o '{filename}' \\\n  {headers_str} \\\n  '{url}'"
+        else:
+            cmd = f"curl -L -o '{filename}' '{url}'"
+
+        # Also write a wget-compatible line
+        wget_headers = " ".join(
+            f"--header='{n}: {v.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'"
+            for n, v in self.session.headers.items()
+            if n.lower() not in ("host", "content-length", "transfer-encoding",
+                                  "connection", "accept-encoding")
+        )
+        if wget_headers:
+            wget_cmd = f"wget {wget_headers} -O '{filename}' '{url}'"
+        else:
+            wget_cmd = f"wget -O '{filename}' '{url}'"
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with self._download_links_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"# {url}\n")
+            fh.write(f"{cmd}\n\n")
+            fh.write(f"# wget alternative:\n# {wget_cmd}\n\n")
+            fh.write("# ─" * 40 + "\n\n")
 
     @staticmethod
     def _merge_video_meta(
@@ -1921,6 +2004,20 @@ class Crawler:
                     self._stats["skip"] += 1
                 log.info("  [SKIP-MEDIA] %s (media file skipped)", url)
                 resp.close()
+
+            # Skip-download: record a ready-to-run curl command instead
+            url_ext = urllib.parse.urlparse(url).path.rsplit(".", 1)[-1].lower()
+            if (
+                self.skip_download_exts
+                and url_ext in self.skip_download_exts
+            ):
+                with self._lock:
+                    self._record_download_link(url)
+                    self._stats["skip"] += 1
+                log.info("  [SKIP-DOWNLOAD] %s (link recorded, not downloaded)", url)
+                resp.close()
+                time.sleep(self.delay)
+                return
                 time.sleep(self.delay)
                 return
 
@@ -2134,6 +2231,17 @@ class Crawler:
                 self._track_video_url(url)
                 self._stats["skip"] += 1
             log.info("[CDN] [SKIP-MEDIA] %s (media file skipped)", url)
+            resp.close()
+            time.sleep(self.delay)
+            return
+
+        # Skip-download: record curl command instead of downloading
+        cdn_url_ext = urllib.parse.urlparse(url).path.rsplit(".", 1)[-1].lower()
+        if self.skip_download_exts and cdn_url_ext in self.skip_download_exts:
+            with self._lock:
+                self._record_download_link(url)
+                self._stats["skip"] += 1
+            log.info("[CDN] [SKIP-DOWNLOAD] %s (link recorded, not downloaded)", url)
             resp.close()
             time.sleep(self.delay)
             return

@@ -3,19 +3,27 @@ name: Web Crawler
 on:
   workflow_dispatch:
     inputs:
+      # ── Target ────────────────────────────────────────────────────────────
       url:
-        description: "URL to crawl (e.g. https://realfirmware.net)"
+        description: "URL to crawl (e.g. https://rsddownload-secure.lenovo.com)"
         required: true
         type: string
+
+      # ── Crawl behaviour ───────────────────────────────────────────────────
       depth:
         description: "Maximum crawl depth (0 = unlimited)"
         required: false
         default: "0"
         type: string
       delay:
-        description: "Delay between requests in seconds"
+        description: "Delay between requests in seconds (e.g. 0.25)"
         required: false
         default: "0.25"
+        type: string
+      concurrency:
+        description: "Parallel download workers ('auto' = CPU/RAM-based, or a number)"
+        required: false
+        default: "auto"
         type: string
       no_robots:
         description: "Ignore robots.txt restrictions"
@@ -23,7 +31,7 @@ on:
         default: true
         type: boolean
       no_verify_ssl:
-        description: "Disable TLS certificate verification"
+        description: "Disable TLS certificate verification (recommended for LMSA)"
         required: false
         default: true
         type: boolean
@@ -32,61 +40,498 @@ on:
         required: false
         default: true
         type: boolean
-      create_repo:
-        description: "Create a new repository with the crawled site"
-        required: false
-        default: true
-        type: boolean
-      repo_owner:
-        description: "User or organization for the new repository (required if create_repo is true)"
-        required: false
-        default: "Uaemextop"
-        type: string
-      git_push_every:
-        description: "Commit and push crawled files every N saved files (0 = disabled, requires create_repo)"
-        required: false
-        default: "100"
-        type: string
-      skip_captcha:
-        description: "Skip WAF/CAPTCHA detection – save pages even if captcha signatures are found"
-        required: false
-        default: false
-        type: boolean
+
+      # ── Download & file filtering ─────────────────────────────────────────
       download_extensions:
-        description: "File extensions to actively seek (comma-separated, e.g. zip,rar,bin,7z) or 'all' to download every file type"
+        description: >
+          Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk)
+          or 'all' to download every discovered file.
         required: false
-        default: "all"
+        default: "zip,exe,rar,bin,7z,apk,jar,msi,img,iso,deb,rpm"
         type: string
-      concurrency:
-        description: "Number of parallel download workers ('auto' = detect from CPU/RAM, or a number)"
+      skip_download_exts:
+        description: >
+          Extensions to SKIP downloading (comma-separated: zip,exe,rar) or 'all' for every
+          binary. Matching files are NOT saved to disk — instead a ready-to-run curl/wget
+          command (with all auth headers) is recorded in download_links.txt.
+          Leave empty to download everything normally.
         required: false
-        default: "auto"
+        default: ""
         type: string
-      upload_extensions:
-        description: "Extensions to upload to the crawl repo (comma-separated, e.g. zip,bin,rar) or 'all' to upload every file"
-        required: false
-        default: "all"
-        type: string
-      debug:
-        description: "Enable debug mode: verbose logging and upload HTTP response headers (.headers files) to the repo"
+      skip_media_files:
+        description: "Skip downloading video/audio files but record their URLs in video_urls.txt"
         required: false
         default: false
         type: boolean
-      private_repo:
-        description: "Create the crawl repository as private (only applies when create_repo is true)"
+      skip_captcha:
+        description: "Disable WAF/CAPTCHA detection – save pages even if captcha signatures found"
         required: false
         default: false
         type: boolean
       allow_external_urls:
-        description: "Download media files (video/audio) from external CDN hosts discovered in the crawled pages"
+        description: "Download media files from external CDN hosts discovered in crawled pages"
         required: false
         default: true
         type: boolean
-      skip_media_files:
-        description: "Skip downloading media files (video/audio) but still record their URLs in video_urls.txt"
+
+      # ── LMSA / Motorola firmware authentication ───────────────────────────
+      lmsa_jwt:
+        description: >
+          Pre-obtained LMSA JWT from a HAR/proxy capture, in GUID:JWT_TOKEN format.
+          Skips Lenovo ID OAuth entirely — the captured token is used directly.
+          Obtain from HTTPToolkit/Charles by capturing the LMSA app traffic.
+          Example: 98e2895b-...:Ek6TINIruEV6...
+        required: false
+        default: ""
+        type: string
+      lmsa_email:
+        description: >
+          Lenovo ID email for automatic LMSA login (alternative to lmsa_jwt).
+          Used when lmsa_jwt is not provided.
+        required: false
+        default: ""
+        type: string
+      lmsa_password:
+        description: >
+          Lenovo ID password for automatic LMSA login (alternative to lmsa_jwt).
+          Password is double-MD5 hashed automatically before sending.
+        required: false
+        default: ""
+        type: string
+      lmsa_wust:
+        description: >
+          Pre-obtained LMSA WUST token (skips Lenovo ID OAuth, goes straight to
+          JWT exchange). Use when you have a valid WUST from a previous session.
+        required: false
+        default: ""
+        type: string
+      lmsa_country:
+        description: >
+          Limit LMSA firmware scan to one country (e.g. Mexico, US, Brazil).
+          Leave empty to scan ALL built-in regions (~20 countries).
+          Only applies when URL is rsddownload-secure.lenovo.com.
+        required: false
+        default: ""
+        type: string
+
+      # ── Cloudflare bypass ─────────────────────────────────────────────────
+      cf_clearance:
+        description: >
+          Cloudflare cf_clearance cookie from a browser session.
+          Use to bypass Cloudflare Managed Challenges.
+        required: false
+        default: ""
+        type: string
+
+      # ── Repository output ─────────────────────────────────────────────────
+      create_repo:
+        description: "Create a new GitHub repository and push crawled files there live"
+        required: false
+        default: true
+        type: boolean
+      repo_owner:
+        description: "GitHub user or org for the new repository (required when create_repo=true)"
+        required: false
+        default: "Uaemextop"
+        type: string
+      git_push_every:
+        description: "Push every N saved files to the live repo (0 = only push at end)"
+        required: false
+        default: "100"
+        type: string
+      upload_extensions:
+        description: >
+          Extensions to include in git pushes (comma-separated: zip,bin,rar) or
+          'all' to upload every file.  Use this to avoid pushing huge binaries.
+        required: false
+        default: "all"
+        type: string
+      private_repo:
+        description: "Create the crawl repository as private"
         required: false
         default: false
         type: boolean
+
+      # ── Diagnostics ───────────────────────────────────────────────────────
+      debug:
+        description: "Verbose logging + save HTTP response headers (.headers files) to repo"
+        required: false
+        default: false
+        type: boolean
+      log_file:
+        description: "Write detailed DEBUG logs to this filename (e.g. crawl.log, saved in output dir)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  crawl:
+    name: "Crawl ${{ inputs.url }}"
+    runs-on: aapt2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Optional UI enhancements (progress bar, colour logging)
+          pip install tqdm colorlog
+          # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
+          pip install curl_cffi
+          # Playwright – headless browser for OAuth/CAPTCHA flows
+          pip install playwright
+          playwright install --with-deps chromium
+          # pycryptodome – RSA/AES for LMSA token initialisation
+          pip install pycryptodome
+          # Git LFS – for large binary firmware files
+          git lfs install
+
+      - name: Generate normalized repo name
+        id: reponame
+        run: |
+          python3 -c "
+          import re, sys
+          url = sys.argv[1]
+          name = re.sub(r'^https?://', '', url)
+          name = re.sub(r'[^a-zA-Z0-9]+', '-', name)
+          name = name.strip('-').lower()[:100]
+          print(f'name={name}')
+          " "${{ inputs.url }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create repository for live progress
+        if: inputs.create_repo == true
+        id: create_repo
+        env:
+          ONT_TOKEN: ${{ secrets.ONT }}
+        run: |
+          set -euo pipefail
+
+          REPO_BASE="${{ steps.reponame.outputs.name }}"
+          OWNER="${{ inputs.repo_owner }}"
+
+          if [ -z "$OWNER" ]; then
+            RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: token $ONT_TOKEN" \
+              https://api.github.com/user)
+            HTTP_CODE=$(echo "$RESP" | tail -1)
+            BODY=$(echo "$RESP" | sed '$d')
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::Failed to get user info (HTTP $HTTP_CODE): $BODY"
+              exit 1
+            fi
+            OWNER=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])")
+          fi
+
+          echo "Target owner: $OWNER"
+
+          REPO_NAME="$REPO_BASE"
+          COPY=0
+          MAX_COPIES=50
+          while true; do
+            HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token $ONT_TOKEN" \
+              "https://api.github.com/repos/${OWNER}/${REPO_NAME}")
+            if [ "$HTTP_CODE" = "404" ]; then
+              break
+            elif [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::Unexpected response (HTTP $HTTP_CODE) checking repo ${OWNER}/${REPO_NAME}."
+              exit 1
+            fi
+            COPY=$((COPY + 1))
+            if [ "$COPY" -gt "$MAX_COPIES" ]; then
+              echo "::error::Exceeded maximum of $MAX_COPIES name attempts."
+              exit 1
+            fi
+            REPO_NAME="${REPO_BASE}-${COPY}"
+            echo "Repo exists, trying: $REPO_NAME"
+          done
+
+          echo "Creating repository: ${OWNER}/${REPO_NAME}"
+
+          RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: token $ONT_TOKEN" \
+            "https://api.github.com/users/${OWNER}")
+          HTTP_CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | sed '$d')
+          OWNER_TYPE=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('type','User'))")
+
+          if [ "$OWNER_TYPE" = "Organization" ]; then
+            API_URL="https://api.github.com/orgs/${OWNER}/repos"
+          else
+            API_URL="https://api.github.com/user/repos"
+          fi
+
+          RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+            -H "Authorization: token $ONT_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL" \
+            -d "{
+              \"name\": \"${REPO_NAME}\",
+              \"description\": \"Crawled site: ${{ inputs.url }}\",
+              \"private\": ${{ inputs.private_repo }},
+              \"auto_init\": false
+            }")
+          HTTP_CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | sed '$d')
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "::error::Failed to create repository (HTTP $HTTP_CODE): $BODY"
+            exit 1
+          fi
+          echo "✅ Repository created: ${OWNER}/${REPO_NAME}"
+
+          mkdir -p downloaded_site
+          cd downloaded_site
+          git init -b main
+          git lfs install --local
+          git config lfs.locksverify false
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
+          git remote add origin "https://x-access-token@github.com/${OWNER}/${REPO_NAME}.git"
+          git config http.postBuffer 524288000
+
+          cat > README.md <<EOF
+          # Crawl of ${{ inputs.url }}
+
+          | Setting | Value |
+          |---------|-------|
+          | Depth | ${{ inputs.depth }} |
+          | Delay | ${{ inputs.delay }}s |
+          | Download extensions | ${{ inputs.download_extensions }} |
+          | Skip download extensions | ${{ inputs.skip_download_exts || '(none – download all)' }} |
+          | Upload extensions | ${{ inputs.upload_extensions }} |
+          | Concurrency | ${{ inputs.concurrency }} workers |
+          | Skip media files | ${{ inputs.skip_media_files }} |
+          | LMSA country | ${{ inputs.lmsa_country || '(all regions)' }} |
+          | Run | #${{ github.run_number }} |
+          | Status | 🔄 Crawling in progress… |
+          EOF
+          git add -A
+          git commit -m "Initial commit – crawl starting"
+          git push -u origin main
+
+          echo "repo_ready=true" >> "$GITHUB_OUTPUT"
+          echo "repo_full=${OWNER}/${REPO_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run web crawler
+        env:
+          ONT_TOKEN:       ${{ secrets.ONT }}
+          LMSA_JWT:        ${{ inputs.lmsa_jwt }}
+          LMSA_EMAIL:      ${{ inputs.lmsa_email }}
+          LMSA_PASSWORD:   ${{ inputs.lmsa_password }}
+        run: |
+          # Re-apply git credentials if repo was created
+          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
+            cd downloaded_site
+            git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
+            cd ..
+          fi
+
+          # ── Boolean flags ───────────────────────────────────────────────
+          EXTRA_ARGS=""
+          [ "${{ inputs.no_robots }}"     = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-robots"
+          [ "${{ inputs.no_verify_ssl }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-verify-ssl"
+          [ "${{ inputs.force }}"         = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --force"
+          [ "${{ inputs.debug }}"         = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --debug"
+          [ "${{ inputs.skip_captcha }}"  = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-check-captcha"
+          [ "${{ inputs.skip_media_files }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --skip-media-files"
+          [ "${{ inputs.allow_external_urls }}" = "false" ] && EXTRA_ARGS="$EXTRA_ARGS --no-external"
+
+          # ── Optional string flags ───────────────────────────────────────
+          [ -n "${{ inputs.skip_download_exts }}" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --skip-download-exts '${{ inputs.skip_download_exts }}'"
+          [ -n "${{ inputs.upload_extensions }}" ] && \
+            [ "${{ inputs.upload_extensions }}" != "all" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --upload-extensions '${{ inputs.upload_extensions }}'"
+          [ -n "${{ inputs.cf_clearance }}" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --cf-clearance '${{ inputs.cf_clearance }}'"
+          [ -n "${{ inputs.log_file }}" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --log-file '${{ inputs.log_file }}'"
+
+          # ── LMSA auth (prefer jwt > wust > email/password) ──────────────
+          # Secrets are passed via env vars to avoid leaking in logs.
+          if [ -n "$LMSA_JWT" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --lmsa-jwt \"$LMSA_JWT\""
+          elif [ -n "${{ inputs.lmsa_wust }}" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --lmsa-wust '${{ inputs.lmsa_wust }}'"
+          elif [ -n "$LMSA_EMAIL" ] && [ -n "$LMSA_PASSWORD" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --lmsa-email \"$LMSA_EMAIL\" --lmsa-password \"$LMSA_PASSWORD\""
+          fi
+          [ -n "${{ inputs.lmsa_country }}" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --lmsa-country '${{ inputs.lmsa_country }}'"
+
+          # ── git push ────────────────────────────────────────────────────
+          GIT_PUSH_ARG=""
+          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ] && \
+             [ "${{ inputs.git_push_every }}" != "0" ]; then
+            GIT_PUSH_ARG="--git-push-every ${{ inputs.git_push_every }}"
+          fi
+
+          echo "🔍 Crawling ${{ inputs.url }}"
+          echo "   depth=${{ inputs.depth }}  delay=${{ inputs.delay }}  concurrency=${{ inputs.concurrency }}"
+          echo "   download: ${{ inputs.download_extensions }}"
+          echo "   skip-download: ${{ inputs.skip_download_exts || '(none)' }}"
+
+          eval python -m web_crawler "'${{ inputs.url }}'" \
+            --depth "'${{ inputs.depth }}'" \
+            --delay "'${{ inputs.delay }}'" \
+            --output downloaded_site \
+            --download-extensions "'${{ inputs.download_extensions }}'" \
+            --concurrency "'${{ inputs.concurrency }}'" \
+            $EXTRA_ARGS \
+            $GIT_PUSH_ARG
+
+      - name: Show download summary
+        if: always()
+        run: |
+          echo "📊 Download Summary"
+          echo "==================="
+          if [ -d downloaded_site ]; then
+            echo "Total files: $(find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' | wc -l)"
+            echo ""
+            echo "Files by extension:"
+            find downloaded_site -type f -not -path '*/\.git/*' -not -name '*.headers' \
+              | awk -F. '{if (NF>1) print $NF; else print "(no ext)"}' | sort | uniq -c | sort -rn | head -20
+            echo ""
+            if [ -f downloaded_site/download_links.txt ]; then
+              LINK_COUNT=$(grep -c '^curl ' downloaded_site/download_links.txt 2>/dev/null || echo 0)
+              echo "🔗 download_links.txt: $LINK_COUNT ready-to-run curl commands"
+            fi
+            if [ -f downloaded_site/lmsa_firmware_urls.txt ]; then
+              FW_COUNT=$(wc -l < downloaded_site/lmsa_firmware_urls.txt)
+              echo "📦 lmsa_firmware_urls.txt: $FW_COUNT firmware URLs"
+            fi
+            echo ""
+            echo "Binary/firmware files:"
+            find downloaded_site -type f -not -path '*/\.git/*' \
+              \( -name '*.zip' -o -name '*.rar' -o -name '*.bin' -o -name '*.7z' \
+                 -o -name '*.exe' -o -name '*.apk' -o -name '*.img' -o -name '*.iso' \) \
+              -exec echo "  {}" \; 2>/dev/null | head -50 || echo "  (none found)"
+          else
+            echo "No downloaded files found."
+          fi
+
+      - name: Final push of remaining files
+        if: inputs.create_repo == true && steps.create_repo.outputs.repo_ready == 'true'
+        env:
+          ONT_TOKEN: ${{ secrets.ONT }}
+        run: |
+          cd downloaded_site
+          git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$ONT_TOKEN"; }; f'
+
+          LARGE_FILES=$(find . -not -path './.git/*' -type f -size +50M 2>/dev/null)
+          if [ -n "$LARGE_FILES" ]; then
+            echo "📦 Tracking large files (>50 MB) with Git LFS:"
+            echo "$LARGE_FILES" | while IFS= read -r f; do
+              SIZE_MB=$(du -m "$f" | cut -f1)
+              echo "  ${f} (${SIZE_MB} MB)"
+              git lfs track "$f"
+            done
+            git add .gitattributes
+          fi
+
+          sed -i 's/🔄 Crawling in progress…/✅ Crawl complete/' README.md
+          git add README.md
+
+          UPLOAD_EXTS="${{ inputs.upload_extensions }}"
+          if [ "$UPLOAD_EXTS" != "all" ] && [ -n "$UPLOAD_EXTS" ]; then
+            echo "Filtering upload to extensions: $UPLOAD_EXTS"
+            IFS=',' read -ra EXT_ARRAY <<< "$UPLOAD_EXTS"
+            FIND_ARGS=()
+            for ext in "${EXT_ARRAY[@]}"; do
+              ext=$(echo "$ext" | xargs)
+              ext="${ext#.}"
+              [ ${#FIND_ARGS[@]} -gt 0 ] && FIND_ARGS+=("-o")
+              FIND_ARGS+=("-iname" "*.${ext}")
+              [ "${{ inputs.debug }}" = "true" ] && FIND_ARGS+=("-o" "-iname" "*.${ext}.headers")
+            done
+            # Always include manifest/link files
+            FIND_ARGS+=("-o" "-name" "download_links.txt" "-o" "-name" "lmsa_firmware_urls.txt")
+            find . -not -path './.git/*' \( "${FIND_ARGS[@]}" \) -exec git add {} + 2>/dev/null || true
+          else
+            if [ "${{ inputs.debug }}" = "true" ]; then
+              git add -A
+            else
+              find . -not -path './.git/*' -not -name '*.headers' -type f -exec git add {} + 2>/dev/null || true
+            fi
+          fi
+
+          git diff --cached --quiet || git commit -m "Crawl complete: ${{ inputs.url }}"
+          git push
+
+      - name: Zip downloaded site
+        run: |
+          cd downloaded_site
+          zip -r ../crawl-${{ steps.reponame.outputs.name }}.zip . -x '.git/*' -x '.git'
+
+      - name: Zip video files only
+        run: |
+          cd downloaded_site
+          find . -not -path './.git/*' -type f \( \
+            -iname '*.mp4' -o -iname '*.webm' -o -iname '*.ogv' \
+            -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.flv' \
+            -o -iname '*.mkv' -o -iname '*.wmv' -o -iname '*.m4v' \
+            -o -iname '*.3gp' -o -iname '*.3g2' -o -iname '*.ts' \
+            -o -iname '*.mpeg' -o -iname '*.mpg' -o -iname '*.f4v' \
+            -o -iname '*.asf' \) -print > /tmp/video_files.txt
+          if [ -s /tmp/video_files.txt ]; then
+            zip ../videos-${{ steps.reponame.outputs.name }}.zip -@ < /tmp/video_files.txt
+            echo "📹 Video zip created with $(wc -l < /tmp/video_files.txt) file(s)"
+          else
+            echo "📹 No video files found – skipping video zip"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "crawl-${{ steps.reponame.outputs.name }}"
+          path: downloaded_site/
+          retention-days: 90
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "crawl-${{ steps.reponame.outputs.name }}-${{ github.run_number }}"
+          name: "Crawl ${{ inputs.url }} (#${{ github.run_number }})"
+          body: |
+            ## Web Crawl Results
+
+            | Setting | Value |
+            |---------|-------|
+            | **URL** | ${{ inputs.url }} |
+            | **Depth** | ${{ inputs.depth }} |
+            | **Delay** | ${{ inputs.delay }}s |
+            | **robots.txt ignored** | ${{ inputs.no_robots }} |
+            | **SSL verification disabled** | ${{ inputs.no_verify_ssl }} |
+            | **Force re-download** | ${{ inputs.force }} |
+            | **Download extensions** | ${{ inputs.download_extensions }} |
+            | **Skip download extensions** | ${{ inputs.skip_download_exts || '(none – download all)' }} |
+            | **Upload extensions** | ${{ inputs.upload_extensions }} |
+            | **Concurrency** | ${{ inputs.concurrency }} workers |
+            | **Skip media files** | ${{ inputs.skip_media_files }} |
+            | **Skip CAPTCHA check** | ${{ inputs.skip_captcha }} |
+            | **LMSA country** | ${{ inputs.lmsa_country || '(all regions)' }} |
+            | **Debug mode** | ${{ inputs.debug }} |
+            | **Run** | #${{ github.run_number }} |
+            ${{ steps.create_repo.outputs.repo_ready == 'true' && format('| **Live repo** | https://github.com/{0} |', steps.create_repo.outputs.repo_full) || '' }}
+
+            ### Notes
+            - `download_links.txt` — ready-to-run `curl`/`wget` commands for skipped files (incl. auth headers)
+            - `lmsa_firmware_urls.txt` — full LMSA firmware URL manifest (pre-signed S3 + public CDN)
+          files: |
+            crawl-${{ steps.reponame.outputs.name }}.zip
+            videos-${{ steps.reponame.outputs.name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
 permissions:
   contents: write
