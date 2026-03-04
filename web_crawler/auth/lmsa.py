@@ -811,12 +811,14 @@ class LMSASession:
         # --- Strategy 2: per-model presigned scan ---
         seen_models: set[str] = set()
         presigned: list[dict[str, Any]] = []
+        scanned_count = 0  # counts newly-scanned model/country pairs
 
         for country in countries:
             for category in categories:
                 models = self.get_model_names(country=country, category=category)
+                n_models = len(models)
                 _log(
-                    f"[LMSA] {country}/{category}: {len(models)} models"
+                    f"[LMSA] {country}/{category}: {n_models} models"
                 )
                 for m in models:
                     model_name  = m.get("modelName", "")
@@ -825,6 +827,19 @@ class LMSASession:
                     if key in seen_models or not model_name:
                         continue
                     seen_models.add(key)
+                    scanned_count += 1
+
+                    _log_debug(
+                        f"[LMSA]   Scanning {model_name} ({market_name}) "
+                        f"[{scanned_count} scanned so far]"
+                    )
+                    # Emit a periodic INFO heartbeat so the scan is visibly
+                    # progressing even without --debug.
+                    if scanned_count % 10 == 0:
+                        _log(
+                            f"[LMSA]   … {scanned_count} models scanned "
+                            f"({len(presigned)} resource(s) found so far)"
+                        )
 
                     items = self._resolve_resource(
                         model_name, market_name, country=country
