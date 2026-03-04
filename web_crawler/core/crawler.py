@@ -29,6 +29,10 @@ import urllib.robotparser
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from web_crawler.auth.lmsa import LMSASession
 
 import requests
 
@@ -95,8 +99,9 @@ from web_crawler.config import (
 )
 from web_crawler.session import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_sg_captcha_response, random_headers,
-    solve_cf_challenge, solve_sg_captcha,
+    is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
+    is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
+    solve_sg_captcha,
 )
 from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
@@ -131,6 +136,9 @@ class Crawler:
         cf_clearance: str = "",
         allow_external: bool = True,
         skip_media_files: bool = False,
+        skip_download_exts: frozenset[str] | None = None,
+        lmsa_session: "Optional[LMSASession]" = None,
+        extra_seed_urls: list[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -144,6 +152,12 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.skip_media_files = skip_media_files
+        # Extensions for which we record the download link but skip the actual
+        # download.  Links are written to download_links.txt with ready-to-run
+        # curl commands including all required authentication headers.
+        self.skip_download_exts: frozenset[str] = frozenset(
+            e.lower().lstrip(".") for e in (skip_download_exts or [])
+        )
         self.download_extensions = download_extensions or frozenset()
         self.upload_extensions = upload_extensions or frozenset()
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
@@ -159,6 +173,14 @@ class Crawler:
         self.session = build_session(verify_ssl=verify_ssl)
         if cf_clearance:
             inject_cf_clearance(self.session, parsed.netloc, cf_clearance)
+        # Inject LMSA auth headers when an authenticated session is provided.
+        if lmsa_session is not None and lmsa_session.is_authenticated:
+            lmsa_session.inject_into_requests_session(self.session, parsed.netloc)
+            log.info("[LMSA] Auth headers injected into crawler session")
+
+        # Pre-seeded URLs added before crawl starts (e.g. LMSA firmware scan).
+        self._extra_seed_urls: list[str] = list(extra_seed_urls or [])
+
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
         self._visited: set[str] = set()
@@ -174,7 +196,8 @@ class Crawler:
         self._sg_solve_lock = threading.Lock()  # serialize concurrent CAPTCHA solves
         self._url_retries: dict[str, int] = {}  # per-URL retry count for transient errors
         self._stats = {"ok": 0, "skip": 0, "err": 0, "dup": 0,
-                       "soft404": 0, "waf": 0, "retry_ok": 0, "probe": 0}
+                       "soft404": 0, "waf": 0, "retry_ok": 0, "probe": 0,
+                       "restricted": 0}
 
         # Soft-404 detection
         self._soft404_size: int | None = None
@@ -198,6 +221,11 @@ class Crawler:
         self._video_urls: list[str] = []
         self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
         self._saved_urls: list[str] = []
+
+        # download_links.txt – populated when skip_download_exts is set.
+        # Each line is a ready-to-run curl command with all auth headers.
+        self._download_links_path = self.output_dir / "download_links.txt"
+        self._download_links_seen: set[str] = set()
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -225,6 +253,11 @@ class Crawler:
             log.info("Upload filter    : %s", ", ".join(sorted(self.upload_extensions)))
         if self.skip_media_files:
             log.info("Skip media files : ON (media URLs recorded but files not saved)")
+        if self.skip_download_exts:
+            log.info(
+                "Skip download    : %s (links recorded in download_links.txt)",
+                ", ".join(sorted(self.skip_download_exts)),
+            )
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         ci_endgroup()
 
@@ -253,6 +286,26 @@ class Crawler:
         # Seed the queue
         self._enqueue(self.start_url, 0)
 
+        # Add extra seed URLs from LMSA firmware scan (pre-signed S3 URLs).
+        if self._extra_seed_urls:
+            # When skip_download_exts is set, record S3 URLs matching the
+            # skip list directly (without making a HEAD request) since they
+            # are pre-signed direct-download links, then only enqueue the rest.
+            skip_recorded = 0
+            for seed_url in self._extra_seed_urls:
+                seed_ext = urllib.parse.urlparse(seed_url).path.rsplit(".", 1)[-1].lower()
+                if self.skip_download_exts and seed_ext in self.skip_download_exts:
+                    self._record_download_link(seed_url)
+                    skip_recorded += 1
+                else:
+                    self._enqueue(seed_url, 0, priority=True)
+            enqueued = len(self._extra_seed_urls) - skip_recorded
+            log.info(
+                "[LMSA] Seeding crawler with %d firmware download URLs "
+                "(%d enqueued, %d recorded in download_links.txt)",
+                len(self._extra_seed_urls), enqueued, skip_recorded,
+            )
+
         log.info("Crawl started. Dynamic discovery begins.")
 
         if self.concurrency > 1:
@@ -278,6 +331,7 @@ class Crawler:
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Visited     : %d URLs", len(self._visited))
         log.info("Saved (OK)  : %d  (%.1f%%)", s["ok"], pct_ok)
+        log.info("Restricted  : %d  (IP/WAF – body saved)", s["restricted"])
         log.info("Skipped     : %d", s["skip"])
         log.info("Duplicates  : %d", s["dup"])
         log.info("Soft-404    : %d", s["soft404"])
@@ -345,6 +399,7 @@ class Crawler:
         return {
             "Q": len(self._queue),
             "OK": self._stats["ok"],
+            "RESTR": self._stats["restricted"],
             "ERR": self._stats["err"],
             "SKIP": self._stats["skip"],
             "DUP": self._stats["dup"],
@@ -360,6 +415,61 @@ class Crawler:
         path_lower = urllib.parse.urlparse(url).path.lower()
         if any(path_lower.endswith(ext) for ext in _VIDEO_EXTENSIONS):
             self._video_urls.append(url)
+
+    def _record_download_link(self, url: str) -> None:
+        """Write *url* to ``download_links.txt`` as a ready-to-run curl command.
+
+        The command includes all session headers (Authorization, guid,
+        Request-Tag, etc.) so users can paste it into a terminal and download
+        the file directly.
+
+        Must be called while ``self._lock`` is held.
+        """
+        if url in self._download_links_seen:
+            return
+        self._download_links_seen.add(url)
+
+        # Build curl header flags from the current session headers.
+        header_parts: list[str] = []
+        for name, value in self.session.headers.items():
+            # Skip headers that curl adds automatically or that vary per request
+            if name.lower() in ("host", "content-length", "transfer-encoding",
+                                 "connection", "accept-encoding"):
+                continue
+            # Escape single quotes in header values
+            safe_value = value.replace("'", "'\\''")
+            header_parts.append(f"-H '{name}: {safe_value}'")
+
+        # Derive a safe output filename from the URL path
+        path = urllib.parse.urlparse(url).path
+        filename = path.rstrip("/").rsplit("/", 1)[-1] or "download"
+        # URL-decode special characters in the filename
+        filename = urllib.parse.unquote(filename)
+
+        headers_str = " \\\n  ".join(header_parts)
+        if headers_str:
+            cmd = f"curl -L -o '{filename}' \\\n  {headers_str} \\\n  '{url}'"
+        else:
+            cmd = f"curl -L -o '{filename}' '{url}'"
+
+        # Also write a wget-compatible line
+        wget_headers = " ".join(
+            f"--header='{n}: {v.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'"
+            for n, v in self.session.headers.items()
+            if n.lower() not in ("host", "content-length", "transfer-encoding",
+                                  "connection", "accept-encoding")
+        )
+        if wget_headers:
+            wget_cmd = f"wget {wget_headers} -O '{filename}' '{url}'"
+        else:
+            wget_cmd = f"wget -O '{filename}' '{url}'"
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with self._download_links_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"# {url}\n")
+            fh.write(f"{cmd}\n\n")
+            fh.write(f"# wget alternative:\n# {wget_cmd}\n\n")
+            fh.write("# ─" * 40 + "\n\n")
 
     @staticmethod
     def _merge_video_meta(
@@ -549,16 +659,64 @@ class Crawler:
     # ------------------------------------------------------------------
 
     def _load_robots(self) -> None:
-        """Parse robots.txt from the target host."""
+        """Parse robots.txt from the target host.
+
+        Uses our live session so captcha cookies are included.  Treats HTTP
+        responses as follows (per RFC 9309 §2.3.1):
+
+        * 2xx  → parse normally
+        * 404 / 410  → no restrictions (allow all)
+        * 401 / 403  → Python's ``RobotFileParser`` normally marks everything
+          as disallowed for these codes.  We override that behaviour when the
+          response body is an AWS/S3/CloudFront ``AccessDenied`` XML error,
+          which is not a real robots.txt and should be treated as "not found".
+        * Other 4xx/5xx  → treat as "not found" (allow all)
+        """
         robots_url = self.base + "/robots.txt"
+        try:
+            resp = self.session.get(robots_url, timeout=15, allow_redirects=True)
+        except Exception as exc:
+            log.debug("Could not fetch robots.txt: %s", exc)
+            return
+
+        status = resp.status_code
+
+        # 404/410 → no robots.txt file, allow everything.
+        if status in (404, 410):
+            log.debug("No robots.txt at %s (HTTP %s)", robots_url, status)
+            return
+
+        # 401/403 that look like S3/CloudFront AccessDenied XML → ignore.
+        # Python's RobotFileParser would treat these as Disallow: / which is
+        # wrong for private S3 buckets where robots.txt simply doesn't exist.
+        if status in (401, 403):
+            ct = resp.headers.get("Content-Type", "")
+            body = resp.text
+            if ("AccessDenied" in body or "application/xml" in ct
+                    or "AmazonS3" in resp.headers.get("server", "")
+                    or "cloudfront" in resp.headers.get("via", "").lower()):
+                log.debug(
+                    "robots.txt at %s returned %s with S3/CloudFront error body "
+                    "— treating as not found (allow all)",
+                    robots_url, status,
+                )
+                return
+            # Genuine 403 (not an S3 artefact) → disallow all, per RFC 9309.
+            log.debug("robots.txt at %s returned %s → disallowing all", robots_url, status)
+            self._robots = urllib.robotparser.RobotFileParser()
+            self._robots.set_url(robots_url)
+            self._robots.disallow_all = True
+            return
+
+        if status != 200:
+            log.debug("robots.txt fetch returned HTTP %s — treating as not found", status)
+            return
+
+        # HTTP 200 — parse normally.
         self._robots = urllib.robotparser.RobotFileParser()
         self._robots.set_url(robots_url)
-        try:
-            self._robots.read()
-            log.info("Loaded robots.txt from %s", robots_url)
-        except Exception as exc:
-            log.debug("Could not load robots.txt: %s", exc)
-            self._robots = None
+        self._robots.parse(resp.text.splitlines())
+        log.info("Loaded robots.txt from %s", robots_url)
 
     def _is_allowed(self, url: str) -> bool:
         """Check if the URL is allowed by robots.txt."""
@@ -1445,22 +1603,57 @@ class Crawler:
 
         local = smart_local_path(url, self.output_dir, "")
 
-        # Skip already-downloaded files
+        # Load cached HTTP headers (ETag / Last-Modified) for conditional
+        # requests so we can avoid re-downloading unchanged resources.
+        _cached_headers: dict[str, str] = {}
+        _headers_path = local.parent / (local.name + ".headers")
+        if not self.force and _headers_path.exists():
+            try:
+                _cached_headers = json.loads(
+                    _headers_path.read_text(encoding="utf-8")
+                ).get("headers", {})
+            except Exception:
+                pass
+
+        # Skip already-downloaded files (no force, file on disk).
+        # If a cached ETag or Last-Modified is available we will make a
+        # conditional request instead of a hard skip so that changed
+        # resources are refreshed.
+        _has_validators = bool(
+            _cached_headers.get("ETag") or _cached_headers.get("Last-Modified")
+        )
         if not self.force and local.exists() and local.stat().st_size > 0:
-            log.debug("[SKIP] Already on disk: %s", url)
-            self._stats["skip"] += 1
-            added = self._parse_local_file(local, url)
-            if added:
-                log.debug("  +%d new URLs from cached %s", added, local.name)
-            return
+            if not _has_validators:
+                log.debug("[SKIP] Already on disk: %s", url)
+                self._stats["skip"] += 1
+                added = self._parse_local_file(local, url)
+                if added:
+                    log.debug("  +%d new URLs from cached %s", added, local.name)
+                return
+            # Fall through to make a conditional request
 
         log.debug("[Q:%d OK:%d ERR:%d] GET %s",
                  len(self._queue), self._stats["ok"], self._stats["err"], url)
 
         # Rotate User-Agent per request (skip for curl_cffi which
-        # manages its own UA via TLS impersonation)
+        # manages its own UA via TLS impersonation).
+        # For rsddownload-secure.lenovo.com (S3 bucket), use the exact UA that
+        # the LMSA HttpDownload.OpenRequest() uses (GlobalVar.UserAgent = IE8).
         if not self._cf_bypass_done:
-            self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+            parsed_host = urllib.parse.urlparse(url).netloc.lower()
+            if "rsddownload" in parsed_host and "lenovo.com" in parsed_host:
+                from web_crawler.auth.lmsa import DOWNLOAD_USER_AGENT as _S3_UA
+                self.session.headers["User-Agent"] = _S3_UA
+            else:
+                self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+
+        # Build conditional request headers from cached ETag / Last-Modified
+        _conditional: dict[str, str] = {}
+        if _has_validators:
+            if _cached_headers.get("ETag"):
+                _conditional["If-None-Match"] = _cached_headers["ETag"]
+            if _cached_headers.get("Last-Modified"):
+                _conditional["If-Modified-Since"] = _cached_headers["Last-Modified"]
 
         # Use streaming mode for URLs that look like large binary files so we
         # don't buffer the entire response in RAM before saving to disk.
@@ -1482,6 +1675,7 @@ class Crawler:
             resp = self.session.get(
                 url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
                 stream=_use_stream,
+                headers=_conditional if _conditional else None,
             )
         except _NETWORK_ERRORS as exc:
             # Re-enqueue on transient network errors up to MAX_URL_RETRIES
@@ -1525,6 +1719,16 @@ class Crawler:
             self._visited.add(final_key)
             log.debug("  Redirect: %s → %s", url, final_url)
 
+        # Handle 304 Not Modified – cached copy is still current
+        if resp.status_code == 304:
+            log.debug("[304] Not modified – reusing cached: %s", url)
+            self._stats["skip"] += 1
+            if local.exists():
+                added = self._parse_local_file(local, url)
+                if added:
+                    log.debug("  +%d new URLs from 304 cache %s", added, local.name)
+            return
+
         # Handle 429 (rate limiting) with exponential backoff + re-enqueue
         if resp.status_code == 429:
             self._handle_rate_limit(resp, url)
@@ -1536,15 +1740,20 @@ class Crawler:
 
         # Handle 403 / 402 – retry with rotated headers + cache busting
         if resp.status_code in RETRY_STATUS_CODES:
-            # Cloudflare Managed Challenge – re-solve with Playwright
+            # Cloudflare Managed Challenge – re-solve with Playwright/curl_cffi.
+            # CF challenge pages are JS-rendered stubs with no real content;
+            # saving them is pointless, so keep the existing re-solve logic.
             if is_cf_managed_challenge(resp):
                 log.info("[CF] Challenge on %s – re-solving …", url)
                 if self._solve_cf_and_inject():
                     self._visited.discard(key)
                     self._enqueue(url, depth, priority=True)
                     return
+                # Could not bypass CF – fall through to save the CF page body
+                log.debug("  [CF] Bypass failed – saving CF page body: %s", url)
+
             # Skip expensive retries for speculative probe URLs
-            if is_probe:
+            elif is_probe:
                 self._probe_403_count += 1
                 # Track per-directory failures
                 probe_dir = self._dir_from_url(url)
@@ -1564,60 +1773,98 @@ class Crawler:
                 self._stats["probe"] += 1
                 return
 
-            log.debug("  [%d] Blocked – retrying with rotated headers: %s",
-                     resp.status_code, url)
-            retry_resp = self._retry_with_headers(url)
-            if retry_resp is not None:
-                resp = retry_resp
+            # Amazon S3 private-bucket AccessDenied — enforced at the bucket
+            # policy level.  No header trick can bypass it; skip retries and
+            # count as restricted (the XML error body is saved below).
+            elif is_s3_access_denied(resp):
+                log.info(
+                    "[S3-403] Private bucket – saving AccessDenied body: %s",
+                    url,
+                )
+                self._stats["restricted"] += 1
+                # Disable probing immediately — S3 buckets never expose
+                # hidden files at public paths; every probe URL would 403.
+                if not self._probing_disabled:
+                    self._probing_disabled = True
+                    log.info(
+                        "[S3-403] Disabling hidden-file probing "
+                        "(S3 bucket – all probe paths return 403)"
+                    )
+                # Fall through to content-saving code
+
+            # Tomcat IP-restriction: detected by a distinctive body phrase.
+            # Header rotation never helps for server-level IP whitelists, so
+            # skip retries entirely and fall through to save the HTML body
+            # (which IS real content – the Tomcat "access denied" error page).
+            elif is_tomcat_ip_restricted(resp):
+                log.info(
+                    "[TOMCAT-403] IP-restricted page – saving body: %s", url
+                )
+                self._stats["restricted"] += 1
+                # Fall through to the content-saving code below
+
             else:
-                # Only attempt SG-CAPTCHA solve when the 403 response body
-                # contains actual CAPTCHA markers.  Calling solve_sg_captcha
-                # unconditionally is wrong because it hits the CAPTCHA endpoint
-                # directly, which ALWAYS returns a challenge – causing the
-                # crawler to waste 20 s solving a useless PoW for every plain
-                # nginx 403 (e.g. woocommerce_uploads/ directory block).
-                body_text = resp.content.decode("utf-8", errors="replace")
-                if is_sg_captcha_response(resp):
-                    # Serialize to avoid concurrent PoW solves.
-                    with self._sg_solve_lock:
-                        if solve_sg_captcha(self.session, self.base,
-                                            parsed_url.path):
-                            try:
-                                retry_resp = self.session.get(
-                                    url, timeout=REQUEST_TIMEOUT,
-                                    allow_redirects=True,
-                                )
-                            except _NETWORK_ERRORS:
-                                retry_resp = None
-                            if (retry_resp is not None and retry_resp.ok
-                                    and not is_sg_captcha_response(retry_resp)):
-                                log.debug("  [SG-CAPTCHA] Solved 403 for %s",
-                                          url)
-                                resp = retry_resp
+                # Rotate headers and retry.  If the retry succeeds the new
+                # response replaces resp and processing continues normally.
+                # If all retries fail we fall through to save whatever HTML
+                # body the server returned rather than discarding it.
+                log.debug("  [%d] Blocked – retrying with rotated headers: %s",
+                         resp.status_code, url)
+                retry_resp = self._retry_with_headers(url)
+                if retry_resp is not None:
+                    resp = retry_resp
+                else:
+                    # All retries exhausted.
+                    body_text = resp.content.decode("utf-8", errors="replace")
+                    if is_sg_captcha_response(resp):
+                        # Serialize to avoid concurrent PoW solves.
+                        with self._sg_solve_lock:
+                            if solve_sg_captcha(self.session, self.base,
+                                                parsed_url.path):
+                                try:
+                                    retry_resp = self.session.get(
+                                        url, timeout=REQUEST_TIMEOUT,
+                                        allow_redirects=True,
+                                    )
+                                except _NETWORK_ERRORS:
+                                    retry_resp = None
+                                if (retry_resp is not None and retry_resp.ok
+                                        and not is_sg_captcha_response(retry_resp)):
+                                    log.debug(
+                                        "  [SG-CAPTCHA] Solved 403 for %s", url
+                                    )
+                                    resp = retry_resp
+                                else:
+                                    # CAPTCHA page is not real content – skip
+                                    self._stats["err"] += 1
+                                    return
                             else:
+                                log.warning(
+                                    "  [SG-CAPTCHA] Failed to solve for %s", url
+                                )
                                 self._stats["err"] += 1
                                 return
-                        else:
-                            log.warning("  [SG-CAPTCHA] Failed to solve for %s",
-                                        url)
-                            self._stats["err"] += 1
-                            return
-                else:
-                    # Regular WAF / nginx 403 – detect protection type and skip
-                    protections = self.detect_protection(
-                        dict(resp.headers), body_text
-                    )
-                    if protections:
-                        self._stats["waf"] += 1
-                        log.warning(
-                            "  [WAF] %s detected on %s",
-                            ", ".join(protections), url,
-                        )
                     else:
-                        log.warning("HTTP %s for %s – skipping",
-                                    resp.status_code, url)
-                    self._stats["err"] += 1
-                    return
+                        # Not a CAPTCHA.  Detect WAF type for logging, but
+                        # always fall through to save the HTML response body –
+                        # the server DID return content, even if access is
+                        # restricted.
+                        protections = self.detect_protection(
+                            dict(resp.headers), body_text
+                        )
+                        if protections:
+                            log.info(
+                                "  [WAF-%s] Saving body despite protection: %s",
+                                "+".join(protections), url,
+                            )
+                            self._stats["waf"] += 1
+                        else:
+                            log.info(
+                                "  [403] Saving body for restricted page: %s",
+                                url,
+                            )
+                        self._stats["restricted"] += 1
+                        # Fall through to content-saving code
 
         # Reset probe 403/404 streak on any successful probe response
         if is_probe and resp.ok:
@@ -1647,9 +1894,17 @@ class Crawler:
                 log.debug("  [PROBE] 404 for %s – skipping", url)
                 self._stats["probe"] += 1
                 return
-            log.warning("HTTP %s for %s – skipping", resp.status_code, url)
-            self._stats["err"] += 1
-            return
+            # For non-probe 4xx/5xx responses that have an HTML body, fall
+            # through to save the content – the response IS a page (error or
+            # access-denied), and skipping it loses information.
+            ct_check = resp.headers.get("Content-Type", "").lower()
+            if "html" not in ct_check or not resp.content:
+                log.warning("HTTP %s for %s – skipping (no HTML body)",
+                            resp.status_code, url)
+                self._stats["err"] += 1
+                return
+            log.debug("  [%s] HTML body present – saving: %s",
+                      resp.status_code, url)
 
         # SG-Captcha challenge: solve the PoW and retry the request
         # to get the real content behind the captcha.
@@ -1749,6 +2004,20 @@ class Crawler:
                     self._stats["skip"] += 1
                 log.info("  [SKIP-MEDIA] %s (media file skipped)", url)
                 resp.close()
+
+            # Skip-download: record a ready-to-run curl command instead
+            url_ext = urllib.parse.urlparse(url).path.rsplit(".", 1)[-1].lower()
+            if (
+                self.skip_download_exts
+                and url_ext in self.skip_download_exts
+            ):
+                with self._lock:
+                    self._record_download_link(url)
+                    self._stats["skip"] += 1
+                log.info("  [SKIP-DOWNLOAD] %s (link recorded, not downloaded)", url)
+                resp.close()
+                time.sleep(self.delay)
+                return
                 time.sleep(self.delay)
                 return
 
@@ -1962,6 +2231,17 @@ class Crawler:
                 self._track_video_url(url)
                 self._stats["skip"] += 1
             log.info("[CDN] [SKIP-MEDIA] %s (media file skipped)", url)
+            resp.close()
+            time.sleep(self.delay)
+            return
+
+        # Skip-download: record curl command instead of downloading
+        cdn_url_ext = urllib.parse.urlparse(url).path.rsplit(".", 1)[-1].lower()
+        if self.skip_download_exts and cdn_url_ext in self.skip_download_exts:
+            with self._lock:
+                self._record_download_link(url)
+                self._stats["skip"] += 1
+            log.info("[CDN] [SKIP-DOWNLOAD] %s (link recorded, not downloaded)", url)
             resp.close()
             time.sleep(self.delay)
             return

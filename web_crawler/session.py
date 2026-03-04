@@ -59,7 +59,7 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -103,7 +103,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
             "es-MX,es;q=0.9,en;q=0.8",
             "en-GB,en;q=0.9",
         ]),
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": random.choice(["no-cache", "no-store", "max-age=0"]),
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -257,6 +257,69 @@ def is_sg_captcha_response(resp: requests.Response) -> bool:
     if "/.well-known/captcha/" in snippet or "/.well-known/sgcaptcha/" in snippet:
         return True
     return False
+
+# ---------------------------------------------------------------------------
+# Amazon S3 / CloudFront private-bucket detection
+# ---------------------------------------------------------------------------
+
+def is_s3_access_denied(resp: requests.Response) -> bool:
+    """Return ``True`` if *resp* is an Amazon S3 ``AccessDenied`` error.
+
+    Private S3 buckets (with Block Public Access enabled) return HTTP 403
+    with ``server: AmazonS3`` and an XML body whose root element is
+    ``<Error><Code>AccessDenied</Code>…</Error>``.  This block is enforced
+    at the bucket-policy / account level and **cannot be bypassed** by any
+    HTTP header, credential, or URL trick from an external, unauthenticated
+    client.  Detecting it immediately lets the crawler skip pointless
+    header-rotation retries and record the XML response body for the archive.
+    """
+    if resp.status_code != 403:
+        return False
+    server = resp.headers.get("server", "") or resp.headers.get("Server", "")
+    if "amazons3" not in server.lower():
+        return False
+    ct = resp.headers.get("Content-Type", resp.headers.get("content-type", ""))
+    if "xml" not in ct.lower():
+        return False
+    snippet = resp.text[:512]
+    return "<Code>AccessDenied</Code>" in snippet or "AccessDenied" in snippet
+
+
+# ---------------------------------------------------------------------------
+# Apache Tomcat IP-restriction detection
+# ---------------------------------------------------------------------------
+
+# Phrases present in every Tomcat IP-restriction 403 page (docs, examples,
+# manager, host-manager).  These pages are served by Tomcat's built-in valve
+# and cannot be unlocked via header rotation or cookie injection – the server
+# only allows connections from localhost.
+_TOMCAT_IP_RESTRICTED_PHRASES = (
+    "only accessible from a browser running on the same machine as tomcat",
+    "by default the documentation web application is only accessible",
+    "by default the manager is only accessible",
+    "by default the host manager is only accessible",
+    "by default the examples web application is only accessible",
+)
+
+
+def is_tomcat_ip_restricted(resp: requests.Response) -> bool:
+    """Return ``True`` if *resp* is a Tomcat IP-restriction 403 page.
+
+    Tomcat's documentation, examples, manager, and host-manager web
+    applications are restricted to localhost by default.  The response body
+    contains a distinctive phrase that identifies this type of block, which
+    cannot be bypassed by header rotation or cookie injection from an external
+    IP.  Detecting it early lets the crawler skip pointless retries and record
+    the page body for the crawl archive.
+    """
+    if resp.status_code not in (403, 401):
+        return False
+    ct = resp.headers.get("Content-Type", "")
+    if "html" not in ct.lower():
+        return False
+    snippet = resp.text[:3000].lower()
+    return any(phrase in snippet for phrase in _TOMCAT_IP_RESTRICTED_PHRASES)
+
 
 # ---------------------------------------------------------------------------
 # Cloudflare Managed Challenge detection

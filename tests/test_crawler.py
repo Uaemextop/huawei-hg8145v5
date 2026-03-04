@@ -2321,6 +2321,346 @@ class TestSkipMediaFiles(unittest.TestCase):
         self.assertIn(".m3u8", _MEDIA_EXTENSIONS)
 
 
+
+
+# ------------------------------------------------------------------ #
+# Accept-Encoding includes Brotli
+# ------------------------------------------------------------------ #
+
+class TestAcceptEncodingBrotli(unittest.TestCase):
+    """build_session and random_headers must advertise Brotli support."""
+
+    def test_build_session_includes_brotli(self):
+        from web_crawler.session import build_session
+        session = build_session()
+        enc = session.headers.get("Accept-Encoding", "")
+        self.assertIn("br", enc)
+
+    def test_random_headers_includes_brotli(self):
+        hdrs = random_headers("https://example.com")
+        enc = hdrs.get("Accept-Encoding", "")
+        self.assertIn("br", enc)
+
+
+# ------------------------------------------------------------------ #
+# Conditional requests (ETag / Last-Modified)
+# ------------------------------------------------------------------ #
+
+class TestConditionalRequests(unittest.TestCase):
+    """Crawler sends If-None-Match / If-Modified-Since and handles 304."""
+
+    def _make_crawler(self):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_crawl_conditional"),
+                respect_robots=False,
+            )
+
+    def test_304_increments_skip_stat(self):
+        """A 304 Not Modified response should be counted as a skip."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/image.png"
+
+            # Create a fake cached file and .headers file with an ETag
+            local = Path(tmp) / "image.png"
+            local.write_bytes(b"fake image data")
+            headers_path = Path(tmp) / "image.png.headers"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {
+                        "ETag": '"abc123"',
+                        "Last-Modified": "Wed, 01 Oct 2025 07:01:28 GMT",
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            resp_304 = MagicMock()
+            resp_304.status_code = 304
+            resp_304.url = url
+            resp_304.ok = True
+
+            with patch.object(crawler.session, "get", return_value=resp_304):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertEqual(crawler._stats["skip"], 1)
+            self.assertEqual(crawler._stats["ok"], 0)
+
+    def test_etag_sent_as_if_none_match(self):
+        """When a cached ETag exists, If-None-Match header is sent."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/style.css"
+            local = Path(tmp) / "style.css"
+            local.write_bytes(b"body {}")
+            headers_path = Path(tmp) / "style.css.headers"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {"ETag": '"etag-value"'},
+                }),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_get(u, **kwargs):
+                captured["headers"] = kwargs.get("headers") or {}
+                resp = MagicMock()
+                resp.status_code = 304
+                resp.url = u
+                resp.ok = True
+                return resp
+
+            with patch.object(crawler.session, "get", side_effect=fake_get):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertIn("If-None-Match", captured["headers"])
+            self.assertEqual(captured["headers"]["If-None-Match"], '"etag-value"')
+
+    def test_last_modified_sent_as_if_modified_since(self):
+        """When a cached Last-Modified exists (no ETag), If-Modified-Since is sent."""
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/logo.png"
+            local = Path(tmp) / "logo.png"
+            local.write_bytes(b"\x89PNG")
+            headers_path = Path(tmp) / "logo.png.headers"
+            lm_value = "Wed, 01 Oct 2025 07:01:28 GMT"
+            headers_path.write_text(
+                json.dumps({
+                    "url": url,
+                    "status_code": 200,
+                    "headers": {"Last-Modified": lm_value},
+                }),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_get(u, **kwargs):
+                captured["headers"] = kwargs.get("headers") or {}
+                resp = MagicMock()
+                resp.status_code = 304
+                resp.url = u
+                resp.ok = True
+                return resp
+
+            with patch.object(crawler.session, "get", side_effect=fake_get):
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertIn("If-Modified-Since", captured["headers"])
+            self.assertEqual(captured["headers"]["If-Modified-Since"], lm_value)
+
+    def test_no_validators_skips_without_request(self):
+        """Files on disk with no ETag/Last-Modified are skipped without HTTP request."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Crawler, "_load_robots"):
+                crawler = Crawler(
+                    start_url="https://example.com",
+                    output_dir=Path(tmp),
+                    respect_robots=False,
+                )
+
+            url = "https://example.com/page.html"
+            local = Path(tmp) / "page.html"
+            local.write_text("<html></html>", encoding="utf-8")
+            # No .headers file – no validators
+
+            with patch.object(crawler.session, "get") as mock_get:
+                with patch.object(crawler, "_parse_local_file", return_value=0):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            mock_get.assert_not_called()
+            self.assertEqual(crawler._stats["skip"], 1)
+
+
+
+
+# ------------------------------------------------------------------ #
+# Tomcat IP-restriction detection and 403 body saving
+# ------------------------------------------------------------------ #
+
+class TestTomcatIPRestriction(unittest.TestCase):
+    """Crawler detects Tomcat 403s immediately and saves their HTML body."""
+
+    _TOMCAT_DOCS_403 = (
+        b"<!DOCTYPE html><html><head><title>403 Access Denied</title></head>"
+        b"<body><h1>403 Access Denied</h1>"
+        b"<p>By default the documentation web application is only accessible"
+        b" from a browser running on the same machine as Tomcat.</p></body></html>"
+    )
+    _TOMCAT_MANAGER_403 = (
+        b"<!DOCTYPE html><html><head><title>403 Access Denied</title></head>"
+        b"<body><h1>403 Access Denied</h1>"
+        b"<p>By default the Manager is only accessible from a browser running"
+        b" on the same machine as Tomcat.</p></body></html>"
+    )
+
+    def _make_403_resp(self, body: bytes, url: str = "https://example.com/docs/") -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.ok = False
+        resp.url = url
+        resp.headers = {"Content-Type": "text/html;charset=UTF-8",
+                        "Content-Length": str(len(body))}
+        resp.content = body
+        resp.text = body.decode("utf-8")
+        return resp
+
+    def _make_crawler(self, tmp: str):
+        with patch.object(Crawler, "_load_robots"):
+            return Crawler(
+                start_url="https://example.com",
+                output_dir=Path(tmp),
+                respect_robots=False,
+            )
+
+    def test_is_tomcat_ip_restricted_docs(self):
+        from web_crawler.session import is_tomcat_ip_restricted
+        resp = self._make_403_resp(self._TOMCAT_DOCS_403)
+        self.assertTrue(is_tomcat_ip_restricted(resp))
+
+    def test_is_tomcat_ip_restricted_manager(self):
+        from web_crawler.session import is_tomcat_ip_restricted
+        resp = self._make_403_resp(self._TOMCAT_MANAGER_403)
+        self.assertTrue(is_tomcat_ip_restricted(resp))
+
+    def test_is_tomcat_ip_restricted_returns_false_for_plain_403(self):
+        from web_crawler.session import is_tomcat_ip_restricted
+        resp = self._make_403_resp(b"<html><body>Access Denied</body></html>")
+        self.assertFalse(is_tomcat_ip_restricted(resp))
+
+    def test_is_tomcat_ip_restricted_returns_false_for_200(self):
+        from web_crawler.session import is_tomcat_ip_restricted
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "text/html"}
+        resp.text = "hello"
+        self.assertFalse(is_tomcat_ip_restricted(resp))
+
+    def test_tomcat_403_saved_no_retries(self):
+        """Tomcat IP-restricted page: body saved, no _retry_with_headers call."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            crawler = self._make_crawler(tmp)
+            url = "https://example.com/docs/"
+            resp_403 = self._make_403_resp(self._TOMCAT_DOCS_403, url)
+
+            with patch.object(crawler.session, "get", return_value=resp_403):
+                with patch.object(crawler, "_retry_with_headers") as mock_retry:
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            with patch("web_crawler.core.crawler.save_file"):
+                                with patch("web_crawler.core.crawler.smart_local_path",
+                                           return_value=Path(tmp) / "docs" / "index.html"):
+                                    crawler._fetch_and_process(url, 0)
+
+            # Retries must NOT be called for Tomcat IP restriction
+            mock_retry.assert_not_called()
+            self.assertEqual(crawler._stats["restricted"], 1)
+            self.assertEqual(crawler._stats["err"], 0)
+
+    def test_plain_403_html_saved_without_skip(self):
+        """Non-Tomcat plain 403 with HTML body is saved, not counted as error."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            crawler = self._make_crawler(tmp)
+            url = "https://example.com/protected/"
+            body = b"<html><head><title>Access Denied</title></head><body>Restricted</body></html>"
+            resp_403 = self._make_403_resp(body, url)
+            # retry returns None → falls through to save
+            with patch.object(crawler.session, "get", return_value=resp_403):
+                with patch.object(crawler, "_retry_with_headers", return_value=None):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            with patch("web_crawler.core.crawler.save_file"):
+                                with patch("web_crawler.core.crawler.smart_local_path",
+                                           return_value=Path(tmp) / "protected" / "index.html"):
+                                    crawler._fetch_and_process(url, 0)
+
+            self.assertEqual(crawler._stats["err"], 0)
+
+    def test_403_no_html_body_is_error(self):
+        """403 with non-HTML content type is counted as error."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            crawler = self._make_crawler(tmp)
+            url = "https://example.com/bin/secret"
+            resp = MagicMock()
+            resp.status_code = 403
+            resp.ok = False
+            resp.url = url
+            resp.headers = {"Content-Type": "application/octet-stream"}
+            resp.content = b"\x00\x01\x02"
+            resp.text = ""
+
+            with patch.object(crawler.session, "get", return_value=resp):
+                with patch.object(crawler, "_retry_with_headers", return_value=None):
+                    with patch.object(crawler, "_probe_hidden_files"):
+                        with patch.object(crawler, "_is_allowed", return_value=True):
+                            crawler._fetch_and_process(url, 0)
+
+            self.assertEqual(crawler._stats["err"], 1)
+
+    def test_restricted_stat_in_stats_dict(self):
+        """Crawler stats dict has a 'restricted' key initialised to 0."""
+        with patch.object(Crawler, "_load_robots"):
+            crawler = Crawler(
+                start_url="https://example.com",
+                output_dir=Path("/tmp/test_restricted_stat"),
+                respect_robots=False,
+            )
+        self.assertIn("restricted", crawler._stats)
+        self.assertEqual(crawler._stats["restricted"], 0)
+
+    def test_tomcat_soft404_title_keyword(self):
+        """'http status 404' is in SOFT_404_TITLE_KEYWORDS."""
+        from web_crawler.config import SOFT_404_TITLE_KEYWORDS
+        self.assertIn("http status 404", SOFT_404_TITLE_KEYWORDS)
+
+
 if __name__ == "__main__":
     unittest.main()
 
