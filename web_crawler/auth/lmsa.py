@@ -402,7 +402,7 @@ class LMSASession:
         #       WebApiContext.JWT_TOKEN = response.GetResponseHeader("Authorization");
         guid_hdr = resp.headers.get("Guid", "")
         auth_hdr = resp.headers.get("Authorization", "")
-        if guid_hdr == self.guid and auth_hdr:
+        if guid_hdr == self.guid and auth_hdr and auth_hdr != self._jwt_token:
             self._jwt_token = auth_hdr
             _log(f"[LMSA] JWT token updated from {endpoint} response")
 
