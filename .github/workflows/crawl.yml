@@ -184,8 +184,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # Optional UI enhancements (progress bar, colour logging)
-          pip install tqdm colorlog
           # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
           pip install curl_cffi
           # Playwright – headless browser for OAuth/CAPTCHA flows

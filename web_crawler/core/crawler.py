@@ -191,7 +191,17 @@ class Crawler:
         self._probe_403_count: int = 0       # consecutive 403s from probe URLs
         self._probe_404_count: int = 0       # consecutive 404s from probe URLs
         self._probe_dir_failures: dict[str, int] = {}  # per-directory probe failure count
-        self._probing_disabled: bool = False  # set when threshold is reached
+        # Pre-disable probing for known private S3 buckets — _probe_hidden_files
+        # is called before the HTTP response arrives, so without this guard the
+        # queue would be flooded with ~340 probe URLs that all return 403 before
+        # the reactive S3-AccessDenied detection can fire.
+        _is_s3_host = parsed.netloc == "rsddownload-secure.lenovo.com"
+        self._probing_disabled: bool = _is_s3_host
+        if _is_s3_host:
+            log.info(
+                "[LMSA] Probing pre-disabled for private S3 bucket (%s)",
+                parsed.netloc,
+            )
         self._sg_captcha_solves: int = 0     # how many inline captchas solved
         self._sg_solve_lock = threading.Lock()  # serialize concurrent CAPTCHA solves
         self._url_retries: dict[str, int] = {}  # per-URL retry count for transient errors
