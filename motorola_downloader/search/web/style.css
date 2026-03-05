@@ -1,0 +1,119 @@
+/* Motorola Firmware Explorer — Styles
+ * Dropbox / Google Drive inspired file explorer.
+ * Compatible with modern browsers on Windows, macOS, Linux.
+ */
+
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f7f8fa;--surface:#fff;--border:#e1e4e8;--text:#24292f;
+  --muted:#656d76;--accent:#0969da;--accent-light:#ddf4ff;
+  --accent2:#1a7f37;--accent2-light:#dafbe1;--hover:#f3f4f6;
+  --sidebar:#1b1f23;--sidebar-text:#e6edf3;--sidebar-hover:#30363d;
+  --shadow:0 1px 3px rgba(0,0,0,.08);--shadow-lg:0 4px 12px rgba(0,0,0,.12);
+  --radius:8px;--purple:#8250df;--orange:#bf5700;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+     background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+.sidebar{width:260px;background:var(--sidebar);color:var(--sidebar-text);
+         display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-header{padding:20px;border-bottom:1px solid rgba(255,255,255,.1)}
+.sidebar-header h1{font-size:1rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.sidebar-header .logo{font-size:1.4rem}
+.sidebar-nav{flex:1;overflow-y:auto;padding:12px 0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;
+          color:var(--sidebar-text);cursor:pointer;transition:.15s;font-size:.88rem}
+.nav-item:hover{background:var(--sidebar-hover)}
+.nav-item.active{background:var(--accent);color:#fff;font-weight:600}
+.nav-item .icon{width:20px;text-align:center;font-size:1rem;opacity:.8}
+.nav-item .badge{margin-left:auto;background:rgba(255,255,255,.15);
+                 padding:1px 8px;border-radius:10px;font-size:.72rem}
+.sidebar-footer{padding:16px 20px;border-top:1px solid rgba(255,255,255,.1);
+                font-size:.75rem;color:rgba(255,255,255,.4)}
+
+/* ── Main content ────────────────────────────────────────── */
+.content{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* Toolbar */
+.toolbar{display:flex;align-items:center;gap:12px;padding:16px 24px;
+         background:var(--surface);border-bottom:1px solid var(--border)}
+.search-box{flex:1;max-width:480px;position:relative}
+.search-box input{width:100%;padding:9px 12px 9px 36px;border:1px solid var(--border);
+                  border-radius:var(--radius);font-size:.88rem;background:var(--bg);
+                  color:var(--text);outline:none;transition:.2s}
+.search-box input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-light)}
+.search-box .search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);
+                         color:var(--muted);font-size:.9rem;pointer-events:none}
+.toolbar-stats{color:var(--muted);font-size:.82rem;white-space:nowrap}
+.view-toggle{display:flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.view-btn{padding:6px 12px;cursor:pointer;background:var(--surface);border:none;
+          color:var(--muted);font-size:.82rem;transition:.15s}
+.view-btn:hover{background:var(--hover)}
+.view-btn.active{background:var(--accent);color:#fff}
+
+/* Breadcrumb */
+.breadcrumb{padding:8px 24px;font-size:.82rem;color:var(--muted);
+            background:var(--surface);border-bottom:1px solid var(--border)}
+.breadcrumb span{cursor:pointer;color:var(--accent)}
+.breadcrumb span:hover{text-decoration:underline}
+
+/* File list — list view (default) */
+.file-area{flex:1;overflow-y:auto;padding:0}
+.file-table{width:100%;border-collapse:collapse}
+.file-table thead{position:sticky;top:0;z-index:2}
+.file-table th{background:var(--bg);color:var(--muted);font-weight:600;font-size:.76rem;
+               text-transform:uppercase;letter-spacing:.04em;padding:10px 16px;
+               text-align:left;border-bottom:1px solid var(--border);cursor:pointer;
+               user-select:none}
+.file-table th:hover{color:var(--text)}
+.file-table td{padding:10px 16px;border-bottom:1px solid var(--border);font-size:.86rem}
+.file-table tr:hover td{background:var(--hover)}
+.file-row{cursor:pointer}
+
+/* File icon + name */
+.file-name{display:flex;align-items:center;gap:10px;font-weight:500}
+.file-name .ficon{width:32px;height:32px;border-radius:6px;display:flex;
+                  align-items:center;justify-content:center;font-size:.8rem;
+                  font-weight:700;flex-shrink:0}
+.ficon-rom{background:var(--accent2-light);color:var(--accent2)}
+.ficon-firmware{background:var(--accent-light);color:var(--accent)}
+.ficon-tools,.ficon-flashtool{background:#f5f0ff;color:var(--purple)}
+.ficon-flashflow{background:#fff8e1;color:var(--orange)}
+.file-name a{color:var(--text);text-decoration:none}
+.file-name a:hover{color:var(--accent);text-decoration:underline}
+
+/* Badges */
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72rem;
+       font-weight:600}
+.badge-rom{background:var(--accent2-light);color:var(--accent2)}
+.badge-firmware{background:var(--accent-light);color:var(--accent)}
+.badge-tools,.badge-flashtool{background:#f5f0ff;color:var(--purple)}
+.badge-flashflow{background:#fff8e1;color:var(--orange)}
+.badge-prod{background:var(--accent2-light);color:var(--accent2)}
+.badge-test{background:#fff1e5;color:var(--orange)}
+
+/* Grid view */
+.file-grid{display:none;padding:20px 24px;gap:16px;
+           grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.file-grid.active{display:grid}
+.file-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+           padding:16px;cursor:pointer;transition:.15s;display:flex;flex-direction:column;gap:10px}
+.file-card:hover{box-shadow:var(--shadow-lg);border-color:var(--accent)}
+.card-icon{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;
+           justify-content:center;font-size:1rem;font-weight:700}
+.card-name{font-size:.84rem;font-weight:500;word-break:break-all;line-height:1.3}
+.card-name a{color:var(--text);text-decoration:none}
+.card-name a:hover{color:var(--accent)}
+.card-meta{font-size:.72rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px}
+
+/* Empty state */
+.empty{text-align:center;padding:80px 20px;color:var(--muted)}
+.empty .icon{font-size:3rem;margin-bottom:12px}
+
+@media(max-width:768px){
+  .sidebar{display:none}
+  .toolbar{flex-wrap:wrap}
+  .search-box{max-width:100%}
+  .file-table td,.file-table th{padding:8px 10px;font-size:.78rem}
+}

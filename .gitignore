@@ -5,3 +5,12 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Motorola Downloader runtime files
+logs/
+downloads/
+*.log
+*.key
+
+# Local config may contain credentials — use config.ini.example as template
+motorola_downloader/config.local.ini
