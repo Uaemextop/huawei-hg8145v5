@@ -1,0 +1,63 @@
+# Motorola Firmware Downloader Configuration
+# Copy this file to config.ini and fill in your credentials
+
+[motorola_server]
+# Motorola server base URL (HTTPS required)
+base_url = https://lsa.lenovo.com/Interface
+
+# Device GUID (UUID format) - Generate one or use existing
+# Example: 98e2895b-2e0a-4830-b5fe-eab0ab2c3f84
+guid = YOUR_GUID_HERE
+
+# JWT token (leave empty to authenticate on startup)
+jwt_token =
+
+# Refresh token (automatically updated)
+refresh_token =
+
+[download]
+# Output directory for downloaded files
+output_directory = downloads
+
+# Maximum concurrent downloads (1-5)
+max_concurrent_downloads = 3
+
+# Request timeout in seconds
+timeout = 30
+
+# Verify SSL certificates (recommended: true)
+verify_ssl = true
+
+[search]
+# Default search result limit
+default_limit = 50
+
+# Default region filter (empty for no filter)
+default_region =
+
+# Include beta versions in search results
+include_beta = false
+
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level = INFO
+
+# Log file name
+log_file = motorola_downloader.log
+
+# Log directory
+log_dir = logs
+
+# Maximum log file size in bytes (10 MB)
+max_log_size = 10485760
+
+# Number of backup log files to keep
+backup_count = 5
+
+[authentication]
+# Automatically refresh tokens before expiration
+auto_refresh = true
+
+# Refresh threshold in seconds (1 hour)
+# Token will be refreshed if it expires within this time
+refresh_threshold = 3600
