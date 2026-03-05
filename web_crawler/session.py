@@ -372,7 +372,7 @@ def solve_cf_challenge(
     Strategy:
       1. **curl_cffi** (preferred) — impersonates a real browser TLS
          fingerprint.  Tries multiple profiles (Chrome, Safari).
-      2. **Playwright** (fallback) — launches a headless Chromium
+      2. **Playwright** (fallback) — launches a headless Firefox (preferred)
          instance with a real User-Agent, hides the ``webdriver`` flag,
          and retries with rotated UAs on failure.
 
@@ -405,7 +405,7 @@ def solve_cf_challenge(
         msg = ("curl_cffi and Playwright are both unavailable. "
                "Install one of them:\n"
                "  pip install curl_cffi          (recommended)\n"
-               "  pip install playwright && playwright install chromium")
+               "  pip install playwright && playwright install chromium firefox")
         log.warning("[CF] %s", msg)
         return None
 
@@ -415,10 +415,18 @@ def solve_cf_challenge(
     log.info("[CF] Launching headless browser …")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            # Try Firefox first — different TLS fingerprint, less likely
+            # to be blocked by Cloudflare / Akamai bot detection.
+            try:
+                browser = p.firefox.launch(headless=True)
+                log.info("[CF] Using Firefox browser engine")
+            except Exception:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                log.info("[CF] Using Chromium browser engine "
+                         "(Firefox unavailable)")
             for attempt in range(1, _CF_MAX_ATTEMPTS + 1):
                 ua = ua_pool[(attempt - 1) % len(ua_pool)]
                 log.info("[CF] Attempt %d/%d  UA: %s…",

@@ -171,7 +171,7 @@ jobs:
           pip install curl_cffi
           # Playwright – headless browser for OAuth/CAPTCHA flows
           pip install playwright
-          playwright install --with-deps chromium
+          playwright install --with-deps chromium firefox
           # pycryptodome – RSA/AES for LMSA token initialisation
           pip install pycryptodome
           # Git LFS – for large binary firmware files

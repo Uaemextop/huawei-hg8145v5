@@ -126,7 +126,7 @@ class AICaptchaSolver:
             raise ImportError(
                 "Playwright is required for AI CAPTCHA solving.  "
                 "Install it with:  pip install playwright && "
-                "playwright install chromium"
+                "playwright install chromium firefox"
             )
         self._ai = ai_client
         self._headless = headless
@@ -180,10 +180,18 @@ class AICaptchaSolver:
         log.info("[AI-CAPTCHA] Opening login page: %s", url)
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=self._headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            # Try Firefox first — its TLS fingerprint is less likely to
+            # be flagged by bot-detection systems like Akamai.
+            try:
+                browser = pw.firefox.launch(headless=self._headless)
+                log.info("[AI-CAPTCHA] Using Firefox browser engine")
+            except Exception:
+                browser = pw.chromium.launch(
+                    headless=self._headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                log.info("[AI-CAPTCHA] Using Chromium browser engine "
+                         "(Firefox unavailable)")
             context = browser.new_context()
             page = context.new_page()
 
