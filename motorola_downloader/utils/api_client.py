@@ -168,6 +168,23 @@ class LMSAClient:
         self._base_url = url.rstrip("/")
         self.logger.debug("API base URL changed to %s", self._base_url)
 
+    def apply_credentials(self, guid: str, jwt_token: str) -> None:
+        """Switch the GUID and JWT used for API requests.
+
+        Call this when switching between prod and test servers that
+        require different credentials.
+
+        Args:
+            guid: Device GUID for the target server.
+            jwt_token: JWT token for the target server.
+        """
+        self._headers.set_guid(guid)
+        self._headers.set_jwt_token(jwt_token)
+        self._builder._guid = guid
+        self.logger.debug(
+            "Credentials switched: guid=%s…", guid[:8] if guid else "(empty)",
+        )
+
     # ------------------------------------------------------------------
     # Internal POST helper (matches lmsa.py _post() exactly)
     # ------------------------------------------------------------------

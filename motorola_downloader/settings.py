@@ -27,6 +27,7 @@ DEFAULT_CONFIG_PATH = "config.ini"
 
 REQUIRED_SECTIONS = [
     "motorola_server",
+    "motorola_server_test",
     "download",
     "search",
     "logging",
@@ -42,9 +43,11 @@ REQUIRED_FIELDS: Dict[str, list[str]] = {
 # These take precedence over config.ini values so that credentials
 # never need to be written to the file.
 _ENV_OVERRIDES: Dict[str, tuple[str, str]] = {
-    "MOTOROLA_GUID":  ("motorola_server", "guid"),
-    "MOTOROLA_JWT":   ("motorola_server", "jwt_token"),
-    "MOTOROLA_DEBUG": ("logging", "debug"),
+    "MOTOROLA_GUID":       ("motorola_server", "guid"),
+    "MOTOROLA_JWT":        ("motorola_server", "jwt_token"),
+    "MOTOROLA_GUID_TEST":  ("motorola_server_test", "guid_test"),
+    "MOTOROLA_JWT_TEST":   ("motorola_server_test", "jwt_token_test"),
+    "MOTOROLA_DEBUG":      ("logging", "debug"),
 }
 
 DEFAULT_VALUES: Dict[str, Dict[str, str]] = {
@@ -55,6 +58,10 @@ DEFAULT_VALUES: Dict[str, Dict[str, str]] = {
         "client_version": "7.5.4.2",
         "language": "en-US",
         "windows_info": "Microsoft Windows 11 Pro, x64-based PC",
+    },
+    "motorola_server_test": {
+        "guid_test": "00000000-0000-0000-0000-000000000000",
+        "jwt_token_test": "",
     },
     "download": {
         "output_directory": "downloads",

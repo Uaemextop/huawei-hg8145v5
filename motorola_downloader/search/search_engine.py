@@ -185,8 +185,37 @@ class SearchEngine:
         # All base URLs to query (production + test server)
         self._base_urls = LMSA_BASE_URLS
 
+        # Per-host credentials — prod and test servers use different JWT/GUID
+        self._prod_guid = settings.get("motorola_server", "guid", fallback="")
+        self._prod_jwt = settings.get("motorola_server", "jwt_token", fallback="")
+        self._test_guid = settings.get(
+            "motorola_server_test", "guid_test", fallback="",
+        )
+        self._test_jwt = settings.get(
+            "motorola_server_test", "jwt_token_test", fallback="",
+        )
+
         # Search cache: key -> (timestamp, results)
         self._cache: Dict[str, tuple[float, List[SearchResult]]] = {}
+
+    # ------------------------------------------------------------------
+    # Credential switching helper
+    # ------------------------------------------------------------------
+
+    def _switch_to_host(self, host_url: str) -> None:
+        """Switch the API client to *host_url* with matching credentials.
+
+        Production (lsa.lenovo.com) and test (lsatest.lenovo.com) servers
+        use **different** JWT+GUID pairs.  This method updates both the
+        base URL and the request headers in one call.
+        """
+        self._api.base_url = host_url
+        if "lsatest" in host_url:
+            if self._test_guid or self._test_jwt:
+                self._api.apply_credentials(self._test_guid, self._test_jwt)
+        else:
+            if self._prod_guid or self._prod_jwt:
+                self._api.apply_credentials(self._prod_guid, self._prod_jwt)
 
     def search(
         self,
@@ -580,7 +609,7 @@ class SearchEngine:
         original_base = self._api.base_url
         try:
             for host_url in self._base_urls:
-                self._api.base_url = host_url
+                self._switch_to_host(host_url)
                 host_tag = "prod" if "lsatest" not in host_url else "test"
 
                 # ── Step 1: discover models across ALL regions ────────
@@ -709,7 +738,7 @@ class SearchEngine:
                     pass
 
         finally:
-            self._api.base_url = original_base
+            self._switch_to_host(original_base)
 
         # ── Step 4: IMEI / serial number search ───────────────────────
         try:
@@ -757,7 +786,7 @@ class SearchEngine:
         original_base = self._api.base_url
         try:
             for host_url in self._base_urls:
-                self._api.base_url = host_url
+                self._switch_to_host(host_url)
                 try:
                     roms = self._api.get_all_roms()
                 except Exception:
@@ -791,7 +820,7 @@ class SearchEngine:
         except Exception as exc:
             self.logger.warning("ROM search error: %s", exc)
         finally:
-            self._api.base_url = original_base
+            self._switch_to_host(original_base)
 
         return results
 
@@ -818,7 +847,7 @@ class SearchEngine:
         original_base = self._api.base_url
         try:
             for host_url in self._base_urls:
-                self._api.base_url = host_url
+                self._switch_to_host(host_url)
                 try:
                     roms = self._api.get_all_roms()
                 except Exception:
@@ -864,7 +893,7 @@ class SearchEngine:
         except Exception as exc:
             self.logger.warning("Tools search error: %s", exc)
         finally:
-            self._api.base_url = original_base
+            self._switch_to_host(original_base)
 
         return results
 
