@@ -4,6 +4,14 @@ Handles authentication with Motorola/Lenovo servers using JWT tokens,
 including token refresh, validation, and automatic renewal. The
 authentication flow is modeled after the LMSA (Lenovo Moto Smart
 Assistant) authentication pattern observed in web_crawler/auth/lmsa.py.
+
+Key patterns from web_crawler analysis:
+  - authenticate() in lmsa.py: RSA-encrypt GUID → initToken → JWT in
+    Authorization response header (when Guid echo matches).
+  - from_jwt(): create session from captured JWT + GUID (HAR/proxy).
+  - _post(): every response rotates the JWT (server echoes Guid header
+    + new Authorization header; old token becomes invalid).
+  - _request_headers(author=True/False): login uses author=False.
 """
 
 import base64
@@ -14,8 +22,10 @@ from typing import Any, Dict, Optional
 
 from motorola_downloader.exceptions import AuthenticationError, TokenExpiredError
 from motorola_downloader.settings import Settings
+from motorola_downloader.utils.headers import HeaderManager
 from motorola_downloader.utils.http_client import HTTPClient
 from motorola_downloader.utils.logger import get_logger, mask_sensitive
+from motorola_downloader.utils.request_builder import RequestBuilder
 from motorola_downloader.utils.validators import validate_guid, validate_jwt
 
 _logger = get_logger(__name__)
@@ -37,21 +47,15 @@ _EP_DELETE_TOKEN = "/client/deleteToken.jhtml"
 # Standard success code from LMSA API
 _CODE_OK = "0000"
 
-# Base request headers matching LMSA client behavior
-_AUTH_HEADERS: Dict[str, str] = {
-    "Content-Type": "application/json",
-    "Cache-Control": "no-store,no-cache",
-    "Pragma": "no-cache",
-    "Request-Tag": "lmsa",
-    "Connection": "Close",
-}
-
 
 class Authenticator:
     """Manages JWT authentication with Motorola servers.
 
     Implements the LMSA authentication flow including login, token
     refresh, validation, and automatic renewal with exponential backoff.
+
+    Uses HeaderManager for proper header construction (API vs download
+    profiles) and RequestBuilder for LMSA RequestModel envelope construction.
 
     Args:
         settings: Application settings instance.
@@ -87,10 +91,26 @@ class Authenticator:
             "motorola_server", "client_version", fallback="7.5.4.2"
         )
 
+        # Initialize HeaderManager and RequestBuilder with server config
+        self._header_manager = HeaderManager(
+            client_version=self._client_version,
+            guid=self._guid,
+        )
+        self._request_builder = RequestBuilder(
+            guid=self._guid,
+            client_version=self._client_version,
+            language=settings.get("motorola_server", "language", fallback="en-US"),
+            windows_info=settings.get(
+                "motorola_server", "windows_info",
+                fallback="Microsoft Windows 11 Pro, x64-based PC",
+            ),
+        )
+
         # Load existing tokens from config
         stored_jwt = settings.get("motorola_server", "jwt_token", fallback="")
         if stored_jwt:
             self._jwt_token = stored_jwt
+            self._header_manager.set_jwt_token(stored_jwt)
             self.logger.info("Loaded existing JWT from configuration")
 
         stored_refresh = settings.get("motorola_server", "refresh_token", fallback="")
@@ -103,6 +123,9 @@ class Authenticator:
 
         Sends login credentials to the LMSA API endpoint and stores the
         returned JWT token. Uses exponential backoff for retry attempts.
+
+        Login uses author=False (matching LMSA lenovoIdLogin.jhtml which
+        sets author: false — no guid/Authorization in request headers).
 
         Args:
             guid: Device unique identifier (UUID v4 format).
@@ -119,25 +142,20 @@ class Authenticator:
             raise AuthenticationError(f"Invalid GUID format: {mask_sensitive(guid)}")
 
         self._guid = guid
+        self._header_manager.set_guid(guid)
+        self._request_builder.set_guid(guid)
         self.logger.info("Authenticating with GUID %s", mask_sensitive(guid))
 
         for attempt in range(1, MAX_AUTH_RETRIES + 1):
             try:
                 login_url = f"{self._base_url}{_EP_LOGIN}"
 
-                request_body = {
-                    "dparams": {
-                        "wust": "",
-                        "guid": guid,
-                    },
-                    "client": {
-                        "version": self._client_version,
-                    },
-                    "author": False,
-                }
+                # Build RequestModel envelope (matching lmsa.py _build_request_model)
+                request_body = self._request_builder.build_login(guid)
 
-                auth_headers = dict(_AUTH_HEADERS)
-                auth_headers["clientVersion"] = self._client_version
+                # Login uses author=False (no guid/Authorization headers)
+                # Matches lmsa.py: _post(_EP_LOGIN, params, author=False)
+                auth_headers = self._header_manager.get_full_api_headers(author=False)
 
                 response = self._http_client.post(
                     login_url,
@@ -148,10 +166,17 @@ class Authenticator:
                 response_data = response.json()
                 response_code = response_data.get("code", "")
 
+                # Check for JWT token rotation in response headers
+                # (matching lmsa.py _post() Guid echo + Authorization update)
+                jwt_updated = self._header_manager.update_jwt_from_response(
+                    dict(response.headers)
+                )
+
                 if response_code == _CODE_OK:
                     jwt = response.headers.get("Authorization", "")
                     if jwt:
-                        self._jwt_token = jwt
+                        self._jwt_token = jwt.removeprefix("Bearer ").strip()
+                        self._header_manager.set_jwt_token(self._jwt_token)
                         self._extract_expiry(jwt)
                         self._store_token(guid, jwt)
                         self.logger.info("Authentication successful")
@@ -199,16 +224,13 @@ class Authenticator:
             try:
                 refresh_url = f"{self._base_url}{_EP_INIT_TOKEN}"
 
-                request_body = {
+                # Build RequestModel with refresh token
+                request_body = self._request_builder.build({
                     "refreshToken": self._refresh_token_value,
-                    "guid": self._guid,
-                    "client": {"version": self._client_version},
-                }
+                })
 
-                auth_headers = dict(_AUTH_HEADERS)
-                auth_headers["clientVersion"] = self._client_version
-                if self._guid:
-                    auth_headers["guid"] = self._guid
+                # Refresh uses author=True (authenticated request)
+                auth_headers = self._header_manager.get_full_api_headers(author=True)
 
                 response = self._http_client.post(
                     refresh_url,
@@ -217,10 +239,15 @@ class Authenticator:
                 )
 
                 response_data = response.json()
+
+                # Check JWT rotation from response
+                self._header_manager.update_jwt_from_response(dict(response.headers))
+
                 if response_data.get("code") == _CODE_OK:
                     new_jwt = response.headers.get("Authorization", "")
                     if new_jwt:
-                        self._jwt_token = new_jwt
+                        self._jwt_token = new_jwt.removeprefix("Bearer ").strip()
+                        self._header_manager.set_jwt_token(self._jwt_token)
                         self._extract_expiry(new_jwt)
                         self._store_token(self._guid, new_jwt)
                         self.logger.info("Token refreshed successfully")
@@ -286,6 +313,9 @@ class Authenticator:
     def get_headers(self) -> Dict[str, str]:
         """Get HTTP headers with the current JWT token for authenticated requests.
 
+        Uses the HeaderManager to build proper LMSA API headers with
+        authentication overlay (guid + Authorization: Bearer).
+
         Returns:
             Dictionary of headers including Authorization with Bearer token.
 
@@ -295,17 +325,7 @@ class Authenticator:
         if not self._jwt_token:
             raise AuthenticationError("No JWT token available for request headers")
 
-        headers = dict(_AUTH_HEADERS)
-        headers["Authorization"] = (
-            self._jwt_token
-            if self._jwt_token.startswith("Bearer ")
-            else f"Bearer {self._jwt_token}"
-        )
-        headers["clientVersion"] = self._client_version
-        if self._guid:
-            headers["guid"] = self._guid
-
-        return headers
+        return self._header_manager.get_full_api_headers(author=True)
 
     def _extract_expiry(self, jwt_token: str) -> None:
         """Extract the expiration time from a JWT token payload.
@@ -377,3 +397,21 @@ class Authenticator:
             The GUID string.
         """
         return self._guid
+
+    @property
+    def header_manager(self) -> HeaderManager:
+        """Get the HeaderManager instance.
+
+        Returns:
+            The HeaderManager used for header construction.
+        """
+        return self._header_manager
+
+    @property
+    def request_builder(self) -> RequestBuilder:
+        """Get the RequestBuilder instance.
+
+        Returns:
+            The RequestBuilder used for request envelope construction.
+        """
+        return self._request_builder

@@ -6,6 +6,13 @@ Provides reliable, concurrent file downloads with:
 - Download resume support
 - Progress tracking with speed and ETA
 - Automatic retry with exponential backoff
+
+Key patterns from web_crawler analysis:
+  - Streaming mode for large binary files (not buffered in RAM)
+  - S3 downloads use DOWNLOAD_USER_AGENT (IE8-style) via HeaderManager
+  - Public CDN downloads (download.lenovo.com) need no auth
+  - Range header for resume (matching session.py pattern)
+  - Conditional requests with ETag/If-None-Match for cache validation
 """
 
 import os
@@ -17,8 +24,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from motorola_downloader.exceptions import DownloadError
 from motorola_downloader.settings import Settings
+from motorola_downloader.utils.headers import HeaderManager
 from motorola_downloader.utils.http_client import HTTPClient
 from motorola_downloader.utils.logger import get_logger
+from motorola_downloader.utils.url_utils import get_host, classify_download_url, extract_filename
 from motorola_downloader.utils.validators import validate_file_path, validate_url
 
 _logger = get_logger(__name__)
@@ -168,6 +177,7 @@ class DownloadManager:
         self,
         settings: Settings,
         http_client: Optional[HTTPClient] = None,
+        header_manager: Optional[HeaderManager] = None,
         auth_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         """Initialize the DownloadManager.
@@ -175,11 +185,16 @@ class DownloadManager:
         Args:
             settings: Application settings for download configuration.
             http_client: Optional shared HTTP client instance.
-            auth_headers: Optional authentication headers for downloads.
+            header_manager: Optional HeaderManager for download-specific headers.
+            auth_headers: Optional fallback authentication headers.
         """
         self._settings = settings
         self._http_client = http_client or HTTPClient(
             timeout=settings.get_int("download", "timeout", fallback=60)
+        )
+        self._header_manager = header_manager or HeaderManager(
+            client_version=settings.get("motorola_server", "client_version", fallback="7.5.4.2"),
+            guid=settings.get("motorola_server", "guid", fallback=""),
         )
         self._auth_headers = auth_headers or {}
         self.logger = get_logger(__name__)
@@ -215,6 +230,11 @@ class DownloadManager:
     ) -> bool:
         """Download a single file with retry support.
 
+        Uses HeaderManager to select the correct User-Agent per host:
+        - S3 hosts (rsddownload-secure.lenovo.com): IE8 DOWNLOAD_USER_AGENT
+        - Public hosts (download.lenovo.com): browser UA, no auth
+        - Other hosts: browser UA with auth headers
+
         Args:
             url: Download URL (must be HTTPS).
             filepath: Local file path to save to.
@@ -233,14 +253,12 @@ class DownloadManager:
             raise DownloadError(f"Invalid file path: {filepath}")
 
         filename = os.path.basename(filepath)
-        self.logger.info("Starting download: %s", filename)
+        host = get_host(url)
+        url_class = classify_download_url(url)
+        self.logger.info("Starting download: %s (host=%s, type=%s)", filename, host, url_class)
 
         # Create parent directory
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-
-        download_headers = dict(self._auth_headers)
-        if headers:
-            download_headers.update(headers)
 
         progress = DownloadProgress()
         self._progress[filename] = progress
@@ -255,6 +273,16 @@ class DownloadManager:
                         self.logger.info(
                             "Resuming %s from byte %d", filename, resume_byte
                         )
+
+                # Use HeaderManager to build proper download headers per host
+                download_headers = self._header_manager.get_download_headers(
+                    host=host,
+                    resume_byte=resume_byte,
+                )
+
+                # Override with any caller-provided headers
+                if headers:
+                    download_headers.update(headers)
 
                 bytes_downloaded = self._http_client.download(
                     url=url,

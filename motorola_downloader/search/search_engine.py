@@ -4,6 +4,17 @@ Orchestrates searches across Motorola/LMSA APIs, combining results
 from multiple endpoints with deduplication, filtering, and caching.
 Search patterns are based on the LMSA API endpoints documented in
 web_crawler/auth/lmsa.py.
+
+Key patterns from web_crawler analysis:
+  - get_firmware(): POST to /rescueDevice/getNewResource.jhtml with
+    RequestModel{dparams: {modelName, flashToolType, buildType, region, ...}}
+  - get_rom_list() / get_all_roms(): POST to /priv/getRomList.jhtml
+    Returns all ~2299 ROM entries with uri, name, md5, type fields.
+  - get_model_names(): POST to /rescueDevice/getModelNames.jhtml
+    {dparams: {country, category}} → content.models + content.moreModels
+  - _resolve_resource(): recursive paramProperty resolution until S3 URLs.
+  - collect_download_urls(): extracts romResource, toolResource, flashFlow,
+    otaResource, countryCodeResource from resolved resources.
 """
 
 import time
@@ -13,6 +24,8 @@ from motorola_downloader.auth.session_manager import SessionManager
 from motorola_downloader.exceptions import SearchError
 from motorola_downloader.settings import Settings
 from motorola_downloader.utils.logger import get_logger
+from motorola_downloader.utils.request_builder import RequestBuilder
+from motorola_downloader.utils.url_utils import normalize_url, extract_filename, deduplicate_urls
 from motorola_downloader.utils.validators import validate_content_type, validate_search_query
 
 _logger = get_logger(__name__)
@@ -178,6 +191,17 @@ class SearchEngine:
         )
         self._cache_ttl: int = settings.get_int(
             "search", "cache_ttl_seconds", fallback=300
+        )
+
+        # RequestBuilder for constructing LMSA API request envelopes
+        self._request_builder = RequestBuilder(
+            guid=settings.get("motorola_server", "guid", fallback=""),
+            client_version=settings.get("motorola_server", "client_version", fallback="7.5.4.2"),
+            language=settings.get("motorola_server", "language", fallback="en-US"),
+            windows_info=settings.get(
+                "motorola_server", "windows_info",
+                fallback="Microsoft Windows 11 Pro, x64-based PC",
+            ),
         )
 
         # Search cache: key -> (timestamp, results)
@@ -347,8 +371,11 @@ class SearchEngine:
     ) -> List[SearchResult]:
         """Search for firmware files via the LMSA API.
 
+        Uses RequestBuilder.build_firmware_query() to construct the proper
+        LMSA RequestModel envelope (matching get_firmware() in lmsa.py).
+
         Args:
-            query: Search query string.
+            query: Search query string (model name).
             filters: Search filters.
 
         Returns:
@@ -359,23 +386,23 @@ class SearchEngine:
 
         try:
             headers = self._session.get_auth_headers()
-            client_version = self._settings.get(
-                "motorola_server", "client_version", fallback="7.5.4.2"
-            )
 
-            request_body = {
-                "dparams": {
-                    "modelName": query,
-                    "country": region,
-                    "category": "Phone",
-                },
-                "client": {"version": client_version},
-            }
+            # Build RequestModel using builder (matches lmsa.py get_firmware)
+            request_body = self._request_builder.build_firmware_query(
+                model_name=query,
+                region=region,
+            )
 
             url = f"{self._base_url}{_EP_GET_RESOURCE}"
             response = self._session.http_client.post(
                 url, json_data=request_body, headers=headers
             )
+
+            # Check JWT rotation in response (LMSA pattern)
+            if hasattr(self._session, 'authenticator'):
+                self._session.authenticator.header_manager.update_jwt_from_response(
+                    dict(response.headers)
+                )
 
             data = response.json()
             if data.get("code") == _CODE_OK:
@@ -393,6 +420,9 @@ class SearchEngine:
     ) -> List[SearchResult]:
         """Search for ROM files via the LMSA ROM list API.
 
+        Uses RequestBuilder.build_rom_list_query() matching
+        get_rom_list() / get_all_roms() in lmsa.py.
+
         Args:
             query: Search query string.
             filters: Search filters.
@@ -404,14 +434,12 @@ class SearchEngine:
 
         try:
             headers = self._session.get_auth_headers()
-            client_version = self._settings.get(
-                "motorola_server", "client_version", fallback="7.5.4.2"
-            )
 
-            request_body = {
-                "dparams": {"modelName": query},
-                "client": {"version": client_version},
-            }
+            # Build RequestModel using builder (matches lmsa.py get_rom_list)
+            request_body = self._request_builder.build_rom_list_query(
+                model_name=query,
+                region=filters.get("region", ""),
+            )
 
             url = f"{self._base_url}{_EP_ROM_LIST}"
             response = self._session.http_client.post(
@@ -423,12 +451,14 @@ class SearchEngine:
                 rom_list = data.get("desc", [])
                 if isinstance(rom_list, list):
                     for rom in rom_list:
+                        # Normalize URL (matching lmsa.py get_all_roms scheme fix)
+                        download_url = normalize_url(rom.get("downloadUrl", "") or rom.get("uri", ""))
                         result = SearchResult(
-                            name=rom.get("fileName", ""),
+                            name=rom.get("fileName", "") or rom.get("name", ""),
                             model=rom.get("modelName", query),
                             version=rom.get("version", ""),
                             region=rom.get("country", ""),
-                            download_url=rom.get("downloadUrl", ""),
+                            download_url=download_url,
                             file_size=int(rom.get("fileSize", 0)),
                             release_date=rom.get("releaseDate", ""),
                             content_type="ROM",
@@ -453,19 +483,16 @@ class SearchEngine:
         Returns:
             List of Tools SearchResult objects.
         """
-        # Tools endpoint follows similar pattern to firmware
         results: List[SearchResult] = []
 
         try:
             headers = self._session.get_auth_headers()
-            client_version = self._settings.get(
-                "motorola_server", "client_version", fallback="7.5.4.2"
-            )
 
-            request_body = {
-                "dparams": {"modelName": query, "resourceType": "tool"},
-                "client": {"version": client_version},
-            }
+            # Build RequestModel using builder
+            request_body = self._request_builder.build({
+                "modelName": query,
+                "resourceType": "tool",
+            })
 
             url = f"{self._base_url}{_EP_GET_RECIPE}"
             response = self._session.http_client.post(
@@ -477,11 +504,12 @@ class SearchEngine:
                 tools_data = data.get("desc", [])
                 if isinstance(tools_data, list):
                     for tool in tools_data:
+                        download_url = normalize_url(tool.get("downloadUrl", "") or tool.get("uri", ""))
                         result = SearchResult(
-                            name=tool.get("fileName", ""),
+                            name=tool.get("fileName", "") or tool.get("name", ""),
                             model=tool.get("modelName", query),
                             version=tool.get("version", ""),
-                            download_url=tool.get("downloadUrl", ""),
+                            download_url=download_url,
                             file_size=int(tool.get("fileSize", 0)),
                             content_type="Tools",
                         )
@@ -495,22 +523,24 @@ class SearchEngine:
     def _get_model_names(self) -> List[str]:
         """Fetch available model names from the API.
 
+        Uses RequestBuilder.build_model_query() matching
+        get_model_names() in lmsa.py. Combines 'models' and 'moreModels'
+        lists and deduplicates by modelName (matching lmsa.py pattern).
+
         Returns:
             List of model name strings.
         """
         models: List[str] = []
+        seen: set[str] = set()
 
         try:
             headers = self._session.get_auth_headers()
-            client_version = self._settings.get(
-                "motorola_server", "client_version", fallback="7.5.4.2"
-            )
 
             for category in FIRMWARE_CATEGORIES:
-                request_body = {
-                    "dparams": {"category": category},
-                    "client": {"version": client_version},
-                }
+                request_body = self._request_builder.build_model_query(
+                    country=self._default_region,
+                    category=category,
+                )
 
                 url = f"{self._base_url}{_EP_GET_MODEL_NAMES}"
                 response = self._session.http_client.post(
@@ -519,11 +549,15 @@ class SearchEngine:
 
                 data = response.json()
                 if data.get("code") == _CODE_OK:
-                    model_list = data.get("desc", [])
-                    if isinstance(model_list, list):
-                        for model_info in model_list:
-                            name = model_info.get("name", "")
-                            if name:
+                    # Match lmsa.py: content.models + content.moreModels dedup
+                    content = data.get("content") or {}
+                    if isinstance(content, dict):
+                        main_models = content.get("models") or []
+                        more_models = content.get("moreModels") or []
+                        for model_info in main_models + more_models:
+                            name = model_info.get("modelName", "") or model_info.get("name", "")
+                            if name and name not in seen:
+                                seen.add(name)
                                 models.append(name)
 
         except Exception as exc:

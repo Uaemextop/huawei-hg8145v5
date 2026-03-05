@@ -35,11 +35,13 @@ REQUIRED_FIELDS: Dict[str, list[str]] = {
 
 DEFAULT_VALUES: Dict[str, Dict[str, str]] = {
     "motorola_server": {
-        "guid": "",
+        "guid": "00000000-0000-0000-0000-000000000000",
         "jwt_token": "",
         "refresh_token": "",
         "base_url": "https://lsa.lenovo.com/Interface",
         "client_version": "7.5.4.2",
+        "language": "en-US",
+        "windows_info": "Microsoft Windows 11 Pro, x64-based PC",
     },
     "download": {
         "output_directory": "downloads",
