@@ -510,10 +510,11 @@ class LenovoIDAuth:
 
         ai_model = os.environ.get("AI_MODEL", "openai/gpt-4o")
         ai_client = GitHubModelsClient(token=github_token, model=ai_model)
-        solver = AICaptchaSolver(ai_client=ai_client, max_attempts=3)
+        max_attempts = 3
+        solver = AICaptchaSolver(ai_client=ai_client, max_attempts=max_attempts)
 
         _log("[LenovoID] [AI-CAPTCHA] Attempting to solve CAPTCHA…")
-        for attempt in range(1, 4):
+        for attempt in range(1, max_attempts + 1):
             solution = solver.solve_captcha_on_page(page)  # type: ignore[arg-type]
             if not solution:
                 _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: no solution")

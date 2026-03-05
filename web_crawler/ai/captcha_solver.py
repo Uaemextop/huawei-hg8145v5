@@ -270,7 +270,7 @@ class AICaptchaSolver:
         self,
         page: "Page",
         captcha_type: str = "",
-    ) -> str | None:
+    ) -> Optional[str]:
         """Detect and solve a CAPTCHA on an already-open Playwright page.
 
         Returns the CAPTCHA solution string or ``None`` on failure.
@@ -351,7 +351,7 @@ class AICaptchaSolver:
         self,
         page: "Page",
         selector: str = "",
-    ) -> str | None:
+    ) -> Optional[str]:
         """Locate the CAPTCHA image element and return a base64 screenshot.
 
         Mirrors the extension's ``getBase64Image`` canvas-capture.
@@ -438,10 +438,18 @@ class AICaptchaSolver:
 
     @staticmethod
     def _is_login_success(page: "Page", original_url: str) -> bool:
-        """Heuristic check for whether the login succeeded."""
+        """Heuristic check for whether the login succeeded.
+
+        Uses URL path comparison (not naive string matching) to avoid
+        false positives on URLs that contain 'login' in query params or
+        as part of unrelated words.
+        """
+        import urllib.parse
         current = page.url
-        if current != original_url and "login" not in current.lower():
-            return True
+        if current != original_url:
+            cur_path = urllib.parse.urlparse(current).path.lower()
+            if "/login" not in cur_path and "/signin" not in cur_path:
+                return True
         for sel in _CAPTCHA_IMAGE_SELECTORS[:3]:
             try:
                 if page.query_selector(sel):

@@ -489,7 +489,7 @@ def main() -> None:
     if ai_cookies:
         parsed = urllib.parse.urlparse(target_url)
         for name, value in ai_cookies.items():
-            crawler.session.cookies.set(name, value, domain=parsed.netloc)
+            crawler.session.cookies.set(name, value, domain=parsed.hostname)
         log.info(
             "[AI-CAPTCHA] Injected %d cookies into crawler session",
             len(ai_cookies),

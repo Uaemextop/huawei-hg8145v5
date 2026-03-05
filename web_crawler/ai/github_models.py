@@ -364,7 +364,7 @@ class GitHubModelsClient:
         return b64, guessed
 
     @staticmethod
-    def _fetch_image_url(url: str) -> str | None:
+    def _fetch_image_url(url: str) -> Optional[str]:
         """Download an image from *url* and return base64 data.
 
         Mirrors the extension's ``fetchImageAsBase64`` helper in
