@@ -31,16 +31,25 @@ from motorola_downloader.utils.validators import validate_content_type, validate
 _logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# LMSA Search API endpoints (from web_crawler/auth/lmsa.py reference)
+# LMSA API endpoints — confirmed from web_crawler/auth/lmsa.py lines 105-117
+# (WebApiUrl.cs + WebServicesContext.cs, verified via live HAR LMSA 7.5.4.2)
 # ---------------------------------------------------------------------------
 
-_EP_GET_RESOURCE = "/rescueDevice/getNewResource.jhtml"
+_EP_RSA_KEY              = "/common/rsa.jhtml"
+_EP_GET_RESOURCE         = "/rescueDevice/getNewResource.jhtml"   # auto-match by hw params
 _EP_GET_RESOURCE_BY_IMEI = "/rescueDevice/getNewResourceByImei.jhtml"
-_EP_GET_RESOURCE_BY_SN = "/rescueDevice/getNewResourceBySN.jhtml"
-_EP_GET_MODEL_NAMES = "/rescueDevice/getModelNames.jhtml"
-_EP_GET_MARKET_NAMES = "/rescueDevice/getRescueModelNames.jhtml"
-_EP_ROM_LIST = "/priv/getRomList.jhtml"
-_EP_GET_RECIPE = "/rescueDevice/getRescueModelRecipe.jhtml"
+_EP_GET_RESOURCE_BY_SN   = "/rescueDevice/getNewResourceBySN.jhtml"
+_EP_GET_MODEL_NAMES      = "/rescueDevice/getModelNames.jhtml"    # all models
+_EP_GET_MARKET_NAMES     = "/rescueDevice/getRescueModelNames.jhtml"  # rescue-only
+_EP_GET_RESOURCE_V2      = "/rescueDevice/getResource.jhtml"      # manual match → presigned S3
+_EP_GET_RECIPE           = "/rescueDevice/getRescueModelRecipe.jhtml"
+_EP_ROM_LIST             = "/priv/getRomList.jhtml"               # full ROM catalogue (~2299 items)
+_EP_ROM_MATCH_PARAMS     = "/rescueDevice/getRomMatchParams.jhtml"
+_EP_RENEW_LINK           = "/client/renewFileLink.jhtml"
+
+#: Production API base URL (hardcoded, NOT configurable).
+#: Confirmed: https://lsa.lenovo.com/Interface via curl + HAR.
+LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
 
 # Content type mappings
 CONTENT_TYPES = {
@@ -50,18 +59,21 @@ CONTENT_TYPES = {
     "all": "All",
 }
 
-# Known firmware categories
+# Categories used by getModelNames (from lmsa.py line 122)
 FIRMWARE_CATEGORIES = ("Phone", "Tablet")
 
-# Known regions
-KNOWN_REGIONS = (
+# Countries confirmed from LMSA HAR (lmsa.py lines 123-128)
+FIRMWARE_COUNTRIES = (
     "Mexico", "US", "Brazil", "Argentina", "Colombia", "Chile",
     "Peru", "Ecuador", "Guatemala", "Paraguay", "Dominican Republic",
     "India", "Germany", "UK", "France", "Italy", "Spain", "Australia",
     "Canada", "Japan", "China",
 )
 
-# Standard success code
+# Max recursion depth for paramProperty resolution (lmsa.py line 132)
+_MAX_RESOLVE_DEPTH = 4
+
+# Standard API success code
 _CODE_OK = "0000"
 
 
@@ -173,10 +185,8 @@ class SearchEngine:
         self._settings = settings
         self.logger = get_logger(__name__)
 
-        self._base_url: str = settings.get(
-            "motorola_server", "base_url",
-            fallback="https://lsa.lenovo.com/Interface",
-        )
+        # Base URL is a hardcoded constant, NOT from config
+        self._base_url: str = LMSA_BASE_URL
         self._default_region: str = settings.get(
             "search", "default_region", fallback="US"
         )
@@ -353,9 +363,9 @@ class SearchEngine:
         """Get the list of available search regions.
 
         Returns:
-            List of region name strings.
+            List of region name strings (from LMSA HAR traffic).
         """
-        return list(KNOWN_REGIONS)
+        return list(FIRMWARE_COUNTRIES)
 
     def clear_cache(self) -> None:
         """Clear the search results cache."""
@@ -369,14 +379,17 @@ class SearchEngine:
     def _search_firmware(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for firmware files via the LMSA API.
+        """Search for firmware files via getNewResource.jhtml.
 
-        Uses RequestBuilder.build_firmware_query() to construct the proper
-        LMSA RequestModel envelope (matching get_firmware() in lmsa.py).
+        Matches lmsa.py get_firmware():
+          - POST /rescueDevice/getNewResource.jhtml
+          - dparams: {modelName, flashToolType, buildType, region, ...}
+          - Response: code "0000", then `data` field contains firmware info
+            (may be AES-encrypted string or plain dict/list).
 
         Args:
-            query: Search query string (model name).
-            filters: Search filters.
+            query: Device model name (e.g. 'xt2553-2').
+            filters: Search filters (region, carrier, etc.).
 
         Returns:
             List of firmware SearchResult objects.
@@ -387,10 +400,11 @@ class SearchEngine:
         try:
             headers = self._session.get_auth_headers()
 
-            # Build RequestModel using builder (matches lmsa.py get_firmware)
+            # Build RequestModel matching lmsa.py get_firmware()
             request_body = self._request_builder.build_firmware_query(
                 model_name=query,
                 region=region,
+                carrier=filters.get("carrier", ""),
             )
 
             url = f"{self._base_url}{_EP_GET_RESOURCE}"
@@ -398,17 +412,32 @@ class SearchEngine:
                 url, json_data=request_body, headers=headers
             )
 
-            # Check JWT rotation in response (LMSA pattern)
+            # Update JWT from response (rotates on every call)
             if hasattr(self._session, 'authenticator'):
                 self._session.authenticator.header_manager.update_jwt_from_response(
                     dict(response.headers)
                 )
 
             data = response.json()
-            if data.get("code") == _CODE_OK:
-                resources = data.get("desc", {})
-                if isinstance(resources, dict):
-                    results.extend(self._parse_firmware_response(resources, query))
+            code = data.get("code", "")
+
+            if code == "403":
+                self.logger.warning("Firmware query blocked — token required")
+                return results
+
+            if code != _CODE_OK:
+                self.logger.warning("Firmware query error: %s — %s", code, data.get("msg", ""))
+                return results
+
+            # Response uses `data` field (may be AES-encrypted or plain)
+            # Matching lmsa.py get_download_urls() pattern
+            firmware_data = data.get("data")
+            if firmware_data and isinstance(firmware_data, dict):
+                results.extend(self._parse_resource_data(firmware_data, query))
+            elif firmware_data and isinstance(firmware_data, list):
+                for item in firmware_data:
+                    if isinstance(item, dict):
+                        results.extend(self._parse_resource_data(item, query))
 
         except Exception as exc:
             self.logger.warning("Firmware search error: %s", exc)
@@ -418,13 +447,16 @@ class SearchEngine:
     def _search_roms(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for ROM files via the LMSA ROM list API.
+        """Search for ROMs via getRomList.jhtml.
 
-        Uses RequestBuilder.build_rom_list_query() matching
-        get_rom_list() / get_all_roms() in lmsa.py.
+        Matches lmsa.py get_all_roms():
+          - POST /priv/getRomList.jhtml
+          - Response: code "0000", `content` field is a list of ROM dicts.
+          - Each ROM has: name, uri, type (0=ROM, 1=Tool), md5.
+          - URIs may lack 'https://' scheme (normalised here).
 
         Args:
-            query: Search query string.
+            query: Search query string (model name or keyword).
             filters: Search filters.
 
         Returns:
@@ -435,7 +467,7 @@ class SearchEngine:
         try:
             headers = self._session.get_auth_headers()
 
-            # Build RequestModel using builder (matches lmsa.py get_rom_list)
+            # Build RequestModel (matches lmsa.py get_rom_list / get_all_roms)
             request_body = self._request_builder.build_rom_list_query(
                 model_name=query,
                 region=filters.get("region", ""),
@@ -447,24 +479,44 @@ class SearchEngine:
             )
 
             data = response.json()
-            if data.get("code") == _CODE_OK:
-                rom_list = data.get("desc", [])
-                if isinstance(rom_list, list):
-                    for rom in rom_list:
-                        # Normalize URL (matching lmsa.py get_all_roms scheme fix)
-                        download_url = normalize_url(rom.get("downloadUrl", "") or rom.get("uri", ""))
-                        result = SearchResult(
-                            name=rom.get("fileName", "") or rom.get("name", ""),
-                            model=rom.get("modelName", query),
-                            version=rom.get("version", ""),
-                            region=rom.get("country", ""),
-                            download_url=download_url,
-                            file_size=int(rom.get("fileSize", 0)),
-                            release_date=rom.get("releaseDate", ""),
-                            content_type="ROM",
-                            checksum=rom.get("md5", ""),
-                        )
-                        results.append(result)
+            if data.get("code") != _CODE_OK:
+                self.logger.warning("ROM list error: %s — %s", data.get("code"), data.get("msg", ""))
+                return results
+
+            # Response uses `content` field (list) — from lmsa.py get_all_roms()
+            rom_list = data.get("content") or []
+            if not isinstance(rom_list, list):
+                return results
+
+            query_lower = query.lower()
+            for rom in rom_list:
+                name = rom.get("name", "")
+                uri = rom.get("uri", "") or ""
+                rom_type = rom.get("type", 0)  # 0=ROM, 1=Tool
+
+                # Filter ROMs only (type=0), skip tools here
+                if rom_type != 0:
+                    continue
+
+                # Filter by query if provided
+                if query and query_lower not in name.lower():
+                    continue
+
+                # Normalise scheme-less URIs (lmsa.py get_all_roms pattern)
+                download_url = normalize_url(uri)
+
+                result = SearchResult(
+                    name=name,
+                    model=query,
+                    version="",
+                    region="",
+                    download_url=download_url,
+                    file_size=0,
+                    release_date="",
+                    content_type="ROM",
+                    checksum=rom.get("md5", ""),
+                )
+                results.append(result)
 
         except Exception as exc:
             self.logger.warning("ROM search error: %s", exc)
@@ -474,10 +526,14 @@ class SearchEngine:
     def _search_tools(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for tools via the LMSA API.
+        """Search for tools via getRomList.jhtml (type=1) and getResource.jhtml.
+
+        Two sources for tools (from lmsa.py analysis):
+        1. getRomList entries with type=1 are flash tools.
+        2. getResource.jhtml responses contain toolResource sub-dicts.
 
         Args:
-            query: Search query string.
+            query: Search query string (model name or keyword).
             filters: Search filters.
 
         Returns:
@@ -488,30 +544,37 @@ class SearchEngine:
         try:
             headers = self._session.get_auth_headers()
 
-            # Build RequestModel using builder
-            request_body = self._request_builder.build({
-                "modelName": query,
-                "resourceType": "tool",
-            })
+            # Source 1: Tools from ROM catalogue (type=1)
+            request_body = self._request_builder.build_rom_list_query(
+                model_name=query,
+            )
 
-            url = f"{self._base_url}{_EP_GET_RECIPE}"
+            url = f"{self._base_url}{_EP_ROM_LIST}"
             response = self._session.http_client.post(
                 url, json_data=request_body, headers=headers
             )
 
             data = response.json()
             if data.get("code") == _CODE_OK:
-                tools_data = data.get("desc", [])
-                if isinstance(tools_data, list):
-                    for tool in tools_data:
-                        download_url = normalize_url(tool.get("downloadUrl", "") or tool.get("uri", ""))
+                rom_list = data.get("content") or []
+                if isinstance(rom_list, list):
+                    query_lower = query.lower() if query else ""
+                    for item in rom_list:
+                        # type=1 means tool (from lmsa.py collect_download_urls_by_type)
+                        if item.get("type") != 1:
+                            continue
+                        name = item.get("name", "")
+                        if query_lower and query_lower not in name.lower():
+                            continue
+                        download_url = normalize_url(item.get("uri", ""))
                         result = SearchResult(
-                            name=tool.get("fileName", "") or tool.get("name", ""),
-                            model=tool.get("modelName", query),
-                            version=tool.get("version", ""),
+                            name=name,
+                            model=query,
+                            version="",
                             download_url=download_url,
-                            file_size=int(tool.get("fileSize", 0)),
+                            file_size=0,
                             content_type="Tools",
+                            checksum=item.get("md5", ""),
                         )
                         results.append(result)
 
@@ -565,35 +628,93 @@ class SearchEngine:
 
         return models
 
-    def _parse_firmware_response(
-        self, resources: Dict[str, Any], query: str
+    def _parse_resource_data(
+        self, resource: Dict[str, Any], query: str
     ) -> List[SearchResult]:
-        """Parse firmware resource response into SearchResult objects.
+        """Parse a firmware resource dict into SearchResult objects.
+
+        Extracts download URLs from the same resource structure that lmsa.py
+        uses in collect_download_urls():
+          - romResource.uri / romResource.name
+          - toolResource.uri / toolResource.name
+          - otaResource.uri / otaResource.name
+          - countryCodeResource.uri / countryCodeResource.name
+          - flashFlow (JSON download URL)
 
         Args:
-            resources: API response resource dictionary.
+            resource: API response resource dictionary (single item from
+                `data` or resolved `content`).
             query: Original search query for context.
 
         Returns:
-            List of SearchResult objects.
+            List of SearchResult objects extracted from the resource.
         """
         results: List[SearchResult] = []
+        model = resource.get("modelName") or query
 
-        file_list = resources.get("fileList", [])
-        if isinstance(file_list, list):
-            for file_info in file_list:
+        # ROM resources (firmware files)
+        for res_key in ("romResource", "otaResource", "countryCodeResource"):
+            res = resource.get(res_key)
+            if isinstance(res, dict) and res.get("uri"):
+                download_url = normalize_url(res["uri"])
+                name = res.get("name") or extract_filename(download_url, f"{model}_{res_key}")
                 result = SearchResult(
-                    name=file_info.get("fileName", ""),
-                    model=resources.get("modelName", query),
-                    version=resources.get("version", ""),
-                    region=resources.get("country", ""),
-                    download_url=file_info.get("downloadUrl", ""),
-                    file_size=int(file_info.get("fileSize", 0)),
-                    release_date=resources.get("releaseDate", ""),
+                    name=name,
+                    model=model,
+                    version=resource.get("version", ""),
+                    region=resource.get("country", ""),
+                    download_url=download_url,
+                    file_size=int(res.get("size", 0) or 0),
+                    release_date=resource.get("releaseDate", ""),
                     content_type="Firmware",
-                    checksum=file_info.get("md5", ""),
+                    checksum=res.get("md5", ""),
                 )
                 results.append(result)
+
+        # Tool resources (flash tools)
+        tool_res = resource.get("toolResource")
+        if isinstance(tool_res, dict) and tool_res.get("uri"):
+            download_url = normalize_url(tool_res["uri"])
+            name = tool_res.get("name") or extract_filename(download_url, f"{model}_toolResource")
+            result = SearchResult(
+                name=name,
+                model=model,
+                version=resource.get("version", ""),
+                download_url=download_url,
+                file_size=int(tool_res.get("size", 0) or 0),
+                content_type="Tools",
+                checksum=tool_res.get("md5", ""),
+            )
+            results.append(result)
+
+        # Flash flow JSON
+        flash_flow = resource.get("flashFlow")
+        if flash_flow:
+            download_url = normalize_url(flash_flow)
+            if download_url:
+                result = SearchResult(
+                    name=f"{model}_flashFlow.json",
+                    model=model,
+                    version=resource.get("version", ""),
+                    download_url=download_url,
+                    content_type="Firmware",
+                )
+                results.append(result)
+
+        # Also handle raw download URL keys (from AES-decrypted data)
+        for url_key in ("downloadUrl", "url", "fileUrl", "link"):
+            url_val = resource.get(url_key, "")
+            if url_val:
+                download_url = normalize_url(url_val)
+                if download_url:
+                    result = SearchResult(
+                        name=extract_filename(download_url, f"{model}_firmware"),
+                        model=model,
+                        version=resource.get("version", ""),
+                        download_url=download_url,
+                        content_type="Firmware",
+                    )
+                    results.append(result)
 
         return results
 

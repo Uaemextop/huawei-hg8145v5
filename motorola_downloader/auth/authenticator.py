@@ -38,11 +38,15 @@ BASE_DELAY = 1.0  # seconds for exponential backoff
 MAX_AUTH_RETRIES = 3
 EXPIRATION_THRESHOLD = 300  # seconds before expiry to trigger refresh
 
-# LMSA API endpoints (from web_crawler/auth/lmsa.py reference)
-_EP_LOGIN = "/user/lenovoIdLogin.jhtml"
-_EP_RSA_KEY = "/common/rsa.jhtml"
-_EP_INIT_TOKEN = "/client/initToken.jhtml"
-_EP_DELETE_TOKEN = "/client/deleteToken.jhtml"
+# Production LMSA API base URL (hardcoded constant, NOT configurable).
+# Confirmed live by curl: /Interface/common/rsa.jhtml → 200, code 0000.
+LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
+
+# LMSA API endpoints (from web_crawler/auth/lmsa.py lines 105-117)
+_EP_RSA_KEY        = "/common/rsa.jhtml"
+_EP_INIT_TOKEN     = "/client/initToken.jhtml"
+_EP_DELETE_TOKEN   = "/client/deleteToken.jhtml"
+_EP_LOGIN          = "/user/lenovoIdLogin.jhtml"
 
 # Standard success code from LMSA API
 _CODE_OK = "0000"
@@ -83,10 +87,8 @@ class Authenticator:
         self._refresh_token_value: Optional[str] = None
         self._token_expiry: float = 0.0
         self._guid: str = settings.get("motorola_server", "guid", fallback="")
-        self._base_url: str = settings.get(
-            "motorola_server", "base_url",
-            fallback="https://lsa.lenovo.com/Interface",
-        )
+        # Base URL is a hardcoded constant, NOT from config
+        self._base_url: str = LMSA_BASE_URL
         self._client_version: str = settings.get(
             "motorola_server", "client_version", fallback="7.5.4.2"
         )
