@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
+import random as _rnd
 import uuid as _uuid
 
 import os
@@ -342,6 +343,8 @@ class LenovoIDAuth:
             # etc.) to reduce Akamai Bot Manager detection rates.
             pw_cm = _sync_playwright()
             if _STEALTH_AVAILABLE:
+                # Language matches the LMSA client form defaults
+                # (lenovoid.lang=es_ES) and the browser context locale below.
                 _stealth = _Stealth(
                     navigator_languages_override=("es-419", "es"),
                     navigator_platform_override="Win32",
@@ -412,7 +415,6 @@ class LenovoIDAuth:
                 # Simulate realistic user mouse movements to help the Akamai
                 # sensor collect valid interaction data.
                 page.wait_for_timeout(5000)
-                import random as _rnd
                 for _i in range(15):
                     page.mouse.move(_rnd.randint(100, 900),
                                     _rnd.randint(100, 600))
