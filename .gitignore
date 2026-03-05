@@ -5,3 +5,8 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Motorola Firmware Downloader
+logs/
+downloads/
+*.key
