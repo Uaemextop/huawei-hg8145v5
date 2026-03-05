@@ -59,13 +59,19 @@ def validate_guid(guid: str) -> bool:
 
 
 def validate_jwt(token: str) -> bool:
-    """Validate that a JWT token has the correct three-part structure.
+    """Validate that a JWT/LMSA token is a non-empty credential string.
 
-    This performs format validation only; it does not verify the signature
-    or check expiration.
+    LMSA tokens are NOT standard three-part JWTs — they are opaque
+    AES-encrypted, Base64-encoded blobs returned by the server in the
+    Authorization response header.  We accept both formats:
+      - Standard JWT: ``header.payload.signature``  (three Base64url parts)
+      - LMSA token:  a single Base64(+/=) string  (≥ 20 chars)
+
+    This performs format validation only; it does not verify the
+    signature or check expiration.
 
     Args:
-        token: The JWT token string to validate.
+        token: The JWT / LMSA token string to validate.
 
     Returns:
         True if the token format is valid, False otherwise.
@@ -78,11 +84,20 @@ def validate_jwt(token: str) -> bool:
     if clean_token.startswith("Bearer "):
         clean_token = clean_token[7:]
 
-    if not _JWT_PATTERN.match(clean_token):
-        _logger.warning("JWT validation failed: invalid three-part structure")
+    if not clean_token:
+        _logger.warning("JWT validation failed: empty after stripping prefix")
         return False
 
-    return True
+    # Accept standard three-part JWT
+    if _JWT_PATTERN.match(clean_token):
+        return True
+
+    # Accept LMSA opaque token (Base64 string, min 20 chars)
+    if len(clean_token) >= 20 and re.match(r'^[A-Za-z0-9+/=_\-]+$', clean_token):
+        return True
+
+    _logger.warning("JWT validation failed: unrecognised token format")
+    return False
 
 
 def validate_url(url: str) -> bool:

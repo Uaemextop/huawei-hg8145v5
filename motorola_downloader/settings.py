@@ -2,6 +2,11 @@
 
 Loads, validates, and persists application configuration from a config.ini file.
 Uses Python's configparser with custom validation and default values.
+
+Environment variable overrides (take precedence over config.ini):
+  MOTOROLA_GUID       → [motorola_server] guid
+  MOTOROLA_JWT        → [motorola_server] jwt_token
+  MOTOROLA_DEBUG      → [logging] debug   (true/false)
 """
 
 import configparser
@@ -31,6 +36,15 @@ REQUIRED_SECTIONS = [
 REQUIRED_FIELDS: Dict[str, list[str]] = {
     "motorola_server": ["guid", "jwt_token"],
     "download": ["output_directory"],
+}
+
+# Environment variable → (section, key) mapping.
+# These take precedence over config.ini values so that credentials
+# never need to be written to the file.
+_ENV_OVERRIDES: Dict[str, tuple[str, str]] = {
+    "MOTOROLA_GUID":  ("motorola_server", "guid"),
+    "MOTOROLA_JWT":   ("motorola_server", "jwt_token"),
+    "MOTOROLA_DEBUG": ("logging", "debug"),
 }
 
 DEFAULT_VALUES: Dict[str, Dict[str, str]] = {
@@ -189,8 +203,28 @@ class Settings:
         self.logger.info("Configuration validation completed")
         return True
 
+    def _env_override(self, section: str, key: str) -> Optional[str]:
+        """Check if an environment variable overrides a config value.
+
+        Args:
+            section: The configuration section name.
+            key: The configuration key.
+
+        Returns:
+            Environment variable value, or None if not set.
+        """
+        for env_var, (sec, k) in _ENV_OVERRIDES.items():
+            if sec == section and k == key:
+                value = os.environ.get(env_var, "")
+                if value:
+                    return value
+        return None
+
     def get(self, section: str, key: str, fallback: str = "") -> str:
         """Get a string configuration value.
+
+        Environment variables (MOTOROLA_GUID, MOTOROLA_JWT, MOTOROLA_DEBUG)
+        take precedence over config.ini values when set.
 
         Args:
             section: The configuration section name.
@@ -200,6 +234,9 @@ class Settings:
         Returns:
             The configuration value as a string.
         """
+        env_val = self._env_override(section, key)
+        if env_val is not None:
+            return env_val
         return self._config.get(section, key, fallback=fallback)
 
     def get_int(self, section: str, key: str, fallback: int = 0) -> int:
@@ -213,6 +250,12 @@ class Settings:
         Returns:
             The configuration value as an integer.
         """
+        env_val = self._env_override(section, key)
+        if env_val is not None:
+            try:
+                return int(env_val)
+            except ValueError:
+                pass
         try:
             return self._config.getint(section, key, fallback=fallback)
         except (ValueError, configparser.Error):
@@ -233,6 +276,9 @@ class Settings:
         Returns:
             The configuration value as a boolean.
         """
+        env_val = self._env_override(section, key)
+        if env_val is not None:
+            return env_val.lower() in ("true", "1", "yes", "on")
         try:
             return self._config.getboolean(section, key, fallback=fallback)
         except (ValueError, configparser.Error):
@@ -242,8 +288,23 @@ class Settings:
             )
             return fallback
 
+    def is_env_override(self, section: str, key: str) -> bool:
+        """Check if a configuration value is currently overridden by an environment variable.
+
+        Args:
+            section: The configuration section name.
+            key: The configuration key.
+
+        Returns:
+            True if an environment variable override is active for this key.
+        """
+        return self._env_override(section, key) is not None
+
     def update(self, section: str, key: str, value: str) -> None:
         """Update a configuration value and persist to disk.
+
+        Skips writing to disk when the key is overridden by an environment
+        variable to prevent secrets from being persisted to config.ini.
 
         Args:
             section: The configuration section name.
@@ -253,6 +314,13 @@ class Settings:
         Raises:
             ConfigurationError: If the section does not exist or write fails.
         """
+        if self.is_env_override(section, key):
+            self.logger.info(
+                "Skipping disk write for [%s] %s (env var override active)",
+                section, key,
+            )
+            return
+
         if not self._config.has_section(section):
             self._config.add_section(section)
 

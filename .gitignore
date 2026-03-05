@@ -11,3 +11,6 @@ logs/
 downloads/
 *.log
 *.key
+
+# Local config may contain credentials — use config.ini.example as template
+motorola_downloader/config.local.ini
