@@ -114,6 +114,20 @@ on:
         default: ""
         type: string
 
+      # ── AI CAPTCHA solver ──────────────────────────────────────────────────
+      ai_captcha:
+        description: >
+          Enable AI-powered CAPTCHA solving using GitHub Models vision API.
+          Requires the AI_TOKEN secret to be configured in the repository.
+        required: false
+        default: true
+        type: boolean
+      ai_model:
+        description: "GitHub Models vision model for CAPTCHA solving (default: openai/gpt-4o)"
+        required: false
+        default: "openai/gpt-4o"
+        type: string
+
       # ── Cloudflare bypass ─────────────────────────────────────────────────
       cf_clearance:
         description: >
@@ -322,11 +336,17 @@ jobs:
       - name: Run web crawler
         env:
           ONT_TOKEN:       ${{ secrets.ONT }}
+          GITHUB_TOKEN:    ${{ secrets.AI_TOKEN }}
           LMSA_JWT:        ${{ inputs.lmsa_jwt }}
           LMSA_WUST:       ${{ inputs.lmsa_wust }}
-          LMSA_EMAIL:      ${{ inputs.lmsa_email }}
-          LMSA_PASSWORD:   ${{ inputs.lmsa_password }}
+          LMSA_EMAIL_INPUT:    ${{ inputs.lmsa_email }}
+          LMSA_PASSWORD_INPUT: ${{ inputs.lmsa_password }}
+          LMSA_EMAIL_SECRET:   ${{ secrets.LMSA_EMAIL }}
+          LMSA_PASSWORD_SECRET: ${{ secrets.LMSA_PASSWORD }}
         run: |
+          # ── Resolve LMSA credentials (input overrides secret) ────────────
+          LMSA_EMAIL="${LMSA_EMAIL_INPUT:-$LMSA_EMAIL_SECRET}"
+          LMSA_PASSWORD="${LMSA_PASSWORD_INPUT:-$LMSA_PASSWORD_SECRET}"
           # Re-apply git credentials if repo was created
           if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
             cd downloaded_site
@@ -366,6 +386,16 @@ jobs:
           fi
           [ -n "${{ inputs.lmsa_country }}" ] && \
             EXTRA_ARGS="$EXTRA_ARGS --lmsa-country '${{ inputs.lmsa_country }}'"
+
+          # ── AI CAPTCHA solver ────────────────────────────────────────────
+          # GITHUB_TOKEN is set via env from secrets.AI_TOKEN above;
+          # the AI module reads it automatically from the environment.
+          if [ "${{ inputs.ai_captcha }}" = "true" ] && [ -n "$GITHUB_TOKEN" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --ai-captcha --ai-model '${{ inputs.ai_model }}'"
+            echo "🤖 AI CAPTCHA solving enabled (model: ${{ inputs.ai_model }})"
+          elif [ "${{ inputs.ai_captcha }}" = "true" ]; then
+            echo "::warning::AI CAPTCHA enabled but AI_TOKEN secret is not set — AI solver will be skipped"
+          fi
 
           # ── git push ────────────────────────────────────────────────────
           GIT_PUSH_ARG=""
@@ -517,6 +547,8 @@ jobs:
             | **Concurrency** | ${{ inputs.concurrency }} workers |
             | **Skip media files** | ${{ inputs.skip_media_files }} |
             | **Skip CAPTCHA check** | ${{ inputs.skip_captcha }} |
+            | **AI CAPTCHA solver** | ${{ inputs.ai_captcha }} |
+            | **AI model** | ${{ inputs.ai_model }} |
             | **LMSA country** | ${{ inputs.lmsa_country || '(all regions)' }} |
             | **Debug mode** | ${{ inputs.debug }} |
             | **Run** | #${{ github.run_number }} |
