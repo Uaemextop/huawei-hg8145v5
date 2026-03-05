@@ -237,5 +237,192 @@ class TestSolveCaptchaImage(unittest.TestCase):
         self.assertEqual(result, "")
 
 
+# ------------------------------------------------------------------ #
+# LenovoIDAuth._solve_captcha_with_ai integration
+# ------------------------------------------------------------------ #
+
+class TestLenovoIDCaptchaIntegration(unittest.TestCase):
+    """Test the AI CAPTCHA solver integration in LenovoIDAuth.
+
+    Verifies that ``_solve_captcha_with_ai`` correctly delegates to the
+    AI module and processes results without requiring real credentials
+    or a real browser.
+    """
+
+    def _make_auth(self):
+        from web_crawler.auth.lenovo_id import LenovoIDAuth
+        return LenovoIDAuth(verify_ssl=False)
+
+    def test_returns_none_without_github_token(self):
+        """With no GITHUB_TOKEN the method should bail out gracefully."""
+        auth = self._make_auth()
+        page = MagicMock()
+        captured: list[str] = []
+        with patch.dict("os.environ", {}, clear=True):
+            result = auth._solve_captcha_with_ai(page, captured)
+        self.assertIsNone(result)
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_returns_wust_on_success(self, _mock_openai):
+        """When AI solves the CAPTCHA and the page redirects, WUST is captured."""
+        auth = self._make_auth()
+
+        # Simulate a Playwright page object
+        page = MagicMock()
+        el = MagicMock()
+        el.is_visible.return_value = True
+        page.query_selector.return_value = el
+        # After CAPTCHA submit, URL contains the WUST token
+        page.url = "https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=FAKE_WUST_TOKEN"
+
+        captured: list[str] = []
+
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}, clear=False):
+            with patch("web_crawler.ai.captcha_solver.AICaptchaSolver") as MockSolver:
+                mock_solver_instance = MagicMock()
+                mock_solver_instance.solve_captcha_on_page.return_value = "AB12"
+                MockSolver.return_value = mock_solver_instance
+
+                result = auth._solve_captcha_with_ai(page, captured)
+
+        self.assertEqual(result, "FAKE_WUST_TOKEN")
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_returns_none_when_ai_fails_all_attempts(self, _mock_openai):
+        """If the AI solver fails all attempts, None is returned."""
+        auth = self._make_auth()
+
+        page = MagicMock()
+        page.url = "https://passport.lenovo.com/login"
+
+        captured: list[str] = []
+
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}, clear=False):
+            with patch("web_crawler.ai.captcha_solver.AICaptchaSolver") as MockSolver:
+                mock_solver_instance = MagicMock()
+                # AI returns None for all attempts
+                mock_solver_instance.solve_captcha_on_page.return_value = None
+                MockSolver.return_value = mock_solver_instance
+
+                result = auth._solve_captcha_with_ai(page, captured)
+
+        self.assertIsNone(result)
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_reads_ai_model_from_env(self, mock_openai):
+        """AI_MODEL env var is respected for model selection."""
+        auth = self._make_auth()
+
+        page = MagicMock()
+        page.url = "https://passport.lenovo.com/login"
+        captured: list[str] = []
+
+        with patch.dict("os.environ", {
+            "GITHUB_TOKEN": "ghp_test123",
+            "AI_MODEL": "openai/gpt-4o-mini",
+        }, clear=False):
+            with patch("web_crawler.ai.captcha_solver.AICaptchaSolver") as MockSolver:
+                mock_solver_instance = MagicMock()
+                mock_solver_instance.solve_captcha_on_page.return_value = None
+                MockSolver.return_value = mock_solver_instance
+
+                with patch(
+                    "web_crawler.ai.github_models.GitHubModelsClient",
+                ) as MockClient:
+                    # Prevent actual API calls
+                    MockClient.return_value = MagicMock()
+
+                    auth._solve_captcha_with_ai(page, captured)
+
+                    # Verify the model was passed
+                    MockClient.assert_called_once()
+                    call_kwargs = MockClient.call_args
+                    self.assertEqual(
+                        call_kwargs.kwargs.get("model"),
+                        "openai/gpt-4o-mini",
+                    )
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_wust_from_captured_url(self, _mock_openai):
+        """WUST is detected from the captured navigation URL list."""
+        auth = self._make_auth()
+
+        page = MagicMock()
+        el = MagicMock()
+        el.is_visible.return_value = True
+        page.query_selector.return_value = el
+        page.url = "https://passport.lenovo.com/login"  # No WUST in page.url
+
+        # WUST was captured in a navigation event
+        captured = [
+            "https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=CAPTURED_WUST"
+        ]
+
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}, clear=False):
+            with patch("web_crawler.ai.captcha_solver.AICaptchaSolver") as MockSolver:
+                mock_solver_instance = MagicMock()
+                mock_solver_instance.solve_captcha_on_page.return_value = "1234"
+                MockSolver.return_value = mock_solver_instance
+
+                result = auth._solve_captcha_with_ai(page, captured)
+
+        self.assertEqual(result, "CAPTURED_WUST")
+
+
+# ------------------------------------------------------------------ #
+# Endpoint fallback
+# ------------------------------------------------------------------ #
+
+class TestEndpointFallback(unittest.TestCase):
+    """Test the primary → Azure endpoint fallback in _request."""
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    def _make_client(self):
+        with patch("web_crawler.ai.github_models.OpenAI"):
+            return GitHubModelsClient(token="ghp_test123")
+
+    def test_strips_openai_prefix_for_azure(self):
+        """When falling back to Azure, 'openai/' prefix is stripped."""
+        client = self._make_client()
+        client._model = "openai/gpt-4o"
+
+        # Primary client raises
+        client._client.chat.completions.create.side_effect = Exception("primary fail")
+
+        # Mock the fallback OpenAI constructor
+        mock_fallback_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "test response"
+        mock_fallback_client.chat.completions.create.return_value = mock_response
+
+        with patch("web_crawler.ai.github_models.OpenAI", return_value=mock_fallback_client):
+            result = client._request([{"role": "user", "content": "hello"}])
+
+        # Verify the Azure call used model without openai/ prefix
+        call_kwargs = mock_fallback_client.chat.completions.create.call_args
+        self.assertEqual(call_kwargs.kwargs.get("model", call_kwargs[1].get("model", "")), "gpt-4o")
+        self.assertEqual(result, "test response")
+
+    def test_no_fallback_for_custom_endpoint(self):
+        """Custom endpoints don't fall back to Azure."""
+        with patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True):
+            with patch("web_crawler.ai.github_models.OpenAI"):
+                client = GitHubModelsClient(
+                    token="ghp_test123",
+                    endpoint="https://custom.example.com",
+                )
+
+        client._client.chat.completions.create.side_effect = Exception("fail")
+
+        with self.assertRaises(Exception) as ctx:
+            client._request([{"role": "user", "content": "hello"}])
+        self.assertIn("fail", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
