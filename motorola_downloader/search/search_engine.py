@@ -4,10 +4,17 @@ Orchestrates searches across Motorola/LMSA APIs, combining results
 from multiple endpoints with deduplication, filtering, and caching.
 Delegates all API calls to LMSAClient (api_client.py) which implements
 all 16 LMSA endpoints with correct request body and header handling.
+
+Multi-variant search:
+  When the user searches for a Motorola codename like "lamu", the engine
+  automatically expands it into known variants (lamu, lamuc, lamug,
+  lamumite, …) and queries each against the firmware API with multiple
+  flash-tool types (QComFlashTool, MTekFlashTool, …).  The ROM
+  catalogue and tools searches also match all variants.
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from motorola_downloader.utils.api_client import LMSAClient, FIRMWARE_COUNTRIES
 from motorola_downloader.auth.session_manager import SessionManager
@@ -26,6 +33,16 @@ CONTENT_TYPES = {
     "tools": "Tools",
     "all": "All",
 }
+
+# Flash tool types observed in LMSA traffic.  The firmware API returns
+# different (or no) results depending on which tool is requested.
+FLASH_TOOL_TYPES = (
+    "QComFlashTool",
+    "MTekFlashTool",
+    "MTekSpFlashTool",
+    "QFileTool",
+    "PnPTool",
+)
 
 
 class SearchResult:
@@ -455,6 +472,47 @@ class SearchEngine:
         self.logger.info("Search cache cleared")
 
     # -----------------------------------------------------------------------
+    # Model variant expansion
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _expand_model_variants(query: str) -> List[str]:
+        """Expand a model codename into known variant suffixes.
+
+        Motorola uses codename families where the base name is shared
+        across regional/carrier/chipset variants.  For example the
+        "lamu" family includes: lamu, lamuc, lamug, lamumite.
+
+        The expansion algorithm:
+          1. Always include the original query.
+          2. Append common Motorola suffixes (c, g, mite, ds, f, p, s,
+             plus, lite, ultra) unless the query already ends with that
+             suffix.
+          3. Return a deduplicated, ordered list.
+
+        Args:
+            query: User-provided model name or codename.
+
+        Returns:
+            List of model name variants to search (always ≥ 1 item).
+        """
+        base = query.strip().lower()
+        if not base:
+            return [query]
+
+        # Common Motorola codename suffixes observed in ROM catalogue
+        _SUFFIXES = ("c", "g", "mite", "ds", "f", "p", "s",
+                     "plus", "lite", "ultra")
+
+        variants: list[str] = [base]
+        for suffix in _SUFFIXES:
+            candidate = base + suffix
+            if candidate != base:
+                variants.append(candidate)
+
+        return variants
+
+    # -----------------------------------------------------------------------
     # Private search methods — delegate to LMSAClient
     # -----------------------------------------------------------------------
 
@@ -463,13 +521,15 @@ class SearchEngine:
     ) -> List[SearchResult]:
         """Search for firmware via LMSAClient.get_firmware().
 
-        Delegates to api_client.py which handles correct headers, body,
-        and JWT rotation for /rescueDevice/getNewResource.jhtml.
+        Expands the query into codename variants and queries each variant
+        against the firmware API with multiple flash-tool types.  This
+        catches results for lamu, lamuc, lamug, lamumite, etc. in a
+        single user search.
 
         Also searches by IMEI or serial number if provided in filters.
 
         Args:
-            query: Device model name (e.g. 'xt2553-2').
+            query: Device model name or codename (e.g. 'lamu', 'xt2553-2').
             filters: Search filters (region, carrier, imei, serial, etc.).
 
         Returns:
@@ -477,22 +537,39 @@ class SearchEngine:
         """
         results: List[SearchResult] = []
         region = filters.get("region", self._default_region)
+        carrier = filters.get("carrier", "")
+        seen_urls: Set[str] = set()
+
+        variants = self._expand_model_variants(query)
+        self.logger.info(
+            "Firmware search: query='%s' → %d variants, %d flash tools",
+            query, len(variants), len(FLASH_TOOL_TYPES),
+        )
 
         try:
-            # Primary: search by model name
-            data = self._api.get_firmware(
-                model_name=query,
-                region=region,
-                carrier=filters.get("carrier", ""),
-            )
-            if data:
-                firmware_data = data.get("data")
-                if firmware_data and isinstance(firmware_data, dict):
-                    results.extend(self._parse_resource_data(firmware_data, query))
-                elif firmware_data and isinstance(firmware_data, list):
-                    for item in firmware_data:
-                        if isinstance(item, dict):
-                            results.extend(self._parse_resource_data(item, query))
+            for variant in variants:
+                for flash_tool in FLASH_TOOL_TYPES:
+                    data = self._api.get_firmware(
+                        model_name=variant,
+                        region=region,
+                        carrier=carrier,
+                        flash_tool_type=flash_tool,
+                    )
+                    if not data:
+                        continue
+                    firmware_data = data.get("data")
+                    if firmware_data and isinstance(firmware_data, dict):
+                        for r in self._parse_resource_data(firmware_data, variant):
+                            if r.download_url not in seen_urls:
+                                seen_urls.add(r.download_url)
+                                results.append(r)
+                    elif firmware_data and isinstance(firmware_data, list):
+                        for item in firmware_data:
+                            if isinstance(item, dict):
+                                for r in self._parse_resource_data(item, variant):
+                                    if r.download_url not in seen_urls:
+                                        seen_urls.add(r.download_url)
+                                        results.append(r)
 
             # Additional: search by IMEI if provided
             imei = filters.get("imei", "")
@@ -522,8 +599,8 @@ class SearchEngine:
     ) -> List[SearchResult]:
         """Search for ROMs via LMSAClient.get_all_roms().
 
-        Delegates to api_client.py which handles correct headers, body,
-        and JWT rotation for /priv/getRomList.jhtml.
+        Expands the query into codename variants so that a search for
+        "lamu" also returns ROMs named ``fastboot_lamuc_*``, etc.
 
         Args:
             query: Search query string (model name or keyword).
@@ -536,7 +613,8 @@ class SearchEngine:
 
         try:
             roms = self._api.get_all_roms()
-            query_lower = query.lower()
+            variants = self._expand_model_variants(query)
+            variant_set = {v.lower() for v in variants}
 
             for rom in roms:
                 name = rom.get("name", "")
@@ -547,8 +625,9 @@ class SearchEngine:
                 if rom_type != 0:
                     continue
 
-                # Filter by query if provided
-                if query and query_lower not in name.lower():
+                # Match if ANY variant appears in the ROM name
+                name_lower = name.lower()
+                if query and not any(v in name_lower for v in variant_set):
                     continue
 
                 download_url = normalize_url(uri)
@@ -572,6 +651,9 @@ class SearchEngine:
         """Search for tools via LMSAClient.get_all_roms() (type=1)
         and LMSAClient.get_plugin_urls().
 
+        Expands the query into codename variants for ROM-catalogue
+        tools (same family matching as ``_search_roms``).
+
         Args:
             query: Search query string.
             filters: Search filters.
@@ -584,12 +666,15 @@ class SearchEngine:
         try:
             # Source 1: ROM catalogue tools (type=1)
             roms = self._api.get_all_roms()
-            query_lower = query.lower() if query else ""
+            variants = self._expand_model_variants(query)
+            variant_set = {v.lower() for v in variants}
+
             for item in roms:
                 if item.get("type") != 1:
                     continue
                 name = item.get("name", "")
-                if query_lower and query_lower not in name.lower():
+                name_lower = name.lower()
+                if query and not any(v in name_lower for v in variant_set):
                     continue
                 download_url = normalize_url(item.get("uri", ""))
                 result = SearchResult(
@@ -603,6 +688,7 @@ class SearchEngine:
 
             # Source 2: Plugin category list + static tool URLs
             plugin_urls = self._api.get_plugin_urls()
+            query_lower = query.lower() if query else ""
             for url, name in plugin_urls:
                 if query_lower and query_lower not in name.lower():
                     continue
