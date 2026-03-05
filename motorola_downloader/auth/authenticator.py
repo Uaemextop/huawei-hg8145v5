@@ -120,26 +120,32 @@ class Authenticator:
             self._refresh_token_value = stored_refresh
             self.logger.info("Loaded existing refresh token from configuration")
 
-    def authenticate(self, guid: str, password: str = "OSD") -> bool:
-        """Authenticate with the Motorola server and obtain a JWT token.
+    def authenticate(self, guid: str = "", password: str = "") -> bool:
+        """Full anonymous auth flow: fetch RSA key → encrypt GUID → initToken.
 
-        Sends login credentials to the LMSA API endpoint and stores the
-        returned JWT token. Uses exponential backoff for retry attempts.
+        Matches lmsa.py authenticate() exactly:
+          1. POST /common/rsa.jhtml with empty dparams → RSA key in `desc`
+          2. RSA-encrypt the GUID with PKCS1_v1_5
+          3. POST /client/initToken.jhtml with dparams: {guid: ENCRYPTED_GUID}
+          4. JWT arrives in response Authorization header (when Guid echo matches)
 
-        Login uses author=False (matching LMSA lenovoIdLogin.jhtml which
-        sets author: false — no guid/Authorization in request headers).
+        If pycryptodome is not available, falls back to from_jwt() flow.
 
         Args:
-            guid: Device unique identifier (UUID v4 format).
-            password: Authentication password (default: OSD per LMSA convention).
+            guid: Device GUID (UUID v4). Uses stored GUID if empty.
+            password: Unused (kept for API compatibility). LMSA uses RSA, not passwords.
 
         Returns:
-            True if authentication was successful, False otherwise.
+            True if authentication was successful.
 
         Raises:
             AuthenticationError: If credentials are invalid after all retries.
-            ConnectionError: If unable to connect to the server.
         """
+        guid = guid or self._guid
+        if not guid:
+            guid = str(uuid.uuid4()).lower()
+            self.logger.info("Generated new GUID for authentication")
+
         if not validate_guid(guid):
             raise AuthenticationError(f"Invalid GUID format: {mask_sensitive(guid)}")
 
@@ -150,43 +156,29 @@ class Authenticator:
 
         for attempt in range(1, MAX_AUTH_RETRIES + 1):
             try:
-                login_url = f"{self._base_url}{_EP_LOGIN}"
+                # Step 1: Fetch RSA public key
+                self.logger.info("Step 1: Fetching RSA public key...")
+                rsa_key_b64 = self._fetch_rsa_key()
+                if not rsa_key_b64:
+                    self.logger.warning("Failed to fetch RSA key (attempt %d/%d)", attempt, MAX_AUTH_RETRIES)
+                    continue
 
-                # Build RequestModel envelope (matching lmsa.py _build_request_model)
-                request_body = self._request_builder.build_login(guid)
+                # Step 2: RSA-encrypt the GUID
+                self.logger.info("Step 2: Encrypting GUID with RSA...")
+                encrypted_guid = self._rsa_encrypt_guid(guid, rsa_key_b64)
+                if not encrypted_guid:
+                    self.logger.warning("RSA encryption failed (attempt %d/%d)", attempt, MAX_AUTH_RETRIES)
+                    continue
 
-                # Login uses author=False (no guid/Authorization headers)
-                # Matches lmsa.py: _post(_EP_LOGIN, params, author=False)
-                auth_headers = self._header_manager.get_full_api_headers(author=False)
-
-                response = self._http_client.post(
-                    login_url,
-                    json_data=request_body,
-                    headers=auth_headers,
-                )
-
-                response_data = response.json()
-                response_code = response_data.get("code", "")
-
-                # Check for JWT token rotation in response headers
-                # (matching lmsa.py _post() Guid echo + Authorization update)
-                jwt_updated = self._header_manager.update_jwt_from_response(
-                    dict(response.headers)
-                )
-
-                if response_code == _CODE_OK:
-                    jwt = response.headers.get("Authorization", "")
-                    if jwt:
-                        self._jwt_token = jwt.removeprefix("Bearer ").strip()
-                        self._header_manager.set_jwt_token(self._jwt_token)
-                        self._extract_expiry(jwt)
-                        self._store_token(guid, jwt)
-                        self.logger.info("Authentication successful")
-                        return True
+                # Step 3: POST initToken with encrypted GUID
+                self.logger.info("Step 3: Initializing session token...")
+                success = self._init_token(encrypted_guid)
+                if success:
+                    self.logger.info("Authentication successful")
+                    return True
 
                 self.logger.warning(
-                    "Authentication attempt %d/%d failed: code=%s",
-                    attempt, MAX_AUTH_RETRIES, response_code,
+                    "initToken failed (attempt %d/%d)", attempt, MAX_AUTH_RETRIES,
                 )
 
             except Exception as exc:
@@ -203,6 +195,310 @@ class Authenticator:
         raise AuthenticationError(
             "Authentication failed after all retry attempts"
         )
+
+    def authenticate_with_wust(self, wust: str, guid: str = "") -> bool:
+        """Authenticate using a WUST token (from Lenovo ID OAuth).
+
+        Matches lenovo_id.py _exchange_wust_for_jwt() exactly:
+          - POST /user/lenovoIdLogin.jhtml
+          - author: false → NO guid/Authorization in request headers
+          - Body: dparams: {wust: WUST, guid: PLAIN_GUID}
+          - JWT in Authorization response header (when Guid echo matches)
+
+        Args:
+            wust: WUST token from Lenovo ID OAuth callback.
+            guid: Device GUID. Generates new one if empty.
+
+        Returns:
+            True if authentication was successful.
+
+        Raises:
+            AuthenticationError: If WUST is invalid or exchange fails.
+        """
+        guid = guid or self._guid or str(uuid.uuid4()).lower()
+
+        if not validate_guid(guid):
+            raise AuthenticationError(f"Invalid GUID format: {mask_sensitive(guid)}")
+
+        self._guid = guid
+        self._header_manager.set_guid(guid)
+        self._request_builder.set_guid(guid)
+        self.logger.info("Exchanging WUST for JWT with GUID %s", mask_sensitive(guid))
+
+        login_url = f"{self._base_url}{_EP_LOGIN}"
+
+        # Build RequestModel: dparams: {wust: WUST, guid: PLAIN_GUID}
+        request_body = self._request_builder.build_login(guid, wust=wust)
+
+        # author: false — NO guid/Authorization in request headers
+        # Only _BASE_HEADERS are sent (matching lenovo_id.py line 625)
+        headers = self._header_manager.get_full_api_headers(author=False)
+
+        try:
+            response = self._http_client.post(
+                login_url,
+                json_data=request_body,
+                headers=headers,
+            )
+        except Exception as exc:
+            raise AuthenticationError(f"lenovoIdLogin POST failed: {exc}") from exc
+
+        # Extract JWT from response headers
+        # Matching lenovo_id.py lines 639-645:
+        #   guid_resp = r.headers.get("Guid", "")
+        #   auth_hdr  = r.headers.get("Authorization", "")
+        #   if guid_resp.lower() == guid and auth_hdr: jwt = auth_hdr
+        jwt = self._extract_jwt_from_response(response, guid)
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise AuthenticationError(f"Non-JSON response from lenovoIdLogin") from exc
+
+        code = data.get("code", "")
+        if code == "402":
+            raise AuthenticationError("WUST rejected (expired or invalid)")
+        if code == "403":
+            raise AuthenticationError("Invalid token (server-side)")
+        if code != _CODE_OK:
+            raise AuthenticationError(f"lenovoIdLogin error {code}: {data.get('desc', '')}")
+
+        # JWT may also be in response body content
+        if not jwt:
+            content = data.get("content") or data.get("data") or {}
+            if isinstance(content, dict):
+                jwt = content.get("token") or content.get("jwt")
+
+        if jwt:
+            raw_token = jwt.removeprefix("Bearer ").strip()
+            self._jwt_token = raw_token
+            self._header_manager.set_jwt_token(raw_token)
+            self._extract_expiry(jwt)
+            self._store_token(guid, jwt)
+            self.logger.info("WUST→JWT exchange successful")
+            return True
+
+        # lmsa.py: "initToken succeeded but no JWT in response headers"
+        self.logger.warning("lenovoIdLogin succeeded (code 0000) but no JWT found")
+        return True
+
+    def from_jwt(self, jwt: str, guid: str) -> bool:
+        """Create an authenticated session from a captured JWT and GUID.
+
+        Matches lmsa.py LMSASession.from_jwt():
+        Use when JWT is available from a HAR/proxy capture.
+
+        Args:
+            jwt: Raw JWT token (with or without Bearer prefix).
+            guid: Device GUID that was used to obtain the JWT.
+
+        Returns:
+            True if credentials were set successfully.
+
+        Raises:
+            AuthenticationError: If GUID format is invalid.
+        """
+        if not validate_guid(guid):
+            raise AuthenticationError(f"Invalid GUID format: {mask_sensitive(guid)}")
+
+        self._guid = guid
+        raw_token = jwt.removeprefix("Bearer ").strip()
+        self._jwt_token = raw_token
+        self._header_manager.set_guid(guid)
+        self._header_manager.set_jwt_token(raw_token)
+        self._request_builder.set_guid(guid)
+        self._store_token(guid, jwt)
+        self.logger.info("Session created from captured JWT + GUID")
+        return True
+
+    # ------------------------------------------------------------------
+    # Internal helpers — matching lmsa.py authentication flow
+    # ------------------------------------------------------------------
+
+    def _post(
+        self,
+        endpoint: str,
+        params: Dict[str, Any],
+        author: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """POST a RequestModel to an endpoint and return parsed JSON.
+
+        Matches lmsa.py _post() exactly: builds RequestModel envelope,
+        sends with correct headers (author flag), extracts JWT from
+        response headers via Guid echo + Authorization pattern.
+
+        Args:
+            endpoint: API endpoint path (e.g. '/common/rsa.jhtml').
+            params: Parameters for the dparams section.
+            author: Whether to include auth headers (default True).
+
+        Returns:
+            Parsed JSON response dict, or None on failure.
+        """
+        url = f"{self._base_url}{endpoint}"
+        body = self._request_builder.build(params)
+        headers = self._header_manager.get_full_api_headers(author=author)
+
+        try:
+            response = self._http_client.post(
+                url,
+                json_data=body,
+                headers=headers,
+            )
+        except Exception as exc:
+            self.logger.error("POST %s failed: %s", endpoint, exc)
+            return None
+
+        # Extract JWT from response headers (lmsa.py _post() lines 401-410)
+        guid_hdr = response.headers.get("Guid", "")
+        auth_hdr = response.headers.get("Authorization", "")
+        if guid_hdr == self._guid and auth_hdr:
+            raw_token = auth_hdr.removeprefix("Bearer ").strip()
+            if raw_token != self._jwt_token:
+                self._jwt_token = raw_token
+                self._header_manager.set_jwt_token(raw_token)
+                self.logger.info("JWT token updated from %s response", endpoint)
+
+        if response.status_code != 200:
+            self.logger.error(
+                "POST %s → HTTP %d: %s",
+                endpoint, response.status_code, response.text[:200],
+            )
+            return None
+
+        try:
+            return response.json()
+        except ValueError:
+            self.logger.error(
+                "POST %s → non-JSON response: %s", endpoint, response.text[:200]
+            )
+            return None
+
+    def _fetch_rsa_key(self) -> Optional[str]:
+        """Fetch the server's RSA public key.
+
+        Matches lmsa.py get_rsa_public_key():
+          - POST /common/rsa.jhtml with empty dparams: {}
+          - Response: code "0000", desc: "<PKCS8 Base64 key>"
+          - Key is in `desc` field (NOT `data`)
+
+        Returns:
+            Base64-encoded RSA public key string, or None on failure.
+        """
+        data = self._post(_EP_RSA_KEY, {})
+        if data is None:
+            return None
+
+        if data.get("code") != _CODE_OK:
+            self.logger.error(
+                "RSA key error code: %s desc: %s",
+                data.get("code"), data.get("desc", ""),
+            )
+            return None
+
+        # Key is in the `desc` field as PKCS#8 Base64 (Java format)
+        key_b64: str = data.get("desc", "")
+        if not key_b64:
+            self.logger.error("RSA key response missing 'desc' field")
+            return None
+
+        self.logger.info("RSA public key fetched successfully")
+        return key_b64
+
+    def _rsa_encrypt_guid(self, guid_str: str, key_b64: str) -> Optional[str]:
+        """RSA-encrypt the GUID using the server's public key.
+
+        Matches lmsa.py rsa_encrypt_guid():
+          - Parse PKCS#8 DER key from Base64
+          - Encrypt with PKCS1_v1_5
+          - Return Base64-encoded ciphertext
+
+        Args:
+            guid_str: Plain GUID string to encrypt.
+            key_b64: Base64-encoded RSA public key from server.
+
+        Returns:
+            Base64-encoded encrypted GUID, or None if crypto unavailable.
+        """
+        try:
+            from Crypto.Cipher import PKCS1_v1_5
+            from Crypto.PublicKey import RSA
+        except ImportError:
+            self.logger.error(
+                "pycryptodome not installed — cannot encrypt GUID. "
+                "Install with: pip install pycryptodome"
+            )
+            return None
+
+        try:
+            key_der = base64.b64decode(key_b64.strip())
+            rsa_key = RSA.import_key(key_der)
+            cipher = PKCS1_v1_5.new(rsa_key)
+            encrypted = cipher.encrypt(guid_str.encode("utf-8"))
+            return base64.b64encode(encrypted).decode("ascii")
+        except Exception as exc:
+            self.logger.error("RSA encryption failed: %s", exc)
+            return None
+
+    def _init_token(self, encrypted_guid: str) -> bool:
+        """Initialize session token with encrypted GUID.
+
+        Matches lmsa.py authenticate() step 3:
+          - POST /client/initToken.jhtml
+          - dparams: {guid: ENCRYPTED_GUID}
+          - JWT arrives in response Authorization header
+
+        Args:
+            encrypted_guid: RSA-encrypted GUID (Base64 string).
+
+        Returns:
+            True if token was obtained successfully.
+        """
+        data = self._post(_EP_INIT_TOKEN, {"guid": encrypted_guid})
+        if data is None:
+            return False
+
+        if data.get("code") != _CODE_OK:
+            self.logger.error(
+                "initToken error: %s — %s",
+                data.get("code"), data.get("desc", ""),
+            )
+            return False
+
+        # JWT was already extracted by _post() via Guid echo pattern
+        if self._jwt_token:
+            self._extract_expiry(self._jwt_token)
+            self._store_token(self._guid, self._jwt_token)
+            return True
+
+        self.logger.warning("initToken succeeded but no JWT in response headers")
+        return True
+
+    def _extract_jwt_from_response(self, response: Any, guid: str) -> Optional[str]:
+        """Extract JWT from an API response matching lenovo_id.py pattern.
+
+        Checks both Guid echo + Authorization header (primary) and
+        bare Authorization header (fallback).
+
+        Args:
+            response: HTTP response object.
+            guid: Expected GUID in Guid response header.
+
+        Returns:
+            JWT string (may include Bearer prefix), or None.
+        """
+        guid_resp = response.headers.get("Guid", "")
+        auth_hdr = response.headers.get("Authorization", "")
+
+        # Primary: Guid echo matches (lmsa.py pattern)
+        if guid_resp.lower() == guid.lower() and auth_hdr:
+            return auth_hdr
+
+        # Fallback: bare Authorization header with Bearer prefix
+        if auth_hdr.startswith("Bearer "):
+            return auth_hdr[len("Bearer "):]
+
+        return None
 
     def refresh_token(self) -> bool:
         """Refresh an expired JWT token using the refresh token.

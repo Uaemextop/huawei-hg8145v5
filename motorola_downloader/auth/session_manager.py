@@ -95,6 +95,14 @@ class SessionManager:
                     self._last_activity_time = time.time()
                     self.logger.info("Session started with fresh authentication")
                     return True
+            else:
+                # No GUID configured — generate one and authenticate
+                if self._authenticator.authenticate():
+                    self._active = True
+                    self._session_start_time = time.time()
+                    self._last_activity_time = time.time()
+                    self.logger.info("Session started with auto-generated GUID")
+                    return True
 
             self.logger.warning(
                 "No GUID configured. Please set GUID in config.ini or authenticate manually"

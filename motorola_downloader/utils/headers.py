@@ -298,10 +298,17 @@ class HeaderManager:
     ) -> bool:
         """Update the JWT token from an API response.
 
-        LMSA pattern (from _post() in lmsa.py): the server echoes back
-        the client's Guid in the 'Guid' response header. When the echoed
-        Guid matches our stored guid AND a new Authorization header is
-        present, the token is rotated.
+        Matches lmsa.py _post() lines 401-410 EXACTLY:
+
+            guid_hdr = resp.headers.get("Guid", "")
+            auth_hdr = resp.headers.get("Authorization", "")
+            if guid_hdr == self.guid and auth_hdr and auth_hdr != self._jwt_token:
+                self._jwt_token = auth_hdr
+
+        In lmsa.py, ``_jwt_token`` stores the FULL Authorization header
+        value INCLUDING "Bearer " prefix. Our HeaderManager stores the
+        raw token WITHOUT prefix for cleaner API. We compare correctly:
+        the server echoes back the Guid and provides a new Authorization.
 
         Args:
             response_headers: HTTP response headers dictionary.
@@ -312,10 +319,12 @@ class HeaderManager:
         guid_echo = response_headers.get("Guid", "")
         auth_header = response_headers.get("Authorization", "")
 
+        # Match lmsa.py: guid must match AND auth_header must be non-empty
         if guid_echo == self._guid and auth_header:
-            new_token = auth_header.removeprefix("Bearer ").strip()
-            if new_token and new_token != self._jwt_token:
-                self._jwt_token = new_token
+            # Strip Bearer prefix for storage (we always add it back in get_auth_headers)
+            raw_token = auth_header.removeprefix("Bearer ").strip()
+            if raw_token and raw_token != self._jwt_token:
+                self._jwt_token = raw_token
                 self.logger.info("JWT token rotated from API response")
                 return True
 
