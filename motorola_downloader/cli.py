@@ -368,16 +368,16 @@ class CLI:
             table.add_column("Type", style="cyan", width=10)
             table.add_column("Name", style="white", max_width=30)
             table.add_column("Model", style="yellow", width=15)
-            table.add_column("Size", justify="right", style="magenta", width=10)
+            table.add_column("Server", style="magenta", width=8)
 
             for idx, result in enumerate(results, 1):
-                size_str = self._format_size(result.file_size) if result.file_size else "N/A"
+                srv = result.server if hasattr(result, "server") else "prod"
                 table.add_row(
                     str(idx),
                     result.content_type,
                     result.name[:30],
                     result.model[:15],
-                    size_str,
+                    srv,
                 )
 
             _console.print()
@@ -388,18 +388,18 @@ class CLI:
             print(f"\n{header}")
             print(_c(f" Found {len(results)} results", Fore.GREEN if _COLORAMA else ""))
             print(header)
-            print(f" {'#':>3} | {'Type':<10} | {'Name':<25} | {'Model':<15} | {'Size':>10}")
+            print(f" {'#':>3} | {'Type':<10} | {'Name':<25} | {'Model':<15} | {'Server':>8}")
             print(f"{'-' * 80}")
 
             for idx, result in enumerate(results, 1):
-                size_str = self._format_size(result.file_size) if result.file_size else "N/A"
+                srv = result.server if hasattr(result, "server") else "prod"
                 name_display = result.name[:25] if len(result.name) > 25 else result.name
                 model_display = result.model[:15] if len(result.model) > 15 else result.model
                 idx_str = _c(f"{idx:>3}", Fore.YELLOW if _COLORAMA else "")
                 type_str = _c(f"{result.content_type:<10}", Fore.CYAN if _COLORAMA else "")
                 print(
                     f" {idx_str} | {type_str} | {name_display:<25} | "
-                    f"{model_display:<15} | {size_str:>10}"
+                    f"{model_display:<15} | {srv:>8}"
                 )
 
             print(f"{header}\n")

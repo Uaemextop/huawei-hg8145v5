@@ -63,6 +63,7 @@ class SearchResult:
         release_date: Release date string.
         content_type: Type of content (Firmware, ROM, Tools).
         checksum: File checksum if available.
+        server: Source server tag ("prod" or "test").
     """
 
     def __init__(
@@ -76,6 +77,7 @@ class SearchResult:
         release_date: str = "",
         content_type: str = "Firmware",
         checksum: str = "",
+        server: str = "prod",
     ) -> None:
         """Initialize a SearchResult.
 
@@ -89,6 +91,7 @@ class SearchResult:
             release_date: Release date string.
             content_type: Type of content.
             checksum: File checksum if available.
+            server: Source server tag ("prod" or "test").
         """
         self.name = name
         self.model = model
@@ -99,6 +102,7 @@ class SearchResult:
         self.release_date = release_date
         self.content_type = content_type
         self.checksum = checksum
+        self.server = server
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the search result to a dictionary.
@@ -116,6 +120,7 @@ class SearchResult:
             "release_date": self.release_date,
             "content_type": self.content_type,
             "checksum": self.checksum,
+            "server": self.server,
         }
 
     def __repr__(self) -> str:
@@ -699,7 +704,7 @@ class SearchEngine:
                             pair["modelName"], pair["marketName"],
                         )
                         for item in resolved:
-                            for r in self._parse_resource_data(item, query):
+                            for r in self._parse_resource_data(item, query, server=host_tag):
                                 if r.download_url and r.download_url not in seen_urls:
                                     seen_urls.add(r.download_url)
                                     results.append(r)
@@ -720,7 +725,7 @@ class SearchEngine:
                             firmware_data = data.get("data")
                             if firmware_data and isinstance(firmware_data, dict):
                                 for r in self._parse_resource_data(
-                                    firmware_data, variant
+                                    firmware_data, variant, server=host_tag,
                                 ):
                                     if r.download_url not in seen_urls:
                                         seen_urls.add(r.download_url)
@@ -729,7 +734,7 @@ class SearchEngine:
                                 for item in firmware_data:
                                     if isinstance(item, dict):
                                         for r in self._parse_resource_data(
-                                            item, variant
+                                            item, variant, server=host_tag,
                                         ):
                                             if r.download_url not in seen_urls:
                                                 seen_urls.add(r.download_url)
@@ -787,6 +792,7 @@ class SearchEngine:
         try:
             for host_url in self._base_urls:
                 self._switch_to_host(host_url)
+                host_tag = "prod" if "lsatest" not in host_url else "test"
                 try:
                     roms = self._api.get_all_roms()
                 except Exception:
@@ -815,6 +821,7 @@ class SearchEngine:
                         download_url=download_url,
                         content_type="ROM",
                         checksum=rom.get("md5", ""),
+                        server=host_tag,
                     )
                     results.append(result)
         except Exception as exc:
@@ -848,6 +855,7 @@ class SearchEngine:
         try:
             for host_url in self._base_urls:
                 self._switch_to_host(host_url)
+                host_tag = "prod" if "lsatest" not in host_url else "test"
                 try:
                     roms = self._api.get_all_roms()
                 except Exception:
@@ -870,6 +878,7 @@ class SearchEngine:
                         download_url=download_url,
                         content_type="Tools",
                         checksum=item.get("md5", ""),
+                        server=host_tag,
                     )
                     results.append(result)
 
@@ -886,6 +895,7 @@ class SearchEngine:
                             name=name,
                             download_url=url,
                             content_type="Tools",
+                            server=host_tag,
                         )
                         results.append(result)
                 except Exception:
@@ -926,7 +936,7 @@ class SearchEngine:
         return models
 
     def _parse_resource_data(
-        self, resource: Dict[str, Any], query: str
+        self, resource: Dict[str, Any], query: str, server: str = "prod",
     ) -> List[SearchResult]:
         """Parse a firmware resource dict into SearchResult objects.
 
@@ -988,6 +998,7 @@ class SearchEngine:
                     release_date=pub_date,
                     content_type="Firmware",
                     checksum=res.get("md5", ""),
+                    server=server,
                 )
                 results.append(result)
 
@@ -1007,6 +1018,7 @@ class SearchEngine:
                 file_size=int(tool_res.get("size", 0) or 0),
                 content_type=tool_type,
                 checksum=tool_res.get("md5", ""),
+                server=server,
             )
             results.append(result)
 
@@ -1021,6 +1033,7 @@ class SearchEngine:
                     version=version,
                     download_url=download_url,
                     content_type="FlashFlow",
+                    server=server,
                 )
                 results.append(result)
 
@@ -1036,6 +1049,7 @@ class SearchEngine:
                         version=version,
                         download_url=download_url,
                         content_type="Firmware",
+                        server=server,
                     )
                     results.append(result)
 

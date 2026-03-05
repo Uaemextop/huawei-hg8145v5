@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Motorola Firmware — File Explorer</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1><span class="logo">📱</span> Firmware Explorer</h1>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-item active" data-filter="all">
+      <span class="icon">📁</span> All Files <span class="badge" id="nav-all"></span>
+    </div>
+    <div class="nav-item" data-filter="rom">
+      <span class="icon">💿</span> ROMs <span class="badge" id="nav-rom"></span>
+    </div>
+    <div class="nav-item" data-filter="firmware">
+      <span class="icon">📦</span> Firmware <span class="badge" id="nav-firmware"></span>
+    </div>
+    <div class="nav-item" data-filter="flashtool">
+      <span class="icon">🔧</span> Flash Tools <span class="badge" id="nav-flashtool"></span>
+    </div>
+    <div class="nav-item" data-filter="flashflow">
+      <span class="icon">📋</span> Flash Flows <span class="badge" id="nav-flashflow"></span>
+    </div>
+    <div class="nav-item" data-filter="tools">
+      <span class="icon">🛠️</span> Tools <span class="badge" id="nav-tools"></span>
+    </div>
+    <hr style="border-color:rgba(255,255,255,.1);margin:8px 20px">
+    <div class="nav-item" data-filter="server-prod">
+      <span class="icon">🟢</span> Production Server
+    </div>
+    <div class="nav-item" data-filter="server-test">
+      <span class="icon">🟠</span> Test Server
+    </div>
+  </nav>
+  <div class="sidebar-footer">Motorola Firmware Downloader</div>
+</aside>
+
+<!-- Main content -->
+<div class="content">
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input id="search" type="search" placeholder="Search files, models, regions…" autofocus>
+    </div>
+    <span class="toolbar-stats" id="count"></span>
+    <div class="view-toggle">
+      <button class="view-btn active" id="btn-list" onclick="setView('list')">☰ List</button>
+      <button class="view-btn" id="btn-grid" onclick="setView('grid')">⊞ Grid</button>
+    </div>
+  </div>
+
+  <!-- Breadcrumb -->
+  <div class="breadcrumb">
+    <span onclick="resetFilter()">All Files</span> / <span id="crumb-filter">Showing all</span>
+  </div>
+
+  <!-- List view -->
+  <div class="file-area" id="list-view">
+    <table class="file-table">
+      <thead><tr>
+        <th style="width:38%" onclick="sortBy(0)">Name ↕</th>
+        <th style="width:10%" onclick="sortBy(1)">Type ↕</th>
+        <th style="width:18%" onclick="sortBy(2)">Model ↕</th>
+        <th style="width:14%" onclick="sortBy(3)">Region ↕</th>
+        <th style="width:10%" onclick="sortBy(4)">Server ↕</th>
+        <th style="width:10%"></th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- Grid view -->
+  <div class="file-grid" id="grid-view"></div>
+</div>
+
+<!-- Data injected by Python server -->
+<script>var DATA = /*__DATA__*/[];</script>
+<script src="/app.js"></script>
+</body>
+</html>
