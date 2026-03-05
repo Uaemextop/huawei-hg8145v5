@@ -568,6 +568,7 @@ class LenovoIDAuth:
         try:
             from web_crawler.ai.github_models import GitHubModelsClient
             from web_crawler.ai.captcha_solver import AICaptchaSolver
+            import base64 as _b64
         except ImportError as exc:
             _log(f"[LenovoID] AI module not available: {exc}")
             return None
@@ -578,8 +579,38 @@ class LenovoIDAuth:
         solver = AICaptchaSolver(ai_client=ai_client, max_attempts=max_attempts)
 
         _log("[LenovoID] [AI-CAPTCHA] Attempting to solve CAPTCHA…")
+
+        # Take a full-page screenshot for diagnostic analysis before
+        # attempting to solve.  This ensures the image is always sent
+        # to the AI model even when element-based detection fails.
+        try:
+            raw_screenshot = page.screenshot(full_page=True)  # type: ignore[union-attr]
+            page_b64 = _b64.b64encode(raw_screenshot).decode("ascii")
+            analysis = ai_client.analyze_page_captcha(page_b64)
+            if analysis:
+                _log(f"[LenovoID] [AI-CAPTCHA] Page analysis: {analysis[:200]}")
+        except Exception as exc:
+            _log(f"[LenovoID] [AI-CAPTCHA] Page screenshot/analysis error: {exc}")
+            page_b64 = ""
+
         for attempt in range(1, max_attempts + 1):
             solution = solver.solve_captcha_on_page(page)  # type: ignore[arg-type]
+            if not solution:
+                # Fallback: use the pre-captured full-page screenshot
+                # directly with the fullpage recogniser.
+                if page_b64:
+                    _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: "
+                         "element detection failed — trying fullpage screenshot")
+                    result = ai_client.recognize_captcha_fullpage(page_b64)
+                    if result.get("isSuccess"):
+                        solution = result["verificationCode"]
+                        upper = solution.upper()
+                        if upper in ("NO_CAPTCHA", "NOCAPTCHA",
+                                     "SLIDER", "CHECKBOX"):
+                            _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: "
+                                 f"AI detected '{upper}' — cannot auto-solve")
+                            solution = None
+
             if not solution:
                 _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: no solution")
                 continue

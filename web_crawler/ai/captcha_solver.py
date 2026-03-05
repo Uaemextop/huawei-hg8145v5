@@ -68,6 +68,17 @@ _CAPTCHA_IMAGE_SELECTORS = [
     # <input type="image"> elements (supported by the original extension)
     "input[type='image'][src*='captcha' i]",
     "input[type='image'][id*='captcha' i]",
+    # reCAPTCHA / hCaptcha / Akamai challenge containers
+    "iframe[src*='recaptcha' i]",
+    "iframe[src*='hcaptcha' i]",
+    "iframe[src*='captcha' i]",
+    "div[class*='g-recaptcha']",
+    "div[class*='h-captcha']",
+    "div[id*='captcha' i]",
+    "div[class*='captcha' i]",
+    "#akamai-challenge",
+    "div[id*='challenge' i]",
+    "canvas[id*='captcha' i]",
 ]
 
 _CAPTCHA_INPUT_SELECTORS = [
@@ -222,8 +233,61 @@ class AICaptchaSolver:
                     "form[action*='login' i]",
                     "form[action*='signin' i]",
                     "input[name*='captcha' i]",
+                    # SPA login pages (e.g. passport.lenovo.com)
+                    "input[type='email']",
+                    "input[type='text']",
+                    "#emailOrPhoneInput",
+                    "input[id*='account' i]",
+                    "input[name*='user' i]",
+                    "form",
                 ])
                 if not has_captcha and not has_login_form:
+                    # Last resort: take a full-page screenshot and ask
+                    # the AI if there is anything to solve.
+                    log.info(
+                        "[AI-CAPTCHA] No CAPTCHA element or login form "
+                        "detected — analysing full page screenshot"
+                    )
+                    try:
+                        raw = page.screenshot(full_page=True)
+                        fb64 = base64.b64encode(raw).decode("ascii")
+                    except Exception:
+                        fb64 = ""
+                    if fb64 and len(fb64) >= 300:
+                        analysis = self._ai.analyze_page_captcha(fb64)
+                        if analysis:
+                            log.info("[AI-CAPTCHA] Page analysis: %s",
+                                     analysis[:200])
+                        result = self._ai.recognize_captcha_fullpage(fb64)
+                        if result.get("isSuccess"):
+                            code = result["verificationCode"]
+                            upper = code.upper()
+                            if upper not in ("NO_CAPTCHA", "NOCAPTCHA"):
+                                log.info("[AI-CAPTCHA] AI found solution "
+                                         "from full page: %s", code)
+                                # Try to fill any visible input and submit
+                                captcha_input = self._find_element(
+                                    page, _CAPTCHA_INPUT_SELECTORS,
+                                )
+                                if captcha_input:
+                                    captcha_input.fill("")
+                                    captcha_input.type(code, delay=50)
+                                    captcha_input.dispatch_event("input")
+                                    captcha_input.dispatch_event("change")
+                                    self._click_submit(page)
+                                    page.wait_for_timeout(_CAPTCHA_WAIT_MS)
+                                    if self._is_login_success(page, url):
+                                        cookies = {
+                                            c["name"]: c["value"]
+                                            for c in context.cookies()
+                                        }
+                                        log.info(
+                                            "[AI-CAPTCHA] Login successful "
+                                            "from full-page analysis "
+                                            "(%d cookies)", len(cookies),
+                                        )
+                                        browser.close()
+                                        return cookies
                     log.warning(
                         "[AI-CAPTCHA] Page has no CAPTCHA or login form — "
                         "skipping (not a login page)"
@@ -302,12 +366,33 @@ class AICaptchaSolver:
         """Detect and solve a CAPTCHA on an already-open Playwright page.
 
         Returns the CAPTCHA solution string or ``None`` on failure.
+        Falls back to a full-page screenshot when no specific CAPTCHA
+        element is found (e.g. reCAPTCHA, Akamai challenges).
         """
         ctype = captcha_type or self._captcha_type
         screenshot_b64 = self._capture_captcha_image(page)
-        if not screenshot_b64:
-            return None
-        result = self._ai.recognize_captcha(screenshot_b64, ctype)
+
+        if screenshot_b64:
+            # Specific CAPTCHA element found — use standard recognition.
+            result = self._ai.recognize_captcha(screenshot_b64, ctype)
+        else:
+            # No dedicated CAPTCHA element — take a full-page screenshot
+            # and let the AI locate the challenge within the page.
+            log.debug("[AI-CAPTCHA] No CAPTCHA element found, using full "
+                      "page screenshot for recognition")
+            try:
+                raw = page.screenshot(full_page=True)
+                screenshot_b64 = base64.b64encode(raw).decode("ascii")
+            except Exception as exc:
+                log.warning("[AI-CAPTCHA] Full page screenshot failed: %s", exc)
+                return None
+            if len(screenshot_b64) < 300:
+                log.debug("[AI-CAPTCHA] Screenshot too small, skipping")
+                return None
+            result = self._ai.recognize_captcha_fullpage(
+                screenshot_b64, mime_type="image/png",
+            )
+
         if result.get("isSuccess"):
             code = result["verificationCode"]
             log.info("[AI-CAPTCHA] AI solution: %s", code)
@@ -338,10 +423,12 @@ class AICaptchaSolver:
         """
         # 1. Capture the CAPTCHA image as base64 (≈ getBase64Image)
         screenshot_b64 = self._capture_captcha_image(page, img_selector)
+        used_fullpage = False
         if not screenshot_b64:
             log.debug("[AI-CAPTCHA] No CAPTCHA element found, using full page")
-            raw = page.screenshot()
+            raw = page.screenshot(full_page=True)
             screenshot_b64 = base64.b64encode(raw).decode("ascii")
+            used_fullpage = True
 
         # Skip trivially small images (< 300 chars base64, same guard as
         # the extension: ``if base64Image.length < 300``)
@@ -350,7 +437,12 @@ class AICaptchaSolver:
             return False
 
         # 2. Ask the AI model to solve it (≈ recognizeCaptcha)
-        result = self._ai.recognize_captcha(screenshot_b64, captcha_type)
+        # Use the full-page prompt when no dedicated CAPTCHA element was
+        # found so the AI knows it must locate the challenge itself.
+        if used_fullpage:
+            result = self._ai.recognize_captcha_fullpage(screenshot_b64)
+        else:
+            result = self._ai.recognize_captcha(screenshot_b64, captcha_type)
         if not result.get("isSuccess"):
             log.warning("[AI-CAPTCHA] Backend error: %s", result.get("error"))
             return False
