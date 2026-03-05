@@ -1,0 +1,162 @@
+{
+  "puzzle1.json": {
+    "reference_image": "reference1.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 0,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 0
+  },
+  "puzzle2.json": {
+    "reference_image": "reference2.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 4,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 4
+  },
+  "puzzle3.json": {
+    "reference_image": "reference3.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image8.png", "image6.png", "image8.png"],
+    "correct_option": 4,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 4
+  },
+  "puzzle4.json": {
+    "reference_image": "reference4.png",
+    "options": ["image1.png", "image9.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 1,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 1
+  },
+  "puzzle5.json": {
+    "reference_image": "reference5.png",
+    "options": ["image1.png", "image2.png", "image10.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 2,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 2
+  },
+  "puzzle6.json": {
+    "reference_image": "reference6.png",
+    "options": ["image11.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 0,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 0
+  },
+  "puzzle7.json": {
+    "reference_image": "reference7.png",
+    "options": ["image12.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 0,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 0
+  },
+  "puzzle8.json": {
+    "reference_image": "reference8.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 6,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 6
+  },
+  "puzzle9.json": {
+    "reference_image": "reference9.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 1,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 1
+  },
+  "puzzle10.json": {
+    "reference_image": "reference10.png",
+    "options": ["image1.png", "image2.png", "image3.png", "image4.png", "image5.png", "image6.png", "image7.png"],
+    "correct_option": 2,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 2
+  },
+  "puzzle11.json": {
+    "reference_image": "reference11.png",
+    "options": ["image10.png", "image6.png", "image3.png", "image11.png", "image8.png", "image4.png", "image7.png"],
+    "correct_option": 3,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 3
+  },
+  "puzzle12.json": {
+    "reference_image": "reference12.png",
+    "options": ["image1.png", "image12.png", "image3.png", "image11.png", "image8.png", "image4.png", "image7.png"],
+    "correct_option": 1,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 1
+  },
+  "puzzle13.json": {
+    "reference_image": "reference13.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image18.png", "image17.png", "image20.png"],
+    "correct_option": 2,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 2
+  },
+  "puzzle14.json": {
+    "reference_image": "reference14.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 3,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 3
+  },
+  "puzzle15.json": {
+    "reference_image": "reference15.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 1,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 1
+  },
+  "puzzle16.json": {
+    "reference_image": "reference16.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 4,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 4
+  },
+  "puzzle17.json": {
+    "reference_image": "reference17.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 6,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 6
+  },
+  "puzzle18.json": {
+    "reference_image": "reference18.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 5,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 5
+  },
+  "puzzle19.json": {
+    "reference_image": "reference19.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 0,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 0
+  },
+  "puzzle20.json": {
+    "reference_image": "reference20.png",
+    "options": ["image19.png", "image15.png", "image13.png", "image14.png", "image16.png","image18.png", "image17.png", "image20.png"],
+    "correct_option": 7,
+    "prompt": "Using the arrows, connect the same two icons with the dotted line as shown on the left.",
+    "description": "Connect icons puzzle requiring matching the dotted line connection pattern",
+    "answer": 7
+  }
+} 
