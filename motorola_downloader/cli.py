@@ -1,14 +1,30 @@
 """Interactive CLI interface for Motorola Firmware Downloader.
 
 Provides a menu-driven command-line interface for searching, downloading,
-and configuring the firmware downloader. Handles user input validation,
-progress display, and graceful shutdown.
+and configuring the firmware downloader. Uses colorama for colored output,
+rich for formatted tables and panels, and tqdm for download progress bars.
+Handles user input validation, progress display, and graceful shutdown.
 """
 
 import os
 import signal
 import sys
 from typing import Any, Dict, List, Optional
+
+try:
+    from colorama import Fore, Style, init as colorama_init
+    colorama_init(autoreset=True)
+    _COLORAMA = True
+except ImportError:
+    _COLORAMA = False
+
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    _RICH = True
+except ImportError:
+    _RICH = False
 
 from motorola_downloader.auth.session_manager import SessionManager
 from motorola_downloader.download.download_manager import DownloadItem, DownloadManager
@@ -29,6 +45,28 @@ from motorola_downloader.utils.validators import (
 )
 
 _logger = get_logger(__name__)
+
+# Rich console instance (used when rich is available)
+_console = Console() if _RICH else None
+
+# ---------------------------------------------------------------------------
+# Color helper functions
+# ---------------------------------------------------------------------------
+
+
+def _c(text: str, color: str = "") -> str:
+    """Apply colorama color to text if available.
+
+    Args:
+        text: The text to colorize.
+        color: Colorama color constant (e.g., Fore.GREEN).
+
+    Returns:
+        Colorized text string, or plain text if colorama unavailable.
+    """
+    if _COLORAMA and color:
+        return f"{color}{text}{Style.RESET_ALL}"
+    return text
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -296,6 +334,9 @@ class CLI:
     def _display_results(self, results: List[SearchResult]) -> None:
         """Display search results in a formatted table.
 
+        Uses rich.Table when available for beautiful formatting,
+        falls back to plain text with colorama colors otherwise.
+
         Args:
             results: List of SearchResult objects to display.
         """
@@ -303,22 +344,51 @@ class CLI:
             self._print_info("No results found.")
             return
 
-        print(f"\n{'='*80}")
-        print(f" Found {len(results)} results")
-        print(f"{'='*80}")
-        print(f" {'#':>3} | {'Type':<10} | {'Name':<25} | {'Model':<15} | {'Size':>10}")
-        print(f"{'-'*80}")
-
-        for idx, result in enumerate(results, 1):
-            size_str = self._format_size(result.file_size) if result.file_size else "N/A"
-            name_display = result.name[:25] if len(result.name) > 25 else result.name
-            model_display = result.model[:15] if len(result.model) > 15 else result.model
-            print(
-                f" {idx:>3} | {result.content_type:<10} | {name_display:<25} | "
-                f"{model_display:<15} | {size_str:>10}"
+        if _RICH and _console:
+            table = Table(
+                title=f"Found {len(results)} results",
+                title_style="bold green",
+                show_lines=False,
             )
+            table.add_column("#", style="dim", width=4, justify="right")
+            table.add_column("Type", style="cyan", width=10)
+            table.add_column("Name", style="white", max_width=30)
+            table.add_column("Model", style="yellow", width=15)
+            table.add_column("Size", justify="right", style="magenta", width=10)
 
-        print(f"{'='*80}\n")
+            for idx, result in enumerate(results, 1):
+                size_str = self._format_size(result.file_size) if result.file_size else "N/A"
+                table.add_row(
+                    str(idx),
+                    result.content_type,
+                    result.name[:30],
+                    result.model[:15],
+                    size_str,
+                )
+
+            _console.print()
+            _console.print(table)
+            _console.print()
+        else:
+            header = _c(f"{'=' * 80}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(f" Found {len(results)} results", Fore.GREEN if _COLORAMA else ""))
+            print(header)
+            print(f" {'#':>3} | {'Type':<10} | {'Name':<25} | {'Model':<15} | {'Size':>10}")
+            print(f"{'-' * 80}")
+
+            for idx, result in enumerate(results, 1):
+                size_str = self._format_size(result.file_size) if result.file_size else "N/A"
+                name_display = result.name[:25] if len(result.name) > 25 else result.name
+                model_display = result.model[:15] if len(result.model) > 15 else result.model
+                idx_str = _c(f"{idx:>3}", Fore.YELLOW if _COLORAMA else "")
+                type_str = _c(f"{result.content_type:<10}", Fore.CYAN if _COLORAMA else "")
+                print(
+                    f" {idx_str} | {type_str} | {name_display:<25} | "
+                    f"{model_display:<15} | {size_str:>10}"
+                )
+
+            print(f"{header}\n")
 
     # -----------------------------------------------------------------------
     # Download operations
@@ -394,30 +464,64 @@ class CLI:
             self._print_error(f"Download error: {exc}")
 
     def _view_download_progress(self) -> None:
-        """Display progress for all active downloads."""
+        """Display progress for all active downloads with colors."""
         progress = self._download_manager.get_all_progress()
         if not progress:
             self._print_info("No active downloads.")
             return
 
-        print(f"\n{'='*70}")
-        print(" Download Progress")
-        print(f"{'='*70}")
+        if _RICH and _console:
+            table = Table(title="Download Progress", title_style="bold blue")
+            table.add_column("File", style="white", max_width=30)
+            table.add_column("Status", width=15)
+            table.add_column("Progress", justify="right", width=8)
+            table.add_column("Speed", justify="right", style="cyan", width=12)
+            table.add_column("ETA", justify="right", style="yellow", width=10)
 
-        for filename, prog in progress.items():
-            status = "✓ Complete" if prog.completed else ("✗ Failed" if prog.failed else "↓ Downloading")
-            percent = f"{prog.get_percent():.1f}%"
-            speed = prog.get_speed_str()
-            eta = prog.get_eta_str()
-            print(
-                f" {filename:<30} | {status:<15} | {percent:>7} | "
-                f"{speed:>10} | ETA: {eta}"
-            )
+            for filename, prog in progress.items():
+                if prog.completed:
+                    status = "[bold green]✓ Complete[/bold green]"
+                elif prog.failed:
+                    status = "[bold red]✗ Failed[/bold red]"
+                else:
+                    status = "[bold yellow]↓ Downloading[/bold yellow]"
 
-        print(f"{'='*70}\n")
+                table.add_row(
+                    filename[:30],
+                    status,
+                    f"{prog.get_percent():.1f}%",
+                    prog.get_speed_str(),
+                    prog.get_eta_str(),
+                )
+
+            _console.print()
+            _console.print(table)
+            _console.print()
+        else:
+            header = _c(f"{'=' * 70}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(" Download Progress", Fore.BLUE if _COLORAMA else ""))
+            print(header)
+
+            for filename, prog in progress.items():
+                if prog.completed:
+                    status = _c("✓ Complete", Fore.GREEN if _COLORAMA else "")
+                elif prog.failed:
+                    status = _c("✗ Failed", Fore.RED if _COLORAMA else "")
+                else:
+                    status = _c("↓ Downloading", Fore.YELLOW if _COLORAMA else "")
+                percent = f"{prog.get_percent():.1f}%"
+                speed = prog.get_speed_str()
+                eta = prog.get_eta_str()
+                print(
+                    f" {filename:<30} | {status:<15} | {percent:>7} | "
+                    f"{speed:>10} | ETA: {eta}"
+                )
+
+            print(f"{header}\n")
 
     def _print_download_summary(self, results: Dict[str, bool]) -> None:
-        """Print a summary of download results.
+        """Print a summary of download results with colors.
 
         Args:
             results: Dictionary mapping filenames to success status.
@@ -425,41 +529,76 @@ class CLI:
         successful = [f for f, s in results.items() if s]
         failed = [f for f, s in results.items() if not s]
 
-        print(f"\n{'='*50}")
-        print(" Download Summary")
-        print(f"{'='*50}")
-        print(f" Successful: {len(successful)}")
-        print(f" Failed:     {len(failed)}")
+        if _RICH and _console:
+            _console.print(Panel.fit(
+                f"[bold green]Successful:[/bold green] {len(successful)}\n"
+                f"[bold red]Failed:[/bold red]     {len(failed)}",
+                title="[bold]Download Summary[/bold]",
+                border_style="blue",
+            ))
+            if failed:
+                _console.print("\n [bold red]Failed downloads:[/bold red]")
+                for filename in failed:
+                    _console.print(f"   [red]✗[/red] {filename}")
+            _console.print()
+        else:
+            header = _c(f"{'=' * 50}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(" Download Summary", Fore.BLUE if _COLORAMA else ""))
+            print(header)
+            print(f" {_c('Successful:', Fore.GREEN if _COLORAMA else '')} {len(successful)}")
+            print(f" {_c('Failed:', Fore.RED if _COLORAMA else '')}     {len(failed)}")
 
-        if failed:
-            print("\n Failed downloads:")
-            for filename in failed:
-                print(f"   ✗ {filename}")
+            if failed:
+                print(f"\n {_c('Failed downloads:', Fore.RED if _COLORAMA else '')}")
+                for filename in failed:
+                    print(f"   {_c('✗', Fore.RED if _COLORAMA else '')} {filename}")
 
-        print(f"{'='*50}\n")
+            print(f"{header}\n")
 
     # -----------------------------------------------------------------------
     # Configuration operations
     # -----------------------------------------------------------------------
 
     def _view_configuration(self) -> None:
-        """Display current configuration settings."""
-        print(f"\n{'='*50}")
-        print(" Current Configuration")
-        print(f"{'='*50}")
+        """Display current configuration settings with colors."""
+        if _RICH and _console:
+            for section in self._settings.get_all_sections():
+                table = Table(show_header=False, box=None, padding=(0, 1))
+                table.add_column("Key", style="yellow", width=30)
+                table.add_column("Value", style="white")
 
-        for section in self._settings.get_all_sections():
-            print(f"\n [{section}]")
-            items = self._settings.get_section_items(section)
-            for key, value in items.items():
-                display_value = value
-                if key in ("jwt_token", "refresh_token") and value:
-                    display_value = mask_sensitive(value)
-                elif key == "guid" and value:
-                    display_value = mask_sensitive(value, visible_chars=8)
-                print(f"   {key} = {display_value}")
+                items = self._settings.get_section_items(section)
+                for key, value in items.items():
+                    display_value = value
+                    if key in ("jwt_token", "refresh_token") and value:
+                        display_value = mask_sensitive(value)
+                    elif key == "guid" and value:
+                        display_value = mask_sensitive(value, visible_chars=8)
+                    table.add_row(key, display_value)
 
-        print(f"\n{'='*50}\n")
+                _console.print(Panel(table, title=f"[bold cyan][{section}][/bold cyan]", border_style="dim"))
+            _console.print()
+        else:
+            header = _c(f"{'=' * 50}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(" Current Configuration", Fore.BLUE if _COLORAMA else ""))
+            print(header)
+
+            for section in self._settings.get_all_sections():
+                section_name = _c(f"\n [{section}]", Fore.CYAN if _COLORAMA else "")
+                print(section_name)
+                items = self._settings.get_section_items(section)
+                for key, value in items.items():
+                    display_value = value
+                    if key in ("jwt_token", "refresh_token") and value:
+                        display_value = mask_sensitive(value)
+                    elif key == "guid" and value:
+                        display_value = mask_sensitive(value, visible_chars=8)
+                    key_str = _c(f"   {key}", Fore.YELLOW if _COLORAMA else "")
+                    print(f"{key_str} = {display_value}")
+
+            print(f"\n{header}\n")
 
     def _set_guid(self) -> None:
         """Set the device GUID in configuration."""
@@ -525,21 +664,45 @@ class CLI:
     # -----------------------------------------------------------------------
 
     def _show_session_info(self) -> None:
-        """Display current session information."""
+        """Display current session information with colors."""
         info = self._session.get_session_info()
 
-        print(f"\n{'='*50}")
-        print(" Session Information")
-        print(f"{'='*50}")
-        print(f" Active:    {'Yes' if info['active'] else 'No'}")
-        print(f" GUID:      {mask_sensitive(info['guid'], 8) if info['guid'] else 'Not set'}")
-        print(f" Has Token: {'Yes' if info['has_token'] else 'No'}")
+        if _RICH and _console:
+            active_str = "[bold green]Yes[/bold green]" if info["active"] else "[bold red]No[/bold red]"
+            guid_str = mask_sensitive(info["guid"], 8) if info["guid"] else "[dim]Not set[/dim]"
+            token_str = "[green]Yes[/green]" if info["has_token"] else "[red]No[/red]"
+            duration_str = ""
+            if info["session_duration"] > 0:
+                duration_str = f"{info['session_duration'] / 60:.1f} minutes"
 
-        if info["session_duration"] > 0:
-            duration_min = info["session_duration"] / 60
-            print(f" Duration:  {duration_min:.1f} minutes")
+            table = Table(show_header=False, box=None, padding=(0, 1))
+            table.add_column("Key", style="yellow", width=15)
+            table.add_column("Value", style="white")
+            table.add_row("Active", active_str)
+            table.add_row("GUID", guid_str)
+            table.add_row("Has Token", token_str)
+            if duration_str:
+                table.add_row("Duration", duration_str)
 
-        print(f"{'='*50}\n")
+            _console.print(Panel(table, title="[bold]Session Information[/bold]", border_style="blue"))
+        else:
+            header = _c(f"{'=' * 50}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(" Session Information", Fore.BLUE if _COLORAMA else ""))
+            print(header)
+
+            active_str = _c("Yes", Fore.GREEN if _COLORAMA else "") if info["active"] else _c("No", Fore.RED if _COLORAMA else "")
+            print(f" Active:    {active_str}")
+            print(f" GUID:      {mask_sensitive(info['guid'], 8) if info['guid'] else 'Not set'}")
+
+            token_str = _c("Yes", Fore.GREEN if _COLORAMA else "") if info["has_token"] else _c("No", Fore.RED if _COLORAMA else "")
+            print(f" Has Token: {token_str}")
+
+            if info["session_duration"] > 0:
+                duration_min = info["session_duration"] / 60
+                print(f" Duration:  {duration_min:.1f} minutes")
+
+            print(f"{header}\n")
 
     # -----------------------------------------------------------------------
     # Helper methods
@@ -551,11 +714,18 @@ class CLI:
         Returns:
             Selected content type string.
         """
-        print("\nContent types:")
-        print("  1. Firmware")
-        print("  2. ROM")
-        print("  3. Tools")
-        print("  4. All")
+        if _RICH and _console:
+            _console.print("\n[bold]Content types:[/bold]")
+            _console.print("  [yellow]1.[/yellow] Firmware")
+            _console.print("  [yellow]2.[/yellow] ROM")
+            _console.print("  [yellow]3.[/yellow] Tools")
+            _console.print("  [yellow]4.[/yellow] All")
+        else:
+            print("\nContent types:")
+            print(f"  {_c('1.', Fore.YELLOW if _COLORAMA else '')} Firmware")
+            print(f"  {_c('2.', Fore.YELLOW if _COLORAMA else '')} ROM")
+            print(f"  {_c('3.', Fore.YELLOW if _COLORAMA else '')} Tools")
+            print(f"  {_c('4.', Fore.YELLOW if _COLORAMA else '')} All")
         choice = self._get_input("Select content type (1-4): ")
 
         type_map = {"1": "firmware", "2": "rom", "3": "tools", "4": "all"}
@@ -576,40 +746,67 @@ class CLI:
             return ""
 
     def _print_banner(self) -> None:
-        """Print the application banner."""
-        print(f"\n{'='*50}")
-        print(f" {APP_NAME} v{APP_VERSION}")
-        print(f"{'='*50}")
-        print(" Professional Motorola firmware download tool")
-        print(f"{'='*50}\n")
+        """Print the application banner with colors."""
+        if _RICH and _console:
+            _console.print(Panel.fit(
+                f"[bold cyan]{APP_NAME}[/bold cyan] [dim]v{APP_VERSION}[/dim]\n"
+                "[green]Professional Motorola firmware download tool[/green]",
+                border_style="bright_blue",
+            ))
+        else:
+            header = _c(f"{'=' * 50}", Fore.CYAN if _COLORAMA else "")
+            print(f"\n{header}")
+            print(_c(f" {APP_NAME} v{APP_VERSION}", Fore.CYAN if _COLORAMA else ""))
+            print(header)
+            print(_c(" Professional Motorola firmware download tool", Fore.GREEN if _COLORAMA else ""))
+            print(f"{header}\n")
 
     def _print_menu(self, title: str, options: Dict[str, str]) -> None:
-        """Print a formatted menu.
+        """Print a formatted menu with colored options.
 
         Args:
             title: Menu title.
             options: Dictionary of option numbers to descriptions.
         """
-        print(f"\n--- {title} ---")
-        for key, description in options.items():
-            print(f"  {key}. {description}")
-        print()
+        if _RICH and _console:
+            table = Table(show_header=False, box=None, padding=(0, 2))
+            table.add_column("Key", style="bold yellow", width=4)
+            table.add_column("Option", style="white")
+            for key, description in options.items():
+                table.add_row(f"[{key}]", description)
+            _console.print(f"\n[bold bright_blue]--- {title} ---[/bold bright_blue]")
+            _console.print(table)
+        else:
+            title_colored = _c(f"\n--- {title} ---", Fore.CYAN if _COLORAMA else "")
+            print(title_colored)
+            for key, description in options.items():
+                key_str = _c(f"  {key}.", Fore.YELLOW if _COLORAMA else "")
+                print(f"{key_str} {description}")
+            print()
 
     def _print_info(self, message: str) -> None:
-        """Print an info message.
+        """Print an info message with color.
 
         Args:
             message: Message string to display.
         """
-        print(f"\n ℹ {message}")
+        if _RICH and _console:
+            _console.print(f"\n [bold green]ℹ[/bold green] {message}")
+        else:
+            symbol = _c("ℹ", Fore.GREEN if _COLORAMA else "")
+            print(f"\n {symbol} {message}")
 
     def _print_error(self, message: str) -> None:
-        """Print an error message.
+        """Print an error message with color.
 
         Args:
             message: Error message string to display.
         """
-        print(f"\n ✗ Error: {message}")
+        if _RICH and _console:
+            _console.print(f"\n [bold red]✗ Error:[/bold red] {message}")
+        else:
+            symbol = _c("✗ Error:", Fore.RED if _COLORAMA else "")
+            print(f"\n {symbol} {message}")
 
     def _handle_interrupt(self, signum: int, frame: Any) -> None:
         """Handle Ctrl+C interrupt gracefully.
@@ -618,15 +815,25 @@ class CLI:
             signum: Signal number.
             frame: Current stack frame.
         """
-        print("\n\n Caught interrupt signal. Exiting gracefully...")
+        msg = "\n\n Caught interrupt signal. Exiting gracefully..."
+        if _RICH and _console:
+            _console.print(f"\n\n [bold yellow]⚠ Caught interrupt signal. Exiting gracefully...[/bold yellow]")
+        else:
+            print(_c(msg, Fore.YELLOW if _COLORAMA else ""))
         self._running = False
 
     def _handle_exit(self) -> None:
         """Handle application exit with cleanup."""
         self._running = False
-        print("\n Shutting down...")
+        if _RICH and _console:
+            _console.print("\n [dim]Shutting down...[/dim]")
+        else:
+            print(_c("\n Shutting down...", Fore.YELLOW if _COLORAMA else ""))
         self._session.end_session()
-        print(" Goodbye!\n")
+        if _RICH and _console:
+            _console.print(" [bold green]Goodbye![/bold green]\n")
+        else:
+            print(_c(" Goodbye!\n", Fore.GREEN if _COLORAMA else ""))
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:

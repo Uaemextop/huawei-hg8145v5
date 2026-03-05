@@ -48,12 +48,14 @@ def main(config_path: Optional[str] = None) -> int:
         log_file = settings.get("logging", "log_file", fallback="logs/motorola_downloader.log")
         max_size_mb = settings.get_int("logging", "max_file_size_mb", fallback=5)
         backup_count = settings.get_int("logging", "backup_count", fallback=5)
+        debug_mode = settings.get_bool("logging", "debug", fallback=False)
 
         setup_logging(
             level=log_level,
             log_file=log_file,
             max_bytes=max_size_mb * 1024 * 1024,
             backup_count=backup_count,
+            debug=debug_mode,
         )
 
         logger = get_logger("main")

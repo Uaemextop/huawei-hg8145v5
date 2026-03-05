@@ -61,6 +61,7 @@ DEFAULT_VALUES: Dict[str, Dict[str, str]] = {
         "log_file": "logs/motorola_downloader.log",
         "max_file_size_mb": "5",
         "backup_count": "5",
+        "debug": "false",
     },
     "authentication": {
         "auto_refresh": "true",

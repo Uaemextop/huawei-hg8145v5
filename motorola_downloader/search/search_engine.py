@@ -9,7 +9,7 @@ all 16 LMSA endpoints with correct request body and header handling.
 import time
 from typing import Any, Dict, List, Optional
 
-from motorola_downloader.api_client import LMSAClient, FIRMWARE_COUNTRIES
+from motorola_downloader.utils.api_client import LMSAClient, FIRMWARE_COUNTRIES
 from motorola_downloader.auth.session_manager import SessionManager
 from motorola_downloader.exceptions import SearchError
 from motorola_downloader.settings import Settings
@@ -630,7 +630,7 @@ class SearchEngine:
         models: List[str] = []
 
         try:
-            from motorola_downloader.api_client import FIRMWARE_CATEGORIES
+            from motorola_downloader.utils.api_client import FIRMWARE_CATEGORIES
             for category in FIRMWARE_CATEGORIES:
                 model_list = self._api.get_model_names(
                     country=self._default_region,
