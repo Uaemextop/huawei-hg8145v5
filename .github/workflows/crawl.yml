@@ -67,16 +67,6 @@ on:
         required: false
         default: ""
         type: string
-      lmsa_email:
-        description: "Lenovo ID email for automatic LMSA login (alternative to lmsa_jwt). Used when lmsa_jwt is not provided."
-        required: false
-        default: ""
-        type: string
-      lmsa_password:
-        description: "Lenovo ID password for automatic LMSA login (alternative to lmsa_jwt). Password is double-MD5 hashed automatically before sending."
-        required: false
-        default: ""
-        type: string
       lmsa_wust:
         description: "Pre-obtained LMSA WUST token (skips Lenovo ID OAuth, goes straight to JWT exchange). Use when you have a valid WUST from a previous session."
         required: false
@@ -318,14 +308,9 @@ jobs:
           GITHUB_TOKEN:    ${{ secrets.AI_TOKEN }}
           LMSA_JWT:        ${{ inputs.lmsa_jwt }}
           LMSA_WUST:       ${{ inputs.lmsa_wust }}
-          LMSA_EMAIL_INPUT:    ${{ inputs.lmsa_email }}
-          LMSA_PASSWORD_INPUT: ${{ inputs.lmsa_password }}
-          LMSA_EMAIL_SECRET:   ${{ secrets.LMSA_EMAIL }}
-          LMSA_PASSWORD_SECRET: ${{ secrets.LMSA_PASSWORD }}
+          LMSA_EMAIL:    ${{ secrets.LMSA_EMAIL }}
+          LMSA_PASSWORD: ${{ secrets.LMSA_PASSWORD }}
         run: |
-          # ── Resolve LMSA credentials (input overrides secret) ────────────
-          LMSA_EMAIL="${LMSA_EMAIL_INPUT:-$LMSA_EMAIL_SECRET}"
-          LMSA_PASSWORD="${LMSA_PASSWORD_INPUT:-$LMSA_PASSWORD_SECRET}"
           # Re-apply git credentials if repo was created
           if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
             cd downloaded_site
