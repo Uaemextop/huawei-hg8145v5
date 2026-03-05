@@ -47,10 +47,14 @@ from motorola_downloader.utils.url_utils import normalize_url
 _logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Production API base URL (hardcoded constant, NOT configurable).
-# Confirmed live by curl: /Interface/common/rsa.jhtml → 200, code 0000.
+# API base URLs.  Production and test servers may hold different firmware
+# catalogues, so the search engine queries BOTH and merges results.
 # ---------------------------------------------------------------------------
 LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
+LMSA_BASE_URLS = (
+    "https://lsa.lenovo.com/Interface",
+    "https://lsatest.lenovo.com/Interface",
+)
 
 # ---------------------------------------------------------------------------
 # Endpoint paths (from WebApiUrl.cs + WebServicesContext.cs, confirmed via
@@ -85,12 +89,25 @@ _CODE_OK = "0000"
 # Known device categories (from lmsa.py line 122)
 FIRMWARE_CATEGORIES = ("Phone", "Tablet")
 
-# Known countries (from lmsa.py lines 123-128, confirmed via HAR)
+# All known countries / carrier-regions observed in the LMSA API
+# (union of lmsa.py lines 123-128, HAR captures, and carrier scanner output).
 FIRMWARE_COUNTRIES = (
     "Mexico", "US", "Brazil", "Argentina", "Colombia", "Chile",
     "Peru", "Ecuador", "Guatemala", "Paraguay", "Dominican Republic",
     "India", "Germany", "UK", "France", "Italy", "Spain", "Australia",
     "Canada", "Japan", "China",
+    # Latin America carriers (from carrier scanner)
+    "Mexico-Telcel", "Mexico-AT&T", "Mexico-Altan", "Mexico-Retail",
+    "Brazil-TIM", "Brazil_Claro", "Brazil_Retail",
+    "Argentina", "Chile-Claro", "Chile-Movistar", "Chile-WOM",
+    "Chile-Entel", "Chile-Retail",
+    "Peru-Claro", "Peru-Movistar", "Peru-Entel", "Peru_Retail",
+    "Colombia-Claro", "Ecuador-Claro",
+    "Guatemala-Claro", "Guatemala-Tigo",
+    "Dominican Republic Claro", "Paraguay-Claro",
+    "Puerto Rico", "El Salvador", "Uruguay",
+    # EMEA / APAC
+    "Sweden", "Poland", "Taiwan Region,China", "Kazakhstan",
 )
 
 # Max recursion depth for _resolve_resource() paramProperty chains.
@@ -139,6 +156,17 @@ class LMSAClient:
         self._base_url = LMSA_BASE_URL
         self.logger = get_logger(__name__)
         self._reauth_attempted: bool = False
+
+    @property
+    def base_url(self) -> str:
+        """Current API base URL."""
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, url: str) -> None:
+        """Switch the API base URL (e.g. to lsatest.lenovo.com)."""
+        self._base_url = url.rstrip("/")
+        self.logger.debug("API base URL changed to %s", self._base_url)
 
     # ------------------------------------------------------------------
     # Internal POST helper (matches lmsa.py _post() exactly)
@@ -837,6 +865,32 @@ class LMSAClient:
     # RESOLUTION AND SCANNING METHODS
     # ==================================================================
 
+    @staticmethod
+    def _has_download_url(item: Dict[str, Any]) -> bool:
+        """Check whether a resource item has at least one real download URI.
+
+        Some intermediate resolution steps include keys like
+        ``romResource`` with a *null* or empty value.  Only treat an
+        item as fully resolved when the ``uri`` field inside a resource
+        dict is a non-empty string.
+
+        Args:
+            item: A resource dict from ``getResource.jhtml``.
+
+        Returns:
+            True if the item contains at least one downloadable URI.
+        """
+        for key in ("romResource", "toolResource", "otaResource",
+                     "countryCodeResource"):
+            res = item.get(key)
+            if isinstance(res, dict) and res.get("uri"):
+                return True
+        # flashFlow can be a JSON string or dict with a download URL
+        ff = item.get("flashFlow")
+        if ff and isinstance(ff, (str, dict)):
+            return True
+        return False
+
     def resolve_resource(
         self,
         model_name: str,
@@ -846,17 +900,21 @@ class LMSAClient:
     ) -> List[Dict[str, Any]]:
         """Recursively resolve paramProperty selections until S3 URLs.
 
-        Matches lmsa.py _resolve_resource() exactly:
-          - Calls get_resource() for initial items
-          - Items with romResource/toolResource/flashFlow/otaResource/
-            countryCodeResource are fully resolved
-          - Items with paramProperty + paramValues need recursive expansion
+        Matches the real LMSA resolution chain observed in HAR traffic:
+
+            getResource(modelName, marketName)
+              → paramProperty: simCount, paramValues: [Single, Dual]
+            getResource(…, simCount=Single)
+              → paramProperty: country, paramValues: [Mexico, …]
+            getResource(…, simCount=Single, country=Mexico)
+              → romResource.uri + toolResource.uri  ← fully resolved
 
         Args:
-            model_name: Device model name.
-            market_name: Market name from model list.
+            model_name: Device model name (e.g. ``XT2523-2``).
+            market_name: Market name from model list (e.g. ``Moto g05``).
             depth: Current recursion depth (guard against infinite loops).
-            **params: Additional resolution parameters.
+            **params: Additional resolution parameters accumulated so far
+                (e.g. ``simCount="Single", country="Mexico"``).
 
         Returns:
             List of fully-resolved resource dicts with S3 download URLs.
@@ -868,10 +926,8 @@ class LMSAClient:
         resolved: List[Dict[str, Any]] = []
 
         for item in items:
-            # Check if fully resolved (has download URLs)
-            if (item.get("romResource") or item.get("toolResource")
-                    or item.get("flashFlow") or item.get("otaResource")
-                    or item.get("countryCodeResource")):
+            # Check if fully resolved (has a real download URI)
+            if self._has_download_url(item):
                 resolved.append(item)
             elif item.get("paramProperty") and item.get("paramValues"):
                 # Need to pick param values and recurse

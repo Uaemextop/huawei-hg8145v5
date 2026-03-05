@@ -16,7 +16,12 @@ Multi-variant search:
 import time
 from typing import Any, Dict, List, Optional, Set
 
-from motorola_downloader.utils.api_client import LMSAClient, FIRMWARE_COUNTRIES
+from motorola_downloader.utils.api_client import (
+    LMSAClient,
+    LMSA_BASE_URLS,
+    FIRMWARE_COUNTRIES,
+    FIRMWARE_CATEGORIES,
+)
 from motorola_downloader.auth.session_manager import SessionManager
 from motorola_downloader.exceptions import SearchError
 from motorola_downloader.settings import Settings
@@ -176,6 +181,9 @@ class SearchEngine:
             request_builder=session.authenticator._request_builder,
             http_client=session.http_client,
         )
+
+        # All base URLs to query (production + test server)
+        self._base_urls = LMSA_BASE_URLS
 
         # Search cache: key -> (timestamp, results)
         self._cache: Dict[str, tuple[float, List[SearchResult]]] = {}
@@ -539,59 +547,172 @@ class SearchEngine:
     def _search_firmware(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for firmware via LMSAClient.get_firmware().
+        """Search for firmware across both LMSA hosts and all regions.
 
-        Expands the query into codename variants and queries each variant
-        against the firmware API with multiple flash-tool types.  This
-        catches results for lamu, lamuc, lamug, lamumite, etc. in a
-        single user search.
+        Implements the full resolution chain observed in HAR traffic,
+        querying **both** ``lsa.lenovo.com`` and ``lsatest.lenovo.com``
+        with **all** known countries/categories:
 
-        Also searches by IMEI or serial number if provided in filters.
+          1. ``getModelNames`` for every country × category (Phone,
+             Tablet) — find matching models.
+          2. Reverse-map codenames → XT numbers via ROM catalogue.
+          3. ``resolve_resource`` per model (simCount → country → S3).
+          4. Fallback: ``getNewResource`` per variant × flash-tool.
+          5. IMEI / serial number search.
+
+        All steps run against each host, results are merged and
+        deduplicated by download URL.
 
         Args:
-            query: Device model name or codename (e.g. 'lamu', 'xt2553-2').
-            filters: Search filters (region, carrier, imei, serial, etc.).
+            query: Device model name, codename, or market name.
+            filters: Search filters (region, carrier, imei, serial, …).
 
         Returns:
             List of firmware SearchResult objects.
         """
         results: List[SearchResult] = []
-        region = filters.get("region", self._default_region)
         carrier = filters.get("carrier", "")
         seen_urls: Set[str] = set()
 
         variants = self._expand_model_variants(query)
-        self.logger.info(
-            "Firmware search: query='%s' → %d variants, %d flash tools",
-            query, len(variants), len(FLASH_TOOL_TYPES),
-        )
+        query_lower = query.strip().lower()
 
+        original_base = self._api.base_url
         try:
-            for variant in variants:
-                for flash_tool in FLASH_TOOL_TYPES:
-                    data = self._api.get_firmware(
-                        model_name=variant,
-                        region=region,
-                        carrier=carrier,
-                        flash_tool_type=flash_tool,
+            for host_url in self._base_urls:
+                self._api.base_url = host_url
+                host_tag = "prod" if "lsatest" not in host_url else "test"
+
+                # ── Step 1: discover models across ALL regions ────────
+                matched_models: List[Dict[str, str]] = []
+                try:
+                    # Use all known countries for maximum coverage
+                    for country in FIRMWARE_COUNTRIES:
+                        for category in FIRMWARE_CATEGORIES:
+                            try:
+                                model_list = self._api.get_model_names(
+                                    country=country, category=category,
+                                )
+                            except Exception:
+                                continue
+                            for m in model_list:
+                                mn = (m.get("modelName") or "").lower()
+                                mk = (m.get("marketName") or "").lower()
+                                if (any(v in mn for v in variants)
+                                        or query_lower in mk
+                                        or query_lower in mn):
+                                    pair = {
+                                        "modelName": m.get("modelName", ""),
+                                        "marketName": m.get("marketName", ""),
+                                    }
+                                    if pair not in matched_models:
+                                        matched_models.append(pair)
+                except Exception as exc:
+                    self.logger.debug(
+                        "Model name lookup failed on %s: %s", host_tag, exc,
                     )
-                    if not data:
-                        continue
-                    firmware_data = data.get("data")
-                    if firmware_data and isinstance(firmware_data, dict):
-                        for r in self._parse_resource_data(firmware_data, variant):
-                            if r.download_url not in seen_urls:
-                                seen_urls.add(r.download_url)
-                                results.append(r)
-                    elif firmware_data and isinstance(firmware_data, list):
-                        for item in firmware_data:
-                            if isinstance(item, dict):
-                                for r in self._parse_resource_data(item, variant):
+
+                # ── Step 1b: reverse-map codename → XT model ─────────
+                if not matched_models:
+                    try:
+                        import re
+                        xt_numbers: Set[str] = set()
+                        roms = self._api.get_all_roms()
+                        variant_set = {v.lower() for v in variants}
+                        for rom in roms:
+                            name = (rom.get("name") or "").lower()
+                            if any(v in name for v in variant_set):
+                                for m in re.finditer(
+                                    r'xt\d+-\d+', name, re.IGNORECASE
+                                ):
+                                    xt_numbers.add(m.group(0).upper())
+
+                        if xt_numbers:
+                            self.logger.info(
+                                "Reverse-mapped '%s' → %s",
+                                query, ", ".join(sorted(xt_numbers)),
+                            )
+                            for country in FIRMWARE_COUNTRIES:
+                                for category in FIRMWARE_CATEGORIES:
+                                    try:
+                                        model_list = self._api.get_model_names(
+                                            country=country,
+                                            category=category,
+                                        )
+                                    except Exception:
+                                        continue
+                                    for m_info in model_list:
+                                        mn = m_info.get("modelName") or ""
+                                        if mn.upper() in xt_numbers:
+                                            pair = {
+                                                "modelName": mn,
+                                                "marketName": m_info.get(
+                                                    "marketName", ""
+                                                ),
+                                            }
+                                            if pair not in matched_models:
+                                                matched_models.append(pair)
+                    except Exception as exc:
+                        self.logger.debug(
+                            "Codename reverse-map failed: %s", exc,
+                        )
+
+                if matched_models:
+                    self.logger.info(
+                        "[%s] '%s': %d matching models",
+                        host_tag, query, len(matched_models),
+                    )
+
+                # ── Step 2: resolve each model ────────────────────────
+                for pair in matched_models:
+                    try:
+                        resolved = self._api.resolve_resource(
+                            pair["modelName"], pair["marketName"],
+                        )
+                        for item in resolved:
+                            for r in self._parse_resource_data(item, query):
+                                if r.download_url and r.download_url not in seen_urls:
+                                    seen_urls.add(r.download_url)
+                                    results.append(r)
+                    except Exception:
+                        pass
+
+                # ── Step 3: fallback — getNewResource ─────────────────
+                try:
+                    for variant in variants:
+                        for flash_tool in FLASH_TOOL_TYPES:
+                            data = self._api.get_firmware(
+                                model_name=variant,
+                                carrier=carrier,
+                                flash_tool_type=flash_tool,
+                            )
+                            if not data:
+                                continue
+                            firmware_data = data.get("data")
+                            if firmware_data and isinstance(firmware_data, dict):
+                                for r in self._parse_resource_data(
+                                    firmware_data, variant
+                                ):
                                     if r.download_url not in seen_urls:
                                         seen_urls.add(r.download_url)
                                         results.append(r)
+                            elif firmware_data and isinstance(firmware_data, list):
+                                for item in firmware_data:
+                                    if isinstance(item, dict):
+                                        for r in self._parse_resource_data(
+                                            item, variant
+                                        ):
+                                            if r.download_url not in seen_urls:
+                                                seen_urls.add(r.download_url)
+                                                results.append(r)
+                except Exception:
+                    pass
 
-            # Additional: search by IMEI if provided
+        finally:
+            self._api.base_url = original_base
+
+        # ── Step 4: IMEI / serial number search ───────────────────────
+        try:
             imei = filters.get("imei", "")
             if imei:
                 imei_data = self._api.get_firmware_by_imei(imei)
@@ -600,7 +721,6 @@ class SearchEngine:
                     if isinstance(fw, dict):
                         results.extend(self._parse_resource_data(fw, query))
 
-            # Additional: search by serial number if provided
             serial = filters.get("serial", "")
             if serial:
                 sn_data = self._api.get_firmware_by_serial(serial)
@@ -608,119 +728,143 @@ class SearchEngine:
                     fw = sn_data.get("data")
                     if isinstance(fw, dict):
                         results.extend(self._parse_resource_data(fw, query))
-
-        except Exception as exc:
-            self.logger.warning("Firmware search error: %s", exc)
+        except Exception:
+            pass
 
         return results
 
     def _search_roms(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for ROMs via LMSAClient.get_all_roms().
+        """Search for ROMs across both LMSA hosts.
 
-        Expands the query into codename variants so that a search for
-        "lamu" also returns ROMs named ``fastboot_lamuc_*``, etc.
+        Queries the ROM catalogue (``getRomList.jhtml``) on each host
+        and matches codename variants so that ``'lamu'`` also finds
+        ``fastboot_lamuc_*``, ``fastboot_lamug_*``, etc.
 
         Args:
             query: Search query string (model name or keyword).
             filters: Search filters.
 
         Returns:
-            List of ROM SearchResult objects.
+            List of ROM SearchResult objects (deduplicated by name).
         """
         results: List[SearchResult] = []
+        seen_names: Set[str] = set()
+        variants = self._expand_model_variants(query)
+        variant_set = {v.lower() for v in variants}
 
+        original_base = self._api.base_url
         try:
-            roms = self._api.get_all_roms()
-            variants = self._expand_model_variants(query)
-            variant_set = {v.lower() for v in variants}
-
-            for rom in roms:
-                name = rom.get("name", "")
-                uri = rom.get("uri", "") or ""
-                rom_type = rom.get("type", 0)
-
-                # Filter ROMs only (type=0), skip tools here
-                if rom_type != 0:
+            for host_url in self._base_urls:
+                self._api.base_url = host_url
+                try:
+                    roms = self._api.get_all_roms()
+                except Exception:
                     continue
 
-                # Match if ANY variant appears in the ROM name
-                name_lower = name.lower()
-                if query and not any(v in name_lower for v in variant_set):
-                    continue
+                for rom in roms:
+                    name = rom.get("name", "")
+                    uri = rom.get("uri", "") or ""
+                    rom_type = rom.get("type", 0)
 
-                download_url = normalize_url(uri)
-                result = SearchResult(
-                    name=name,
-                    model=query,
-                    download_url=download_url,
-                    content_type="ROM",
-                    checksum=rom.get("md5", ""),
-                )
-                results.append(result)
+                    if rom_type != 0:
+                        continue
 
+                    name_lower = name.lower()
+                    if query and not any(v in name_lower for v in variant_set):
+                        continue
+
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+
+                    download_url = normalize_url(uri)
+                    result = SearchResult(
+                        name=name,
+                        model=query,
+                        download_url=download_url,
+                        content_type="ROM",
+                        checksum=rom.get("md5", ""),
+                    )
+                    results.append(result)
         except Exception as exc:
             self.logger.warning("ROM search error: %s", exc)
+        finally:
+            self._api.base_url = original_base
 
         return results
 
     def _search_tools(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for tools via LMSAClient.get_all_roms() (type=1)
-        and LMSAClient.get_plugin_urls().
+        """Search for tools across both LMSA hosts.
 
-        Expands the query into codename variants for ROM-catalogue
-        tools (same family matching as ``_search_roms``).
+        Queries ROM catalogue tools (``type=1``) and plugin URLs on
+        each host.  Matches codename variants.
 
         Args:
             query: Search query string.
             filters: Search filters.
 
         Returns:
-            List of Tools SearchResult objects.
+            List of Tools SearchResult objects (deduplicated by name).
         """
         results: List[SearchResult] = []
+        seen_names: Set[str] = set()
+        variants = self._expand_model_variants(query)
+        variant_set = {v.lower() for v in variants}
 
+        original_base = self._api.base_url
         try:
-            # Source 1: ROM catalogue tools (type=1)
-            roms = self._api.get_all_roms()
-            variants = self._expand_model_variants(query)
-            variant_set = {v.lower() for v in variants}
+            for host_url in self._base_urls:
+                self._api.base_url = host_url
+                try:
+                    roms = self._api.get_all_roms()
+                except Exception:
+                    roms = []
 
-            for item in roms:
-                if item.get("type") != 1:
-                    continue
-                name = item.get("name", "")
-                name_lower = name.lower()
-                if query and not any(v in name_lower for v in variant_set):
-                    continue
-                download_url = normalize_url(item.get("uri", ""))
-                result = SearchResult(
-                    name=name,
-                    model=query,
-                    download_url=download_url,
-                    content_type="Tools",
-                    checksum=item.get("md5", ""),
-                )
-                results.append(result)
+                for item in roms:
+                    if item.get("type") != 1:
+                        continue
+                    name = item.get("name", "")
+                    name_lower = name.lower()
+                    if query and not any(v in name_lower for v in variant_set):
+                        continue
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    download_url = normalize_url(item.get("uri", ""))
+                    result = SearchResult(
+                        name=name,
+                        model=query,
+                        download_url=download_url,
+                        content_type="Tools",
+                        checksum=item.get("md5", ""),
+                    )
+                    results.append(result)
 
-            # Source 2: Plugin category list + static tool URLs
-            plugin_urls = self._api.get_plugin_urls()
-            query_lower = query.lower() if query else ""
-            for url, name in plugin_urls:
-                if query_lower and query_lower not in name.lower():
-                    continue
-                result = SearchResult(
-                    name=name,
-                    download_url=url,
-                    content_type="Tools",
-                )
-                results.append(result)
-
+                try:
+                    plugin_urls = self._api.get_plugin_urls()
+                    query_lower = query.lower() if query else ""
+                    for url, name in plugin_urls:
+                        if query_lower and query_lower not in name.lower():
+                            continue
+                        if name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        result = SearchResult(
+                            name=name,
+                            download_url=url,
+                            content_type="Tools",
+                        )
+                        results.append(result)
+                except Exception:
+                    pass
         except Exception as exc:
             self.logger.warning("Tools search error: %s", exc)
+        finally:
+            self._api.base_url = original_base
 
         return results
 
@@ -757,17 +901,22 @@ class SearchEngine:
     ) -> List[SearchResult]:
         """Parse a firmware resource dict into SearchResult objects.
 
-        Extracts download URLs from the same resource structure that lmsa.py
-        uses in collect_download_urls():
-          - romResource.uri / romResource.name
-          - toolResource.uri / toolResource.name
-          - otaResource.uri / otaResource.name
-          - countryCodeResource.uri / countryCodeResource.name
-          - flashFlow (JSON download URL)
+        Extracts download URLs from the resolved resource structure
+        (confirmed via HAR capture of ``getResource.jhtml``):
+
+          - ``romResource``: firmware ZIP (``fastboot_lamu_g_…``)
+          - ``toolResource``: flash tool (``Lamu_Flash_Tool_Console_…``)
+          - ``otaResource`` / ``countryCodeResource``: OTA / regional
+          - ``flashFlow``: flash-flow JSON URL
+
+        Metadata fields used:
+          - ``modelName``, ``marketName``, ``fingerPrint`` (version),
+            ``comments`` (region/carrier notes), ``platform`` (MTK/QCom),
+            ``romResource.publishDate``.
 
         Args:
             resource: API response resource dictionary (single item from
-                `data` or resolved `content`).
+                ``data`` or resolved ``content``).
             query: Original search query for context.
 
         Returns:
@@ -775,38 +924,59 @@ class SearchEngine:
         """
         results: List[SearchResult] = []
         model = resource.get("modelName") or query
+        market = resource.get("marketName") or ""
+
+        # Extract version from fingerPrint if available
+        # e.g. "motorola/lamul_g/lamul:15/VVTAS35.51-137-2-1/c99c2a:user/release-keys"
+        fp = resource.get("fingerPrint") or ""
+        version = resource.get("version", "")
+        if not version and fp:
+            parts = fp.split("/")
+            if len(parts) >= 4:
+                version = parts[3]  # e.g. "VVTAS35.51-137-2-1"
+
+        # Region from comments or resolved chain
+        region = resource.get("country", "") or resource.get("comments", "")
+        platform = resource.get("platform", "")
+        release_date = ""
 
         # ROM resources (firmware files)
         for res_key in ("romResource", "otaResource", "countryCodeResource"):
             res = resource.get(res_key)
             if isinstance(res, dict) and res.get("uri"):
                 download_url = normalize_url(res["uri"])
-                name = res.get("name") or extract_filename(download_url, f"{model}_{res_key}")
+                name = res.get("name") or extract_filename(
+                    download_url, f"{model}_{res_key}"
+                )
+                pub_date = res.get("publishDate") or release_date
                 result = SearchResult(
                     name=name,
-                    model=model,
-                    version=resource.get("version", ""),
-                    region=resource.get("country", ""),
+                    model=f"{model} ({market})" if market else model,
+                    version=version,
+                    region=region,
                     download_url=download_url,
                     file_size=int(res.get("size", 0) or 0),
-                    release_date=resource.get("releaseDate", ""),
+                    release_date=pub_date,
                     content_type="Firmware",
                     checksum=res.get("md5", ""),
                 )
                 results.append(result)
 
-        # Tool resources (flash tools)
+        # Tool resources (flash tools — QComFlashTool, MTekFlashTool, etc.)
         tool_res = resource.get("toolResource")
         if isinstance(tool_res, dict) and tool_res.get("uri"):
             download_url = normalize_url(tool_res["uri"])
-            name = tool_res.get("name") or extract_filename(download_url, f"{model}_toolResource")
+            name = tool_res.get("name") or extract_filename(
+                download_url, f"{model}_toolResource"
+            )
+            tool_type = f"FlashTool ({platform})" if platform else "FlashTool"
             result = SearchResult(
                 name=name,
-                model=model,
-                version=resource.get("version", ""),
+                model=f"{model} ({market})" if market else model,
+                version=version,
                 download_url=download_url,
                 file_size=int(tool_res.get("size", 0) or 0),
-                content_type="Tools",
+                content_type=tool_type,
                 checksum=tool_res.get("md5", ""),
             )
             results.append(result)
@@ -818,10 +988,10 @@ class SearchEngine:
             if download_url:
                 result = SearchResult(
                     name=f"{model}_flashFlow.json",
-                    model=model,
-                    version=resource.get("version", ""),
+                    model=f"{model} ({market})" if market else model,
+                    version=version,
                     download_url=download_url,
-                    content_type="Firmware",
+                    content_type="FlashFlow",
                 )
                 results.append(result)
 
@@ -834,7 +1004,7 @@ class SearchEngine:
                     result = SearchResult(
                         name=extract_filename(download_url, f"{model}_firmware"),
                         model=model,
-                        version=resource.get("version", ""),
+                        version=version,
                         download_url=download_url,
                         content_type="Firmware",
                     )
