@@ -76,28 +76,17 @@ APP_NAME = "Motorola Firmware Downloader"
 APP_VERSION = "1.0.0"
 
 MAIN_MENU_OPTIONS = {
-    "1": "Search Firmware",
-    "2": "Download Manager",
-    "3": "Configuration",
-    "4": "Session Info",
-    "5": "Exit",
-}
-
-SEARCH_MENU_OPTIONS = {
-    "1": "Search by Model",
-    "2": "Search by Version",
-    "3": "Advanced Search",
-    "4": "View Recent Results",
-    "5": "Back to Main Menu",
+    "1": "Download Firmware",
+    "2": "Configuration",
+    "3": "Session Info",
+    "4": "Exit",
 }
 
 DOWNLOAD_MENU_OPTIONS = {
-    "1": "Download Selected Items",
+    "1": "Search & Download",
     "2": "View Download Progress",
-    "3": "Pause Downloads",
-    "4": "Resume Downloads",
-    "5": "Set Output Directory",
-    "6": "Back to Main Menu",
+    "3": "Set Output Directory",
+    "4": "Back to Main Menu",
 }
 
 CONFIG_MENU_OPTIONS = {
@@ -176,56 +165,36 @@ class CLI:
         choice = self._get_input("Select option: ")
 
         if choice == "1":
-            self.search_menu()
-        elif choice == "2":
             self.download_menu()
-        elif choice == "3":
+        elif choice == "2":
             self.config_menu()
-        elif choice == "4":
+        elif choice == "3":
             self._show_session_info()
-        elif choice == "5":
+        elif choice == "4":
             self._handle_exit()
         else:
             self._print_error("Invalid option. Please try again.")
 
-    def search_menu(self) -> None:
-        """Display the search submenu and process selections."""
-        while self._running:
-            self._print_menu("Search Menu", SEARCH_MENU_OPTIONS)
-            choice = self._get_input("Select option: ")
-
-            if choice == "1":
-                self._search_by_model()
-            elif choice == "2":
-                self._search_by_version()
-            elif choice == "3":
-                self._advanced_search()
-            elif choice == "4":
-                self._view_results()
-            elif choice == "5":
-                return
-            else:
-                self._print_error("Invalid option. Please try again.")
-
     def download_menu(self) -> None:
-        """Display the download submenu and process selections."""
+        """Download menu: search → display unique files → download.
+
+        Unified workflow that replaces the old separate Search and
+        Download menus.  The user enters a model name, the engine
+        searches across all hosts / regions / categories / variants,
+        deduplicates results by filename, and displays the list.
+        The user then picks items and the download starts immediately.
+        """
         while self._running:
             self._print_menu("Download Menu", DOWNLOAD_MENU_OPTIONS)
             choice = self._get_input("Select option: ")
 
             if choice == "1":
-                self._download_selected()
+                self._search_and_download()
             elif choice == "2":
                 self._view_download_progress()
             elif choice == "3":
-                self._download_manager.pause_downloads()
-                self._print_info("Downloads paused")
-            elif choice == "4":
-                self._download_manager.resume_downloads()
-                self._print_info("Downloads resumed")
-            elif choice == "5":
                 self._set_output_directory()
-            elif choice == "6":
+            elif choice == "4":
                 return
             else:
                 self._print_error("Invalid option. Please try again.")
@@ -254,82 +223,127 @@ class CLI:
                 self._print_error("Invalid option. Please try again.")
 
     # -----------------------------------------------------------------------
-    # Search operations
+    # Unified search → download flow
     # -----------------------------------------------------------------------
 
-    def _search_by_model(self) -> None:
-        """Perform a search by device model name."""
-        query = self._get_input("Enter model name (e.g., moto g84): ")
+    def _search_and_download(self) -> None:
+        """Search for firmware and immediately download selected files.
+
+        Complete user flow in one action:
+          1. Ask for model name / codename / XT number.
+          2. Ask for content type (Firmware, ROM, Tools, All).
+          3. Search across all hosts and regions.
+          4. Deduplicate results by filename — show unique files only.
+          5. Let the user pick items (numbers or 'all').
+          6. Download selected items immediately.
+        """
+        # ── 1. Query ──────────────────────────────────────────────────
+        query = self._get_input(
+            "Enter model name or codename (e.g. lamu, moto g05, xt2523): "
+        )
         if not validate_search_query(query):
-            self._print_error("Invalid search query. Minimum 2 characters required.")
+            self._print_error(
+                "Invalid search query. Minimum 2 characters required."
+            )
             return
 
+        # ── 2. Content type ───────────────────────────────────────────
         content_type = self._select_content_type()
         self._print_info(f"Searching for '{query}' ({content_type})...")
 
+        # ── 3. Search ─────────────────────────────────────────────────
         try:
             results = self._search_engine.search(query, content_type)
-            self._last_results = results
-            self._display_results(results)
         except SearchError as exc:
             self._print_error(f"Search failed: {exc}")
-
-    def _search_by_version(self) -> None:
-        """Perform a search by firmware version."""
-        query = self._get_input("Enter firmware version: ")
-        if not validate_search_query(query):
-            self._print_error("Invalid search query. Minimum 2 characters required.")
             return
 
-        self._print_info(f"Searching for version '{query}'...")
+        # ── 4. Deduplicate by filename ────────────────────────────────
+        seen_names: set[str] = set()
+        unique: List[SearchResult] = []
+        for r in results:
+            if r.name not in seen_names:
+                seen_names.add(r.name)
+                unique.append(r)
+        self._last_results = unique
 
-        try:
-            results = self._search_engine.search(
-                query, "firmware", {"version": query}
-            )
-            self._last_results = results
-            self._display_results(results)
-        except SearchError as exc:
-            self._print_error(f"Search failed: {exc}")
+        if not unique:
+            self._print_info("No results found.")
+            return
 
-    def _advanced_search(self) -> None:
-        """Perform an advanced search with multiple criteria."""
-        print("\n--- Advanced Search ---")
-        model = self._get_input("Model name (or press Enter to skip): ")
-        region = self._get_input("Region (or press Enter for default): ")
-        content_type = self._select_content_type()
-        max_size = self._get_input("Max file size in MB (or press Enter to skip): ")
+        self._display_results(unique)
 
-        criteria: Dict[str, Any] = {}
-        if model:
-            criteria["query"] = model
+        # ── 5. Selection ──────────────────────────────────────────────
+        selection = self._get_input(
+            "Enter file numbers to download (comma-separated, 'all', "
+            "or Enter to cancel): "
+        )
+        if not selection.strip():
+            self._print_info("Cancelled.")
+            return
+
+        items: List[SearchResult] = []
+        if selection.strip().lower() == "all":
+            items = [r for r in unique if r.download_url]
         else:
-            criteria["query"] = self._get_input("Search keyword: ")
-
-        criteria["content_type"] = content_type
-        if region:
-            criteria["region"] = region
-        if max_size:
             try:
-                criteria["max_size"] = int(max_size) * 1024 * 1024
+                indices = [int(s.strip()) - 1 for s in selection.split(",")]
+                for idx in indices:
+                    if 0 <= idx < len(unique):
+                        if unique[idx].download_url:
+                            items.append(unique[idx])
+                        else:
+                            self._print_error(
+                                f"Item {idx + 1} has no download URL"
+                            )
+                    else:
+                        self._print_error(f"Invalid item number: {idx + 1}")
             except ValueError:
-                self._print_error("Invalid size value, ignoring filter")
+                self._print_error("Invalid selection format")
+                return
 
-        self._print_info("Performing advanced search...")
+        if not items:
+            self._print_info("No valid items selected.")
+            return
+
+        # ── 6. Confirm & download ─────────────────────────────────────
+        print(f"\nReady to download {len(items)} file(s):")
+        for item in items:
+            size_str = (
+                self._format_size(item.file_size) if item.file_size
+                else "Unknown size"
+            )
+            print(f"  • {item.name} ({size_str})")
+
+        confirm = self._get_input("\nProceed? (y/n): ")
+        if confirm.lower() != "y":
+            self._print_info("Download cancelled.")
+            return
+
+        download_items = [
+            DownloadItem(
+                url=result.download_url,
+                filepath=os.path.join(
+                    self._download_manager.output_directory, result.name
+                ),
+                filename=result.name,
+                file_size=result.file_size,
+                checksum=result.checksum,
+            )
+            for result in items
+        ]
+
+        self._print_info(
+            f"Downloading {len(download_items)} file(s)..."
+        )
 
         try:
-            results = self._search_engine.advanced_search(criteria)
-            self._last_results = results
-            self._display_results(results)
-        except SearchError as exc:
-            self._print_error(f"Advanced search failed: {exc}")
-
-    def _view_results(self) -> None:
-        """Display the most recent search results."""
-        if not self._last_results:
-            self._print_info("No recent search results. Perform a search first.")
-            return
-        self._display_results(self._last_results)
+            dl_results = self._download_manager.download_multiple(
+                download_items
+            )
+            self._print_download_summary(dl_results)
+        except DownloadError as exc:
+            self._print_error(f"Download error: {exc}")
 
     def _display_results(self, results: List[SearchResult]) -> None:
         """Display search results in a formatted table.
@@ -394,74 +408,9 @@ class CLI:
     # Download operations
     # -----------------------------------------------------------------------
 
-    def _download_selected(self) -> None:
-        """Download items selected from the most recent search results."""
-        if not self._last_results:
-            self._print_info("No search results available. Perform a search first.")
-            return
-
-        self._display_results(self._last_results)
-        selection = self._get_input(
-            "Enter item numbers to download (comma-separated, or 'all'): "
-        )
-
-        items_to_download: List[SearchResult] = []
-
-        if selection.strip().lower() == "all":
-            items_to_download = [r for r in self._last_results if r.download_url]
-        else:
-            try:
-                indices = [int(s.strip()) - 1 for s in selection.split(",")]
-                for idx in indices:
-                    if 0 <= idx < len(self._last_results):
-                        if self._last_results[idx].download_url:
-                            items_to_download.append(self._last_results[idx])
-                        else:
-                            self._print_error(
-                                f"Item {idx + 1} has no download URL"
-                            )
-                    else:
-                        self._print_error(f"Invalid item number: {idx + 1}")
-            except ValueError:
-                self._print_error("Invalid selection format")
-                return
-
-        if not items_to_download:
-            self._print_info("No valid items selected for download.")
-            return
-
-        # Confirm download
-        print(f"\nReady to download {len(items_to_download)} files:")
-        for item in items_to_download:
-            size_str = self._format_size(item.file_size) if item.file_size else "Unknown"
-            print(f"  - {item.name} ({size_str})")
-
-        confirm = self._get_input("\nProceed with download? (y/n): ")
-        if confirm.lower() != "y":
-            self._print_info("Download cancelled.")
-            return
-
-        # Convert to DownloadItems
-        download_items = [
-            DownloadItem(
-                url=result.download_url,
-                filepath=os.path.join(
-                    self._download_manager.output_directory, result.name
-                ),
-                filename=result.name,
-                file_size=result.file_size,
-                checksum=result.checksum,
-            )
-            for result in items_to_download
-        ]
-
-        self._print_info(f"Starting download of {len(download_items)} files...")
-
-        try:
-            results = self._download_manager.download_multiple(download_items)
-            self._print_download_summary(results)
-        except DownloadError as exc:
-            self._print_error(f"Download error: {exc}")
+    # -----------------------------------------------------------------------
+    # Download progress & helpers
+    # -----------------------------------------------------------------------
 
     def _view_download_progress(self) -> None:
         """Display progress for all active downloads with colors."""

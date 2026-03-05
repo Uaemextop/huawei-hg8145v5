@@ -507,7 +507,7 @@ class LMSAClient:
             self.logger.warning("Token expired (402) — re-authentication needed")
             return None
         if code == "403":
-            self.logger.warning("Firmware query blocked — token required")
+            self.logger.debug("Firmware query blocked (403) — token required")
             return None
         if code != _CODE_OK:
             # Code 1000 = "model not found" — expected during multi-variant
@@ -765,7 +765,7 @@ class LMSAClient:
         """
         data = self._post(_EP_ROM_LIST, {})
         if data is None or data.get("code") != _CODE_OK:
-            self.logger.error("getRomList failed: %s", data)
+            self.logger.debug("getRomList: %s", data.get("code") if data else "no response")
             return []
 
         roms = data.get("content") or []
