@@ -123,10 +123,33 @@ on:
         default: true
         type: boolean
       ai_model:
-        description: "GitHub Models vision model for CAPTCHA solving (default: openai/gpt-4o)"
+        description: "GitHub Models vision model for AI CAPTCHA solving"
         required: false
         default: "openai/gpt-4o"
-        type: string
+        type: choice
+        options:
+          # ── OpenAI ──────────────────────────────────────────────────
+          - "openai/gpt-4o"
+          - "openai/gpt-4o-mini"
+          - "openai/gpt-4.1"
+          - "openai/gpt-4.1-mini"
+          - "openai/gpt-4.1-nano"
+          - "openai/o4-mini"
+          - "openai/o3"
+          - "openai/o3-mini"
+          - "openai/o1"
+          - "openai/o1-mini"
+          # ── Meta Llama (vision) ─────────────────────────────────────
+          - "meta/llama-4-scout-17b-16e-instruct"
+          - "meta/llama-4-maverick-17b-128e-instruct"
+          - "meta/Llama-3.2-11B-Vision-Instruct"
+          - "meta/Llama-3.2-90B-Vision-Instruct"
+          # ── Microsoft Phi (multimodal) ──────────────────────────────
+          - "microsoft/Phi-4-multimodal-instruct"
+          - "microsoft/Phi-3.5-vision-instruct"
+          # ── Mistral ─────────────────────────────────────────────────
+          - "mistral/pixtral-large-2411"
+          - "mistral/mistral-small-2503"
 
       # ── Cloudflare bypass ─────────────────────────────────────────────────
       cf_clearance:
