@@ -20,9 +20,9 @@ MIN_CONCURRENT_DOWNLOADS = 1
 MAX_CONCURRENT_DOWNLOADS = 5
 
 # ── Motorola API ───────────────────────────────────────────────────
-#: Production API base URL (placeholder — replace with actual Motorola
-#: firmware server address when obtained from reverse-engineering).
-MOTOROLA_BASE_URL = "https://api.motorola.com/firmware"
+#: Base URL for the Motorola firmware API.  Update this in config.ini
+#: with the actual server address obtained from device traffic capture.
+MOTOROLA_BASE_URL = "https://motorola-firmware.example.com/api"
 
 #: API endpoint paths
 EP_AUTH_LOGIN    = "/auth/login"

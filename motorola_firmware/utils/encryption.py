@@ -4,7 +4,8 @@ Encryption utilities for the Motorola Firmware Downloader.
 Provides Fernet symmetric encryption for sensitive config values
 and PBKDF2-based password hashing for credential storage.
 
-Uses the ``cryptography`` library (Fernet wraps AES-128-CBC with HMAC).
+Uses the ``cryptography`` library.  Fernet provides AES-128 in CBC mode
+with PKCS7 padding and HMAC-SHA256 authentication.
 """
 
 import base64
