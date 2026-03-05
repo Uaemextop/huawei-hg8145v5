@@ -136,14 +136,13 @@ def authenticate(self, guid: str, password: str) -> bool:
 ## 🔐 CONFIGURACIÓN (config.ini)
 
 ### Secciones Requeridas:
-- `[motorola_server]` → URL base, GUID, JWT, refresh token
+- `[motorola_server]` → GUID, JWT, refresh token
 - `[download]` → Directorio, concurrencia, timeout
 - `[search]` → Límite por defecto, filtros, región
 - `[logging]` → Nivel, archivo de log, tamaño máximo
 - `[authentication]` → Auto-refresh, umbral de expiración
 
 ### Campos Críticos:
-- `base_url`: URL del servidor (requerido)
 - `guid`: Identificador único (requerido)
 - `jwt_token`: Token de autenticación (requerido)
 - `output_directory`: Ruta de descargas (requerido)
@@ -153,7 +152,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 
 ## 🎯 MÓDULOS Y SUS RESPONSABILIDADES
 
-### Módulo de Configuración (settings.py)
+### Módulo de Configuración
 **Responsabilidad**: Cargar, validar, actualizar configuración desde config.ini
 
 **Métodos Necesarios:**
@@ -170,7 +169,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Lanzar excepción si config es inválida
 - Permitir valores por defecto sensatos
 
-### Módulo de Autenticación (authenticator.py)
+### Módulo de Autenticación
 **Responsabilidad**: Autenticar, gestionar tokens JWT, refrescar automáticamente
 
 **Métodos Necesarios:**
@@ -188,7 +187,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Refrescar automático si está cercano a expiración
 - Lanzar AuthenticationError si falla
 
-### Módulo de Sesión (session_manager.py)
+### Módulo de Sesión
 **Responsabilidad**: Gestionar ciclo de vida de sesiones autenticadas
 
 **Métodos Necesarios:**
@@ -204,7 +203,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Loguear inicio/cierre de sesión
 - Manejar desconexiones de red
 
-### Crawlers (REFERENCIA de cómo funcionan autenticación y descarga)
+### Analiza la carpeta web_crawlers (REFERENCIA de cómo funcionan autenticación y descarga en los servidores de Lenovo y motorola)
 **Responsabilidad**: Servir como referencia de autenticación y descarga desde APIs Motorola
 
 **Referencia para implementar:**
@@ -222,7 +221,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Entender flujo de download en Motorola
 - Adaptar a tu propio sistema
 
-### Motor de Búsqueda (search_engine.py)
+### Motor de Búsqueda 
 **Responsabilidad**: Orquestar búsquedas en múltiples crawlers
 
 **Métodos Necesarios:**
@@ -238,7 +237,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Caché de búsquedas recientes
 - Soportar búsqueda por tipo (Firmware, ROM, Tools, All)
 
-### Gestor de Descargas (download_manager.py)
+### Gestor de Descargas 
 **Responsabilidad**: Descargar archivos de forma concurrente y confiable
 
 **Métodos Necesarios:**
@@ -256,7 +255,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Reintentar si descarga falla (máximo 3)
 - Mostrar velocidad y ETA
 
-### Cliente HTTP Reutilizable (http_client.py)
+### Cliente HTTP Reutilizable 
 **Responsabilidad**: Centralizar todas las operaciones HTTP
 
 **Métodos Necesarios:**
@@ -275,7 +274,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Manejar status codes apropiadamente
 - HTTPS obligatorio
 
-### Logger Centralizado (logger.py)
+### Logger Centralizado 
 **Responsabilidad**: Logging uniforme en toda la aplicación
 
 **Requisitos:**
@@ -292,23 +291,23 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Rotación de logs por tamaño
 - Máximo 5 archivos backup
 
-### Encriptación (encryption.py)
+### Encriptació
 **Responsabilidad**: Cifrar/descifrar datos sensibles
 
 **Métodos Necesarios:**
-- `encrypt(text, key)` → Cifrar con AES-256
+- `encrypt(text, key)` → Cifrar
 - `decrypt(encrypted_text, key)` → Descifrar
 - `generate_key()` → Generar clave aleatoria
 - `hash_password(password)` → Hash para passwords
 
 **Reglas Específicas:**
 - Usar cryptography library
-- AES-256 para datos generales
+- Cufrar para datos generales
 - Bcrypt para passwords
-- Claves seguras (256 bits)
+- Claves seguras
 - Manejar excepciones de encriptación
 
-### Validadores (validators.py)
+### Validadores 
 **Responsabilidad**: Validar datos de entrada
 
 **Funciones Necesarias:**
@@ -323,7 +322,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Loguear validaciones fallidas
 - Mensajes de error descriptivos
 
-### Interfaz CLI (cli/main.py)
+### Interfaz CLI
 **Responsabilidad**: Interacción con usuario mediante menú
 
 **Métodos Necesarios:**
@@ -342,7 +341,7 @@ def authenticate(self, guid: str, password: str) -> bool:
 - Input/output amigable
 - Manejo de Ctrl+C graceful
 
-### Punto de Entrada (main.py)
+### Punto de Entrada
 **Responsabilidad**: Inicializar aplicación y ejecutar
 
 **Requisitos:**
