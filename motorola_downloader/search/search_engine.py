@@ -2,54 +2,22 @@
 
 Orchestrates searches across Motorola/LMSA APIs, combining results
 from multiple endpoints with deduplication, filtering, and caching.
-Search patterns are based on the LMSA API endpoints documented in
-web_crawler/auth/lmsa.py.
-
-Key patterns from web_crawler analysis:
-  - get_firmware(): POST to /rescueDevice/getNewResource.jhtml with
-    RequestModel{dparams: {modelName, flashToolType, buildType, region, ...}}
-  - get_rom_list() / get_all_roms(): POST to /priv/getRomList.jhtml
-    Returns all ~2299 ROM entries with uri, name, md5, type fields.
-  - get_model_names(): POST to /rescueDevice/getModelNames.jhtml
-    {dparams: {country, category}} → content.models + content.moreModels
-  - _resolve_resource(): recursive paramProperty resolution until S3 URLs.
-  - collect_download_urls(): extracts romResource, toolResource, flashFlow,
-    otaResource, countryCodeResource from resolved resources.
+Delegates all API calls to LMSAClient (api_client.py) which implements
+all 16 LMSA endpoints with correct request body and header handling.
 """
 
 import time
 from typing import Any, Dict, List, Optional
 
+from motorola_downloader.api_client import LMSAClient, FIRMWARE_COUNTRIES
 from motorola_downloader.auth.session_manager import SessionManager
 from motorola_downloader.exceptions import SearchError
 from motorola_downloader.settings import Settings
 from motorola_downloader.utils.logger import get_logger
-from motorola_downloader.utils.request_builder import RequestBuilder
 from motorola_downloader.utils.url_utils import normalize_url, extract_filename, deduplicate_urls
 from motorola_downloader.utils.validators import validate_content_type, validate_search_query
 
 _logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# LMSA API endpoints — confirmed from web_crawler/auth/lmsa.py lines 105-117
-# (WebApiUrl.cs + WebServicesContext.cs, verified via live HAR LMSA 7.5.4.2)
-# ---------------------------------------------------------------------------
-
-_EP_RSA_KEY              = "/common/rsa.jhtml"
-_EP_GET_RESOURCE         = "/rescueDevice/getNewResource.jhtml"   # auto-match by hw params
-_EP_GET_RESOURCE_BY_IMEI = "/rescueDevice/getNewResourceByImei.jhtml"
-_EP_GET_RESOURCE_BY_SN   = "/rescueDevice/getNewResourceBySN.jhtml"
-_EP_GET_MODEL_NAMES      = "/rescueDevice/getModelNames.jhtml"    # all models
-_EP_GET_MARKET_NAMES     = "/rescueDevice/getRescueModelNames.jhtml"  # rescue-only
-_EP_GET_RESOURCE_V2      = "/rescueDevice/getResource.jhtml"      # manual match → presigned S3
-_EP_GET_RECIPE           = "/rescueDevice/getRescueModelRecipe.jhtml"
-_EP_ROM_LIST             = "/priv/getRomList.jhtml"               # full ROM catalogue (~2299 items)
-_EP_ROM_MATCH_PARAMS     = "/rescueDevice/getRomMatchParams.jhtml"
-_EP_RENEW_LINK           = "/client/renewFileLink.jhtml"
-
-#: Production API base URL (hardcoded, NOT configurable).
-#: Confirmed: https://lsa.lenovo.com/Interface via curl + HAR.
-LMSA_BASE_URL = "https://lsa.lenovo.com/Interface"
 
 # Content type mappings
 CONTENT_TYPES = {
@@ -58,23 +26,6 @@ CONTENT_TYPES = {
     "tools": "Tools",
     "all": "All",
 }
-
-# Categories used by getModelNames (from lmsa.py line 122)
-FIRMWARE_CATEGORIES = ("Phone", "Tablet")
-
-# Countries confirmed from LMSA HAR (lmsa.py lines 123-128)
-FIRMWARE_COUNTRIES = (
-    "Mexico", "US", "Brazil", "Argentina", "Colombia", "Chile",
-    "Peru", "Ecuador", "Guatemala", "Paraguay", "Dominican Republic",
-    "India", "Germany", "UK", "France", "Italy", "Spain", "Australia",
-    "Canada", "Japan", "China",
-)
-
-# Max recursion depth for paramProperty resolution (lmsa.py line 132)
-_MAX_RESOLVE_DEPTH = 4
-
-# Standard API success code
-_CODE_OK = "0000"
 
 
 class SearchResult:
@@ -185,8 +136,6 @@ class SearchEngine:
         self._settings = settings
         self.logger = get_logger(__name__)
 
-        # Base URL is a hardcoded constant, NOT from config
-        self._base_url: str = LMSA_BASE_URL
         self._default_region: str = settings.get(
             "search", "default_region", fallback="US"
         )
@@ -203,15 +152,12 @@ class SearchEngine:
             "search", "cache_ttl_seconds", fallback=300
         )
 
-        # RequestBuilder for constructing LMSA API request envelopes
-        self._request_builder = RequestBuilder(
-            guid=settings.get("motorola_server", "guid", fallback=""),
-            client_version=settings.get("motorola_server", "client_version", fallback="7.5.4.2"),
-            language=settings.get("motorola_server", "language", fallback="en-US"),
-            windows_info=settings.get(
-                "motorola_server", "windows_info",
-                fallback="Microsoft Windows 11 Pro, x64-based PC",
-            ),
+        # LMSAClient — delegates all API calls to the centralised client
+        # which implements all 16 endpoints with correct headers/body
+        self._api = LMSAClient(
+            header_manager=session.authenticator.header_manager,
+            request_builder=session.authenticator._request_builder,
+            http_client=session.http_client,
         )
 
         # Search cache: key -> (timestamp, results)
@@ -367,29 +313,164 @@ class SearchEngine:
         """
         return list(FIRMWARE_COUNTRIES)
 
+    def search_by_imei(self, imei: str) -> List[SearchResult]:
+        """Search firmware by IMEI number.
+
+        Uses /rescueDevice/getNewResourceByImei.jhtml endpoint.
+
+        Args:
+            imei: Device IMEI number (15 digits).
+
+        Returns:
+            List of SearchResult objects.
+        """
+        results: List[SearchResult] = []
+        try:
+            data = self._api.get_firmware_by_imei(imei)
+            if data:
+                fw = data.get("data")
+                if isinstance(fw, dict):
+                    results.extend(self._parse_resource_data(fw, imei))
+        except Exception as exc:
+            self.logger.warning("IMEI search error: %s", exc)
+        return results
+
+    def search_by_serial(self, serial_number: str) -> List[SearchResult]:
+        """Search firmware by serial number.
+
+        Uses /rescueDevice/getNewResourceBySN.jhtml endpoint.
+
+        Args:
+            serial_number: Device serial number.
+
+        Returns:
+            List of SearchResult objects.
+        """
+        results: List[SearchResult] = []
+        try:
+            data = self._api.get_firmware_by_serial(serial_number)
+            if data:
+                fw = data.get("data")
+                if isinstance(fw, dict):
+                    results.extend(self._parse_resource_data(fw, serial_number))
+        except Exception as exc:
+            self.logger.warning("Serial number search error: %s", exc)
+        return results
+
+    def get_rescue_models(self, country: str = "") -> List[Dict[str, Any]]:
+        """Get rescue-only device models.
+
+        Uses /rescueDevice/getRescueModelNames.jhtml endpoint.
+
+        Args:
+            country: Country for model list.
+
+        Returns:
+            List of rescue model info dicts.
+        """
+        country = country or self._default_region
+        return self._api.get_rescue_model_names(country=country)
+
+    def get_rescue_recipe(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get rescue recipe for a device model.
+
+        Uses /rescueDevice/getRescueModelRecipe.jhtml endpoint.
+
+        Args:
+            model_name: Device model name.
+
+        Returns:
+            Response dict on success, None on failure.
+        """
+        return self._api.get_rescue_recipe(model_name)
+
+    def get_rom_match_params(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get ROM match parameters for a device.
+
+        Uses /rescueDevice/getRomMatchParams.jhtml endpoint.
+
+        Args:
+            model_name: Device model name.
+
+        Returns:
+            Response dict on success, None on failure.
+        """
+        return self._api.get_rom_match_params(model_name)
+
+    def get_presigned_resource(
+        self,
+        model_name: str,
+        market_name: str,
+        **extra_params: str,
+    ) -> List[SearchResult]:
+        """Get fully resolved firmware with pre-signed S3 URLs.
+
+        Uses /rescueDevice/getResource.jhtml with recursive
+        paramProperty resolution (matching lmsa.py _resolve_resource).
+
+        Args:
+            model_name: Device model name.
+            market_name: Market name from model list.
+            **extra_params: Additional params (e.g. simCount, country).
+
+        Returns:
+            List of SearchResult objects with pre-signed S3 download URLs.
+        """
+        results: List[SearchResult] = []
+        try:
+            items = self._api.resolve_resource(
+                model_name, market_name, **extra_params
+            )
+            for item in items:
+                results.extend(self._parse_resource_data(item, model_name))
+        except Exception as exc:
+            self.logger.warning("Presigned resource error: %s", exc)
+        return results
+
+    def renew_download_link(self, file_id: str) -> Optional[str]:
+        """Renew an expired S3 pre-signed download URL.
+
+        Uses /client/renewFileLink.jhtml endpoint.
+
+        Args:
+            file_id: File identifier for the expired link.
+
+        Returns:
+            New download URL string, or None on failure.
+        """
+        return self._api.renew_download_link(file_id)
+
+    @property
+    def api_client(self) -> LMSAClient:
+        """Get the underlying LMSAClient for direct API access.
+
+        Returns:
+            The LMSAClient instance.
+        """
+        return self._api
+
     def clear_cache(self) -> None:
         """Clear the search results cache."""
         self._cache.clear()
         self.logger.info("Search cache cleared")
 
     # -----------------------------------------------------------------------
-    # Private search methods
+    # Private search methods — delegate to LMSAClient
     # -----------------------------------------------------------------------
 
     def _search_firmware(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for firmware files via getNewResource.jhtml.
+        """Search for firmware via LMSAClient.get_firmware().
 
-        Matches lmsa.py get_firmware():
-          - POST /rescueDevice/getNewResource.jhtml
-          - dparams: {modelName, flashToolType, buildType, region, ...}
-          - Response: code "0000", then `data` field contains firmware info
-            (may be AES-encrypted string or plain dict/list).
+        Delegates to api_client.py which handles correct headers, body,
+        and JWT rotation for /rescueDevice/getNewResource.jhtml.
+
+        Also searches by IMEI or serial number if provided in filters.
 
         Args:
             query: Device model name (e.g. 'xt2553-2').
-            filters: Search filters (region, carrier, etc.).
+            filters: Search filters (region, carrier, imei, serial, etc.).
 
         Returns:
             List of firmware SearchResult objects.
@@ -398,46 +479,38 @@ class SearchEngine:
         region = filters.get("region", self._default_region)
 
         try:
-            headers = self._session.get_auth_headers()
-
-            # Build RequestModel matching lmsa.py get_firmware()
-            request_body = self._request_builder.build_firmware_query(
+            # Primary: search by model name
+            data = self._api.get_firmware(
                 model_name=query,
                 region=region,
                 carrier=filters.get("carrier", ""),
             )
+            if data:
+                firmware_data = data.get("data")
+                if firmware_data and isinstance(firmware_data, dict):
+                    results.extend(self._parse_resource_data(firmware_data, query))
+                elif firmware_data and isinstance(firmware_data, list):
+                    for item in firmware_data:
+                        if isinstance(item, dict):
+                            results.extend(self._parse_resource_data(item, query))
 
-            url = f"{self._base_url}{_EP_GET_RESOURCE}"
-            response = self._session.http_client.post(
-                url, json_data=request_body, headers=headers
-            )
+            # Additional: search by IMEI if provided
+            imei = filters.get("imei", "")
+            if imei:
+                imei_data = self._api.get_firmware_by_imei(imei)
+                if imei_data:
+                    fw = imei_data.get("data")
+                    if isinstance(fw, dict):
+                        results.extend(self._parse_resource_data(fw, query))
 
-            # Update JWT from response (rotates on every call)
-            if hasattr(self._session, 'authenticator'):
-                self._session.authenticator.header_manager.update_jwt_from_response(
-                    dict(response.headers)
-                )
-
-            data = response.json()
-            code = data.get("code", "")
-
-            if code == "403":
-                self.logger.warning("Firmware query blocked — token required")
-                return results
-
-            if code != _CODE_OK:
-                self.logger.warning("Firmware query error: %s — %s", code, data.get("msg", ""))
-                return results
-
-            # Response uses `data` field (may be AES-encrypted or plain)
-            # Matching lmsa.py get_download_urls() pattern
-            firmware_data = data.get("data")
-            if firmware_data and isinstance(firmware_data, dict):
-                results.extend(self._parse_resource_data(firmware_data, query))
-            elif firmware_data and isinstance(firmware_data, list):
-                for item in firmware_data:
-                    if isinstance(item, dict):
-                        results.extend(self._parse_resource_data(item, query))
+            # Additional: search by serial number if provided
+            serial = filters.get("serial", "")
+            if serial:
+                sn_data = self._api.get_firmware_by_serial(serial)
+                if sn_data:
+                    fw = sn_data.get("data")
+                    if isinstance(fw, dict):
+                        results.extend(self._parse_resource_data(fw, query))
 
         except Exception as exc:
             self.logger.warning("Firmware search error: %s", exc)
@@ -447,13 +520,10 @@ class SearchEngine:
     def _search_roms(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for ROMs via getRomList.jhtml.
+        """Search for ROMs via LMSAClient.get_all_roms().
 
-        Matches lmsa.py get_all_roms():
-          - POST /priv/getRomList.jhtml
-          - Response: code "0000", `content` field is a list of ROM dicts.
-          - Each ROM has: name, uri, type (0=ROM, 1=Tool), md5.
-          - URIs may lack 'https://' scheme (normalised here).
+        Delegates to api_client.py which handles correct headers, body,
+        and JWT rotation for /priv/getRomList.jhtml.
 
         Args:
             query: Search query string (model name or keyword).
@@ -465,34 +535,13 @@ class SearchEngine:
         results: List[SearchResult] = []
 
         try:
-            headers = self._session.get_auth_headers()
-
-            # Build RequestModel (matches lmsa.py get_rom_list / get_all_roms)
-            request_body = self._request_builder.build_rom_list_query(
-                model_name=query,
-                region=filters.get("region", ""),
-            )
-
-            url = f"{self._base_url}{_EP_ROM_LIST}"
-            response = self._session.http_client.post(
-                url, json_data=request_body, headers=headers
-            )
-
-            data = response.json()
-            if data.get("code") != _CODE_OK:
-                self.logger.warning("ROM list error: %s — %s", data.get("code"), data.get("msg", ""))
-                return results
-
-            # Response uses `content` field (list) — from lmsa.py get_all_roms()
-            rom_list = data.get("content") or []
-            if not isinstance(rom_list, list):
-                return results
-
+            roms = self._api.get_all_roms()
             query_lower = query.lower()
-            for rom in rom_list:
+
+            for rom in roms:
                 name = rom.get("name", "")
                 uri = rom.get("uri", "") or ""
-                rom_type = rom.get("type", 0)  # 0=ROM, 1=Tool
+                rom_type = rom.get("type", 0)
 
                 # Filter ROMs only (type=0), skip tools here
                 if rom_type != 0:
@@ -502,17 +551,11 @@ class SearchEngine:
                 if query and query_lower not in name.lower():
                     continue
 
-                # Normalise scheme-less URIs (lmsa.py get_all_roms pattern)
                 download_url = normalize_url(uri)
-
                 result = SearchResult(
                     name=name,
                     model=query,
-                    version="",
-                    region="",
                     download_url=download_url,
-                    file_size=0,
-                    release_date="",
                     content_type="ROM",
                     checksum=rom.get("md5", ""),
                 )
@@ -526,14 +569,11 @@ class SearchEngine:
     def _search_tools(
         self, query: str, filters: Dict[str, Any]
     ) -> List[SearchResult]:
-        """Search for tools via getRomList.jhtml (type=1) and getResource.jhtml.
-
-        Two sources for tools (from lmsa.py analysis):
-        1. getRomList entries with type=1 are flash tools.
-        2. getResource.jhtml responses contain toolResource sub-dicts.
+        """Search for tools via LMSAClient.get_all_roms() (type=1)
+        and LMSAClient.get_plugin_urls().
 
         Args:
-            query: Search query string (model name or keyword).
+            query: Search query string.
             filters: Search filters.
 
         Returns:
@@ -542,41 +582,36 @@ class SearchEngine:
         results: List[SearchResult] = []
 
         try:
-            headers = self._session.get_auth_headers()
+            # Source 1: ROM catalogue tools (type=1)
+            roms = self._api.get_all_roms()
+            query_lower = query.lower() if query else ""
+            for item in roms:
+                if item.get("type") != 1:
+                    continue
+                name = item.get("name", "")
+                if query_lower and query_lower not in name.lower():
+                    continue
+                download_url = normalize_url(item.get("uri", ""))
+                result = SearchResult(
+                    name=name,
+                    model=query,
+                    download_url=download_url,
+                    content_type="Tools",
+                    checksum=item.get("md5", ""),
+                )
+                results.append(result)
 
-            # Source 1: Tools from ROM catalogue (type=1)
-            request_body = self._request_builder.build_rom_list_query(
-                model_name=query,
-            )
-
-            url = f"{self._base_url}{_EP_ROM_LIST}"
-            response = self._session.http_client.post(
-                url, json_data=request_body, headers=headers
-            )
-
-            data = response.json()
-            if data.get("code") == _CODE_OK:
-                rom_list = data.get("content") or []
-                if isinstance(rom_list, list):
-                    query_lower = query.lower() if query else ""
-                    for item in rom_list:
-                        # type=1 means tool (from lmsa.py collect_download_urls_by_type)
-                        if item.get("type") != 1:
-                            continue
-                        name = item.get("name", "")
-                        if query_lower and query_lower not in name.lower():
-                            continue
-                        download_url = normalize_url(item.get("uri", ""))
-                        result = SearchResult(
-                            name=name,
-                            model=query,
-                            version="",
-                            download_url=download_url,
-                            file_size=0,
-                            content_type="Tools",
-                            checksum=item.get("md5", ""),
-                        )
-                        results.append(result)
+            # Source 2: Plugin category list + static tool URLs
+            plugin_urls = self._api.get_plugin_urls()
+            for url, name in plugin_urls:
+                if query_lower and query_lower not in name.lower():
+                    continue
+                result = SearchResult(
+                    name=name,
+                    download_url=url,
+                    content_type="Tools",
+                )
+                results.append(result)
 
         except Exception as exc:
             self.logger.warning("Tools search error: %s", exc)
@@ -584,44 +619,27 @@ class SearchEngine:
         return results
 
     def _get_model_names(self) -> List[str]:
-        """Fetch available model names from the API.
+        """Fetch available model names via LMSAClient.get_model_names().
 
-        Uses RequestBuilder.build_model_query() matching
-        get_model_names() in lmsa.py. Combines 'models' and 'moreModels'
-        lists and deduplicates by modelName (matching lmsa.py pattern).
+        Delegates to api_client.py which handles combining
+        models + moreModels and deduplicating by modelName.
 
         Returns:
             List of model name strings.
         """
         models: List[str] = []
-        seen: set[str] = set()
 
         try:
-            headers = self._session.get_auth_headers()
-
+            from motorola_downloader.api_client import FIRMWARE_CATEGORIES
             for category in FIRMWARE_CATEGORIES:
-                request_body = self._request_builder.build_model_query(
+                model_list = self._api.get_model_names(
                     country=self._default_region,
                     category=category,
                 )
-
-                url = f"{self._base_url}{_EP_GET_MODEL_NAMES}"
-                response = self._session.http_client.post(
-                    url, json_data=request_body, headers=headers
-                )
-
-                data = response.json()
-                if data.get("code") == _CODE_OK:
-                    # Match lmsa.py: content.models + content.moreModels dedup
-                    content = data.get("content") or {}
-                    if isinstance(content, dict):
-                        main_models = content.get("models") or []
-                        more_models = content.get("moreModels") or []
-                        for model_info in main_models + more_models:
-                            name = model_info.get("modelName", "") or model_info.get("name", "")
-                            if name and name not in seen:
-                                seen.add(name)
-                                models.append(name)
+                for model_info in model_list:
+                    name = model_info.get("modelName", "")
+                    if name and name not in models:
+                        models.append(name)
 
         except Exception as exc:
             self.logger.warning("Failed to fetch model names: %s", exc)

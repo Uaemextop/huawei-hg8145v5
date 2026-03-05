@@ -713,3 +713,22 @@ class Authenticator:
             The RequestBuilder used for request envelope construction.
         """
         return self._request_builder
+
+    def logout(self) -> bool:
+        """Invalidate the current session token on the server.
+
+        Matches lmsa.py logout():
+          - POST /client/deleteToken.jhtml with empty dparams
+          - Clears local JWT token
+
+        Returns:
+            True if logout was successful.
+        """
+        if not self._jwt_token:
+            return True
+
+        data = self._post(_EP_DELETE_TOKEN, {})
+        self._jwt_token = None
+        self._header_manager.set_jwt_token("")
+        self.logger.info("Session token invalidated (logout)")
+        return data is not None and data.get("code") == _CODE_OK
