@@ -220,7 +220,6 @@ class AICaptchaSolver:
                 has_login_form = self._find_element(page, [
                     "input[type='password']",
                     "form[action*='login' i]",
-                    "form[action*='Login' i]",
                     "form[action*='signin' i]",
                     "input[name*='captcha' i]",
                 ])
