@@ -19,6 +19,10 @@ setup(
             "tqdm>=4.66.0",
             "colorlog>=6.8.0",
         ],
+        "ai": [
+            "openai>=1.0.0",
+            "playwright>=1.40.0",
+        ],
     },
     entry_points={
         "console_scripts": [
