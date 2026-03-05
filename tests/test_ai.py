@@ -405,7 +405,8 @@ class TestEndpointFallback(unittest.TestCase):
 
         # Verify the Azure call used model without openai/ prefix
         call_kwargs = mock_fallback_client.chat.completions.create.call_args
-        self.assertEqual(call_kwargs.kwargs.get("model", call_kwargs[1].get("model", "")), "gpt-4o")
+        model_used = call_kwargs.kwargs.get("model") or call_kwargs[1].get("model", "")
+        self.assertEqual(model_used, "gpt-4o")
         self.assertEqual(result, "test response")
 
     def test_no_fallback_for_custom_endpoint(self):

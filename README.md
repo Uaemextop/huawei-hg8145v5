@@ -16,6 +16,8 @@ directory structure on disk for fully-offline browsing and analysis.
 * **Configurable depth limit** – limit crawl depth with `--depth N`
 * **Configurable page limit** – limit total pages with `--max-pages N`
 * **Configurable delay** – set delay between requests with `--delay N`
+* **AI-powered CAPTCHA solver** – solves CAPTCHAs using GitHub Models vision API (GPT-4o)
+* **Lenovo LMSA authentication** – full OAuth flow with automatic CAPTCHA solving
 * **Deep link extraction** from every content type:
 
   | Source | Patterns extracted |
@@ -39,6 +41,13 @@ web_crawler/              # Main Python package
 ├── cli.py                # CLI argument parsing
 ├── config.py             # Configuration constants
 ├── session.py            # HTTP session creation (requests + retry)
+├── ai/                   # AI module (GitHub Models + CAPTCHA solver)
+│   ├── __init__.py
+│   ├── github_models.py  # GitHub Models API client (OpenAI SDK, vision)
+│   └── captcha_solver.py # Playwright-based CAPTCHA solver
+├── auth/                 # Authentication submodule
+│   ├── lenovo_id.py      # Lenovo ID OAuth (WUST → JWT) with AI CAPTCHA
+│   └── lmsa.py           # LMSA session management
 ├── extraction/           # Link extraction submodule
 │   ├── __init__.py
 │   ├── css.py            # CSS url() and @import extraction
@@ -55,6 +64,8 @@ web_crawler/              # Main Python package
     ├── log.py            # Coloured logging setup
     └── url.py            # URL normalisation and deduplication
 tests/                    # Unit tests
+├── test_ai.py            # AI module + CAPTCHA integration tests
+├── test_crawler.py       # Crawler tests
 ├── test_extraction.py    # Link extraction tests
 └── test_url.py           # URL normalisation tests
 ```
@@ -71,6 +82,10 @@ pip install -r requirements.txt
 
 # Or install as a package (includes optional tqdm and colorlog):
 pip install -e ".[ui]"
+
+# For AI CAPTCHA solving (optional):
+pip install -e ".[ai]"
+playwright install chromium
 ```
 
 ## Usage
@@ -104,6 +119,55 @@ python -m web_crawler https://example.com --debug
 python -m web_crawler https://example.com --no-verify-ssl
 ```
 
+### AI CAPTCHA Solving + Lenovo LMSA Authentication
+
+The crawler can authenticate with Lenovo's LMSA service and automatically solve
+CAPTCHAs using the **GitHub Models** vision API (GPT-4o).  This is required for
+crawling `rsddownload-secure.lenovo.com` (private S3 bucket).
+
+**Prerequisites:**
+1. A **GitHub Personal Access Token** — create at
+   https://github.com/settings/tokens (the token needs access to GitHub Models;
+   enable the **Models** permission if prompted during token creation)
+2. **Playwright** + Chromium installed (`pip install playwright && playwright install chromium`)
+
+**⚠️ NEVER hardcode credentials in source code or command-line history.**
+Use environment variables or source from a secure `.env` file instead:
+
+```bash
+# Step 1: Create a .env file (make sure it's in .gitignore!)
+cat > .env << 'EOF'
+export GITHUB_TOKEN="ghp_your_token_here"
+export LMSA_EMAIL="your_email@example.com"
+export LMSA_PASSWORD="your_password_here"
+EOF
+chmod 600 .env
+
+# Step 2: Source the env file and run
+source .env
+python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
+  --lmsa-email "$LMSA_EMAIL" \
+  --lmsa-password "$LMSA_PASSWORD" \
+  --ai-captcha \
+  --ai-model "openai/gpt-4o" \
+  --debug \
+  --output ./lenovo_firmware
+
+# Or even shorter (reads from env vars automatically):
+python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
+  --ai-captcha --debug --output ./lenovo_firmware
+```
+
+**What happens:**
+1. The crawler fetches the OAuth login URL from `lsa.lenovo.com`
+2. Launches a headless browser to navigate to `passport.lenovo.com`
+3. Fills in your Lenovo ID credentials
+4. If a CAPTCHA appears → screenshots it → sends to GitHub Models GPT-4o vision API → fills in the solution
+5. Captures the WUST token from the redirect
+6. Exchanges WUST for a JWT at `lsa.lenovo.com`
+7. Uses the JWT to generate pre-signed S3 URLs for firmware downloads
+8. Crawls and downloads all discovered files
+
 ### Options
 
 | Flag | Default | Description |
@@ -117,11 +181,34 @@ python -m web_crawler https://example.com --no-verify-ssl
 | `--no-robots` | off | Ignore robots.txt restrictions |
 | `--force` | off | Re-download files even if they exist on disk |
 | `--debug` | off | Verbose logging |
+| `--ai-captcha` | off | Enable AI CAPTCHA solving (requires `GITHUB_TOKEN`) |
+| `--ai-model` | `openai/gpt-4o` | GitHub Models vision model to use |
+| `--ai-captcha-type` | `auto` | CAPTCHA type: `auto`, `numbersOnly`, `lettersOnly` |
+| `--ai-captcha-url` | *(target URL)* | Override CAPTCHA page URL |
+| `--ai-login-user` | | Username for standalone CAPTCHA login |
+| `--ai-login-pass` | | Password for standalone CAPTCHA login |
+| `--lmsa-email` | `$LMSA_EMAIL` | Lenovo ID email |
+| `--lmsa-password` | `$LMSA_PASSWORD` | Lenovo ID password |
+| `--lmsa-wust` | | Pre-obtained WUST token (skip OAuth) |
+| `--lmsa-jwt` | | Pre-obtained JWT as `GUID:TOKEN` (skip all auth) |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` | GitHub PAT with `models` scope (for AI CAPTCHA) |
+| `LMSA_EMAIL` | Lenovo ID email (alternative to `--lmsa-email`) |
+| `LMSA_PASSWORD` | Lenovo ID password (alternative to `--lmsa-password`) |
+| `AI_MODEL` | Override default AI model (alternative to `--ai-model`) |
 
 ## Running tests
 
 ```bash
+# All tests
 python -m unittest discover -s tests -v
+
+# AI module tests only
+python -m unittest tests.test_ai -v
 ```
 
 ## Output structure (example)
