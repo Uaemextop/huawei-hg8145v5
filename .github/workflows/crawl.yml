@@ -3,7 +3,7 @@ name: Web Crawler
 on:
   workflow_dispatch:
     inputs:
-     url:
+      url:
         description: "URL to crawl (e.g. https://rsddownload-secure.lenovo.com)"
         required: true
         type: string
@@ -116,12 +116,12 @@ on:
           - "microsoft/Phi-3.5-vision-instruct"
           - "mistral/pixtral-large-2411"
           - "mistral/mistral-small-2503"
-     cf_clearance:
+      cf_clearance:
         description: "Cloudflare cf_clearance cookie from a browser session. Use to bypass Cloudflare Managed Challenges."
         required: false
         default: ""
         type: string
-     create_repo:
+      create_repo:
         description: "Create a new GitHub repository and push crawled files there live"
         required: false
         default: true
