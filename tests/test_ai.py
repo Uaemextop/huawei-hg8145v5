@@ -504,11 +504,11 @@ class TestLenovoIDBrowserLoginButtons(unittest.TestCase):
 
         auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
 
-        # Verify that a button selector for "Siguiente" was used
-        siguiente_selectors = [s for s in locator_selectors if 'Siguiente' in s or 'loginClass1' in s]
+        # Verify that a button selector targeting loginClass1 was used
+        siguiente_selectors = [s for s in locator_selectors if 'loginClass1' in s]
         self.assertTrue(
             len(siguiente_selectors) > 0,
-            f"Expected 'Siguiente' or 'loginClass1' button selector, got: {locator_selectors}"
+            f"Expected 'loginClass1' button selector for email Next, got: {locator_selectors}"
         )
 
     @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)
@@ -543,11 +543,11 @@ class TestLenovoIDBrowserLoginButtons(unittest.TestCase):
 
         auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
 
-        # Verify that the submit button selector was used
-        submit_selectors = [s for s in locator_selectors if 'loadingBtnHide' in s or 'loginClass2' in s]
+        # Verify that the loadingBtnHide submit button selector was used
+        submit_selectors = [s for s in locator_selectors if 'loadingBtnHide' in s]
         self.assertTrue(
             len(submit_selectors) > 0,
-            f"Expected 'loadingBtnHide' or 'loginClass2' submit selector, got: {locator_selectors}"
+            f"Expected 'loadingBtnHide' submit selector, got: {locator_selectors}"
         )
 
     @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)

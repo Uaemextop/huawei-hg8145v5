@@ -413,8 +413,8 @@ class LenovoIDAuth:
                 # Confirmed from Chrome DevTools recording selectors.
                 _clicked_next = False
                 for sel in [
-                    'div.loginClass1 >> button:has-text("Siguiente")',
-                    'div.loginClass1 button >> nth=0',
+                    'div.loginClass1 button:has-text("Siguiente")',
+                    'div.loginClass1 button:first-of-type',
                     'button:has-text("Siguiente")',
                     'button:has-text("Next")',
                 ]:
@@ -472,7 +472,7 @@ class LenovoIDAuth:
                 _clicked_submit = False
                 for sel in [
                     'button.loadingBtnHide',
-                    'div.loginClass2 >> button:has-text("Siguiente")',
+                    'div.loginClass2 button:has-text("Siguiente")',
                     'button:has-text("Siguiente")',
                     'button:has-text("Next")',
                 ]:
