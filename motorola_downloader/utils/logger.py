@@ -141,7 +141,9 @@ def setup_logging(
         console_format = MINIMAL_LOG_FORMAT
 
     root_logger = logging.getLogger("motorola_downloader")
-    root_logger.setLevel(logging.DEBUG)  # Always capture all to file
+    # Set root to DEBUG so all messages propagate to handlers; each handler
+    # applies its own level filter (console → INFO+ or DEBUG+, file → DEBUG).
+    root_logger.setLevel(logging.DEBUG)
     root_logger.handlers.clear()
 
     # Console handler — level depends on debug mode

@@ -808,6 +808,8 @@ class CLI:
             symbol = _c("✗ Error:", Fore.RED if _COLORAMA else "")
             print(f"\n {symbol} {message}")
 
+    _MSG_INTERRUPT = "Caught interrupt signal. Exiting gracefully..."
+
     def _handle_interrupt(self, signum: int, frame: Any) -> None:
         """Handle Ctrl+C interrupt gracefully.
 
@@ -815,11 +817,10 @@ class CLI:
             signum: Signal number.
             frame: Current stack frame.
         """
-        msg = "\n\n Caught interrupt signal. Exiting gracefully..."
         if _RICH and _console:
-            _console.print(f"\n\n [bold yellow]⚠ Caught interrupt signal. Exiting gracefully...[/bold yellow]")
+            _console.print(f"\n\n [bold yellow]⚠ {self._MSG_INTERRUPT}[/bold yellow]")
         else:
-            print(_c(msg, Fore.YELLOW if _COLORAMA else ""))
+            print(_c(f"\n\n {self._MSG_INTERRUPT}", Fore.YELLOW if _COLORAMA else ""))
         self._running = False
 
     def _handle_exit(self) -> None:
