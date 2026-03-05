@@ -370,6 +370,14 @@ class HeaderManager:
         """
         return self._jwt_token
 
+    def get_jwt_token(self) -> str:
+        """Get the current raw JWT token (without Bearer prefix).
+
+        Returns:
+            The JWT token string.
+        """
+        return self._jwt_token
+
     @property
     def has_credentials(self) -> bool:
         """Check if both GUID and JWT token are set.

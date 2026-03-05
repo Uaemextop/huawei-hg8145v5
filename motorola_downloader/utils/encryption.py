@@ -194,3 +194,107 @@ def verify_password(password: str, stored_hash: str) -> bool:
     except (ValueError, TypeError) as exc:
         _logger.error("Password verification failed: %s", exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# LMSA AES-128-CBC encryption (from Software Fix.exe.config)
+# ---------------------------------------------------------------------------
+# Confirmed from decompiled LMSA 7.5.4.2 assemblies:
+#   AESKey = "jdkei3ffkjijut46#$%6y7U8km4p<mdT"  (first 16 bytes → AES-128)
+#   AESIV  = "52,*u^yhNjk<./O0"
+#
+# Used to decrypt firmware metadata from getNewResource.jhtml (the `data`
+# field may be AES-encrypted) and to encrypt data sent to the server.
+# ---------------------------------------------------------------------------
+
+LMSA_AES_KEY: bytes = b"jdkei3ffkjijut46#$%6y7U8km4p<mdT"[:16]
+LMSA_AES_IV: bytes = b"52,*u^yhNjk<./O0"
+
+# Optional dependency: pycryptodome (for AES)
+try:
+    from Crypto.Cipher import AES as _AES
+    from Crypto.Util.Padding import pad as _pad, unpad as _unpad
+    _PYCRYPTO_AVAILABLE = True
+except ImportError:
+    _PYCRYPTO_AVAILABLE = False
+
+
+def lmsa_aes_decrypt(ciphertext_b64: str) -> str:
+    """AES-128-CBC decrypt a Base64-encoded ciphertext from LMSA server.
+
+    Used to decrypt ROM download links and firmware metadata returned by
+    ``getNewResource.jhtml``. Matches lmsa.py ``aes_decrypt()`` exactly.
+
+    Args:
+        ciphertext_b64: Base64-encoded AES-128-CBC ciphertext.
+
+    Returns:
+        Decrypted UTF-8 plaintext string.
+
+    Raises:
+        EncryptionError: If decryption fails or pycryptodome is not installed.
+    """
+    if not _PYCRYPTO_AVAILABLE:
+        raise EncryptionError(
+            "pycryptodome required for AES decryption: pip install pycryptodome"
+        )
+    try:
+        raw = base64.b64decode(ciphertext_b64)
+        cipher = _AES.new(LMSA_AES_KEY, _AES.MODE_CBC, LMSA_AES_IV)
+        decrypted = _unpad(cipher.decrypt(raw), _AES.block_size)
+        return decrypted.decode("utf-8")
+    except Exception as exc:
+        _logger.error("LMSA AES decryption failed: %s", exc)
+        raise EncryptionError(f"LMSA AES decryption failed: {exc}") from exc
+
+
+def lmsa_aes_encrypt(plaintext: str) -> str:
+    """AES-128-CBC encrypt plaintext for LMSA server.
+
+    Matches lmsa.py ``aes_encrypt()`` exactly.
+
+    Args:
+        plaintext: UTF-8 plaintext string to encrypt.
+
+    Returns:
+        Base64-encoded ciphertext string.
+
+    Raises:
+        EncryptionError: If encryption fails or pycryptodome is not installed.
+    """
+    if not _PYCRYPTO_AVAILABLE:
+        raise EncryptionError(
+            "pycryptodome required for AES encryption: pip install pycryptodome"
+        )
+    try:
+        cipher = _AES.new(LMSA_AES_KEY, _AES.MODE_CBC, LMSA_AES_IV)
+        padded = _pad(plaintext.encode("utf-8"), _AES.block_size)
+        encrypted = cipher.encrypt(padded)
+        return base64.b64encode(encrypted).decode("ascii")
+    except Exception as exc:
+        _logger.error("LMSA AES encryption failed: %s", exc)
+        raise EncryptionError(f"LMSA AES encryption failed: {exc}") from exc
+
+
+def lmsa_try_decrypt_data(data_value: str) -> str:
+    """Try to AES-decrypt a data field; return as-is if not encrypted.
+
+    The ``data`` field in LMSA API responses may be:
+    - A plain JSON string (not encrypted)
+    - An AES-128-CBC encrypted Base64 string
+
+    This function tries decryption first; if it fails (not valid Base64 or
+    not valid AES padding), it returns the original string unchanged.
+
+    Args:
+        data_value: The raw `data` field value from an API response.
+
+    Returns:
+        Decrypted string if it was encrypted, or original string otherwise.
+    """
+    if not data_value or not isinstance(data_value, str):
+        return data_value
+    try:
+        return lmsa_aes_decrypt(data_value)
+    except (EncryptionError, Exception):
+        return data_value

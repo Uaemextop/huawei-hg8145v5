@@ -37,6 +37,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from motorola_downloader.utils.encryption import lmsa_try_decrypt_data
 from motorola_downloader.utils.headers import HeaderManager
 from motorola_downloader.utils.http_client import HTTPClient
 from motorola_downloader.utils.logger import get_logger
@@ -137,6 +138,7 @@ class LMSAClient:
         self._http = http_client
         self._base_url = LMSA_BASE_URL
         self.logger = get_logger(__name__)
+        self._reauth_attempted: bool = False
 
     # ------------------------------------------------------------------
     # Internal POST helper (matches lmsa.py _post() exactly)
@@ -157,6 +159,9 @@ class LMSAClient:
           3. Extract JWT from response when Guid echo matches
           4. Parse and return JSON body
 
+        On code 402 (token timeout), automatically attempts re-authentication
+        via RSA flow with a fresh GUID and retries the request once.
+
         Args:
             endpoint: API endpoint path (e.g. '/common/rsa.jhtml').
             params: Parameters for the dparams section.
@@ -176,11 +181,7 @@ class LMSAClient:
             self.logger.error("POST %s failed: %s", endpoint, exc)
             return None
 
-        # JWT rotation (lmsa.py _post() lines 401-410):
-        #   guid_hdr = resp.headers.get("Guid", "")
-        #   auth_hdr = resp.headers.get("Authorization", "")
-        #   if guid_hdr == self.guid and auth_hdr and auth_hdr != self._jwt_token:
-        #       self._jwt_token = auth_hdr
+        # JWT rotation (lmsa.py _post() lines 401-410)
         self._headers.update_jwt_from_response(dict(response.headers))
 
         if response.status_code != 200:
@@ -191,13 +192,91 @@ class LMSAClient:
             return None
 
         try:
-            return response.json()
+            data = response.json()
         except ValueError:
             self.logger.error(
                 "POST %s → non-JSON response: %s",
                 endpoint, response.text[:200],
             )
             return None
+
+        # Auto re-auth on 402 "token timeout" — try RSA auth once
+        if data.get("code") == "402" and not self._reauth_attempted:
+            self.logger.warning(
+                "Token expired (402). Attempting auto re-authentication..."
+            )
+            if self._auto_reauth():
+                self._reauth_attempted = True
+                result = self._post(endpoint, params, author=author)
+                self._reauth_attempted = False
+                return result
+            else:
+                self.logger.error(
+                    "Auto re-authentication failed. Provide a fresh JWT "
+                    "via Configuration → Set JWT Token."
+                )
+
+        return data
+
+    def _auto_reauth(self) -> bool:
+        """Attempt automatic re-authentication via RSA flow.
+
+        Generates a fresh GUID, fetches RSA key, encrypts GUID,
+        and calls initToken. On success, updates headers with new JWT.
+
+        Returns:
+            True if re-authentication succeeded.
+        """
+        import uuid
+        import base64
+
+        try:
+            from Crypto.Cipher import PKCS1_v1_5
+            from Crypto.PublicKey import RSA
+        except ImportError:
+            self.logger.error(
+                "pycryptodome not installed — cannot auto re-authenticate"
+            )
+            return False
+
+        # Use a fresh random GUID for anonymous auth
+        fresh_guid = str(uuid.uuid4()).lower()
+        self.logger.info("Trying RSA auth with fresh GUID...")
+
+        # Step 1: RSA key
+        key_b64 = self.get_rsa_public_key()
+        if not key_b64:
+            return False
+
+        # Step 2: Encrypt fresh GUID
+        try:
+            key_der = base64.b64decode(key_b64.strip())
+            rsa_key = RSA.import_key(key_der)
+            cipher = PKCS1_v1_5.new(rsa_key)
+            encrypted = cipher.encrypt(fresh_guid.encode("utf-8"))
+            enc_guid = base64.b64encode(encrypted).decode("ascii")
+        except Exception as exc:
+            self.logger.error("RSA encryption failed: %s", exc)
+            return False
+
+        # Step 3: Update GUID in headers and builder before initToken
+        old_guid = self._headers._guid
+        self._headers.set_guid(fresh_guid)
+        self._builder._guid = fresh_guid
+
+        # Step 4: initToken
+        data = self.init_token(enc_guid)
+        if data and data.get("code") == _CODE_OK:
+            jwt = self._headers.get_jwt_token()
+            if jwt:
+                self.logger.info("Auto re-authentication successful!")
+                return True
+
+        # Restore old GUID on failure
+        self._headers.set_guid(old_guid)
+        self._builder._guid = old_guid
+        self.logger.warning("RSA re-auth failed, reverting GUID")
+        return False
 
     # ==================================================================
     # AUTH ENDPOINTS (5)
@@ -396,6 +475,9 @@ class LMSAClient:
             return None
 
         code = data.get("code", "")
+        if code == "402":
+            self.logger.error("Token expired (402) — re-authentication needed")
+            return None
         if code == "403":
             self.logger.error("Firmware query blocked — token required")
             return None
@@ -404,6 +486,19 @@ class LMSAClient:
                 "Firmware query error: %s — %s", code, data.get("msg", "")
             )
             return None
+
+        # The `data` field may be AES-128-CBC encrypted (Base64 string).
+        # Try to decrypt it; if it's already plain JSON, leave it as-is.
+        raw_data = data.get("data")
+        if isinstance(raw_data, str) and raw_data:
+            import json as _json
+            decrypted = lmsa_try_decrypt_data(raw_data)
+            if decrypted != raw_data:
+                self.logger.info("Firmware data was AES-encrypted, decrypted OK")
+            try:
+                data["data"] = _json.loads(decrypted)
+            except (ValueError, TypeError):
+                data["data"] = decrypted
 
         return data
 

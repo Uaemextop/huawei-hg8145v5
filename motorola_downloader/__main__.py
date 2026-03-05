@@ -68,12 +68,26 @@ def main(config_path: Optional[str] = None) -> int:
         # 4. Initialize session manager
         session = SessionManager(settings, http_client)
 
-        # 5. Attempt session start (non-fatal if no credentials yet)
+        # 5. Attempt session start using the most appropriate flow:
+        #    - If both GUID and JWT are configured → use from_jwt() (HAR capture)
+        #    - If only GUID → attempt RSA anonymous auth
+        #    - If neither → prompt user later
         guid = settings.get("motorola_server", "guid", fallback="")
-        if guid:
+        jwt_token = settings.get("motorola_server", "jwt_token", fallback="")
+
+        if guid and jwt_token:
+            # from_jwt() flow — use existing JWT+GUID directly
+            try:
+                session.authenticator.from_jwt(jwt=jwt_token, guid=guid)
+                session._active = True
+                logger.info("Session started with configured JWT + GUID")
+            except MotorolaDownloaderError as exc:
+                logger.warning("from_jwt failed: %s", exc)
+        elif guid:
+            # RSA anonymous auth flow
             try:
                 session.start_session()
-                logger.info("Session started successfully")
+                logger.info("Session started via RSA auth")
             except MotorolaDownloaderError as exc:
                 logger.warning("Session start failed (manual auth may be needed): %s", exc)
         else:

@@ -72,10 +72,12 @@ class HTTPClient:
 
         self._session = requests.Session()
         self._session.verify = verify_ssl
+        # Keep session headers MINIMAL — LMSA API headers are set per-request
+        # via HeaderManager.get_full_api_headers(). Setting them here would
+        # cause conflicts or extra headers that lmsa.py does NOT send.
+        # Confirmed from HAR: Accept and Accept-Encoding are NOT sent by LMSA.
         self._session.headers.update({
             "User-Agent": user_agent,
-            "Accept": "application/json",
-            "Cache-Control": "no-cache",
         })
 
         retry_strategy = Retry(
@@ -155,6 +157,7 @@ class HTTPClient:
         url: str,
         json_data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        raise_for_status: bool = False,
     ) -> requests.Response:
         """Send an HTTP POST request with JSON body.
 
@@ -162,12 +165,15 @@ class HTTPClient:
             url: The target URL (must be HTTPS).
             json_data: Optional JSON body data.
             headers: Optional additional headers.
+            raise_for_status: If True, raise HTTPClientError on non-2xx.
+                Default False — returns raw response for status inspection.
 
         Returns:
             The HTTP response object.
 
         Raises:
-            HTTPClientError: If the request fails after all retries.
+            HTTPClientError: If the request fails (connection/timeout error,
+                or HTTP error when raise_for_status=True).
         """
         self._enforce_https(url)
         self.logger.info("POST %s", url)
@@ -180,7 +186,8 @@ class HTTPClient:
                 timeout=self._timeout,
             )
             self.logger.info("POST %s → %d", url, response.status_code)
-            response.raise_for_status()
+            if raise_for_status:
+                response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as exc:
             self.logger.error("HTTP error for POST %s: %s", url, exc)
