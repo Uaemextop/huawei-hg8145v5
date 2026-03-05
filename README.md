@@ -146,3 +146,27 @@ downloaded_site/
 > `robots.txt`, use appropriate delays between requests, and avoid
 > overwhelming servers. The `--delay` flag (default 0.25s) helps prevent
 > excessive load on the target server.
+
+## Motorola Firmware Downloader (nuevo)
+
+Un cliente CLI modular para autenticar, buscar y descargar firmware de servidores Motorola.
+
+### Configuración
+1. Copia `config.ini` y rellena `base_url`, `guid`, `jwt_token` y `output_directory`.
+2. Ajusta `max_concurrent_downloads` (1-5), `timeout_seconds` y nivel de logging.
+
+### Ejecución
+```bash
+# Lanzar el asistente interactivo
+motorola-fw --config config.ini
+```
+
+### Módulos clave
+- `settings.py`: carga/valida `config.ini`
+- `authenticator.py`: autenticación JWT con reintento exponencial
+- `session_manager.py`: ciclo de vida de sesión y auto-refresh
+- `search_engine.py`: búsquedas con caché y deduplicación
+- `download_manager.py`: descargas concurrentes con reintentos y reanudación
+- `http_client.py`: cliente HTTP con retries y HTTPS obligatorio
+- `encryption.py`: AES-256-GCM y hash bcrypt para credenciales sensibles
+- `cli/main.py`: menús interactivos para búsqueda, descarga y configuración

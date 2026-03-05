@@ -13,6 +13,9 @@ setup(
         "beautifulsoup4>=4.12.0",
         "lxml>=5.0.0",
         "urllib3>=2.0.0",
+        "cryptography>=42.0.0",
+        "click>=8.1.0",
+        "colorama>=0.4.6",
     ],
     extras_require={
         "ui": [
@@ -20,9 +23,10 @@ setup(
             "colorlog>=6.8.0",
         ],
     },
-    entry_points={
-        "console_scripts": [
-            "web-crawler=web_crawler.cli:main",
-        ],
-    },
+entry_points={
+    "console_scripts": [
+        "web-crawler=web_crawler.cli:main",
+        "motorola-fw=motorola_firmware.cli.main:main",
+    ],
+},
 )
