@@ -3,13 +3,10 @@ name: Web Crawler
 on:
   workflow_dispatch:
     inputs:
-      # ── Target ────────────────────────────────────────────────────────────
-      url:
+     url:
         description: "URL to crawl (e.g. https://rsddownload-secure.lenovo.com)"
         required: true
         type: string
-
-      # ── Crawl behaviour ───────────────────────────────────────────────────
       depth:
         description: "Maximum crawl depth (0 = unlimited)"
         required: false
@@ -40,21 +37,13 @@ on:
         required: false
         default: true
         type: boolean
-
-      # ── Download & file filtering ─────────────────────────────────────────
       download_extensions:
-        description: >
-          Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk)
-          or 'all' to download every discovered file.
+        description: "Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk or 'all' to download every discovered file."
         required: false
         default: "zip,exe,rar,bin,7z,apk,jar,msi,img,iso,deb,rpm"
         type: string
       skip_download_exts:
-        description: >
-          Extensions to SKIP downloading (comma-separated: zip,exe,rar) or 'all' for every
-          binary. Matching files are NOT saved to disk — instead a ready-to-run curl/wget
-          command (with all auth headers) is recorded in download_links.txt.
-          Leave empty to download everything normally.
+        description: "Extensions to SKIP downloading (comma-separated: zip,exe,rar) or 'all' for every binary. Matching files are NOT saved to disk — instead a ready-to-run curl/wget command (with all auth headers) is recorded in download_links.txt. Leave empty to download everything normally."
         required: false
         default: ""
         type: string
@@ -73,52 +62,33 @@ on:
         required: false
         default: true
         type: boolean
-
-      # ── LMSA / Motorola firmware authentication ───────────────────────────
       lmsa_jwt:
-        description: >
-          Pre-obtained LMSA JWT from a HAR/proxy capture, in GUID:JWT_TOKEN format.
-          Skips Lenovo ID OAuth entirely — the captured token is used directly.
-          Obtain from HTTPToolkit/Charles by capturing the LMSA app traffic.
-          Example: 98e2895b-...:Ek6TINIruEV6...
+        description: "Pre-obtained LMSA JWT from a HAR/proxy capture, in GUID:JWT_TOKEN format. Skips Lenovo ID OAuth entirely — the captured token is used directly Obtain from HTTPToolkit/Charles by capturing the LMSA app traffic. Example 98e2895b-...:Ek6TINIruEV6..."
         required: false
         default: ""
         type: string
       lmsa_email:
-        description: >
-          Lenovo ID email for automatic LMSA login (alternative to lmsa_jwt).
-          Used when lmsa_jwt is not provided.
+        description: "Lenovo ID email for automatic LMSA login (alternative to lmsa_jwt). Used when lmsa_jwt is not provided."
         required: false
         default: ""
         type: string
       lmsa_password:
-        description: >
-          Lenovo ID password for automatic LMSA login (alternative to lmsa_jwt).
-          Password is double-MD5 hashed automatically before sending.
+        description: "Lenovo ID password for automatic LMSA login (alternative to lmsa_jwt). Password is double-MD5 hashed automatically before sending."
         required: false
         default: ""
         type: string
       lmsa_wust:
-        description: >
-          Pre-obtained LMSA WUST token (skips Lenovo ID OAuth, goes straight to
-          JWT exchange). Use when you have a valid WUST from a previous session.
+        description: "Pre-obtained LMSA WUST token (skips Lenovo ID OAuth, goes straight to JWT exchange). Use when you have a valid WUST from a previous session."
         required: false
         default: ""
         type: string
       lmsa_country:
-        description: >
-          Limit LMSA firmware scan to specific countries (comma-separated, e.g.
-          "Mexico,China,US,Brazil"). Leave empty to scan ALL built-in regions
-          (~20 countries). Only applies when URL is rsddownload-secure.lenovo.com.
+        description: "Limit LMSA firmware scan to specific countries (comma-separated, e.g. Mexico,China,US,Brazil). Leave empty to scan ALL built-in regions (~20 countries). Only applies when URL is rsddownload-secure.lenovo.com."
         required: false
         default: ""
         type: string
-
-      # ── AI CAPTCHA solver ──────────────────────────────────────────────────
       ai_captcha:
-        description: >
-          Enable AI-powered CAPTCHA solving using GitHub Models vision API.
-          Requires the AI_TOKEN secret to be configured in the repository.
+        description: "Enable AI-powered CAPTCHA solving using GitHub Models vision API. Requires the AI_TOKEN secret to be configured in the repository."
         required: false
         default: true
         type: boolean
@@ -128,7 +98,6 @@ on:
         default: "openai/gpt-4o"
         type: choice
         options:
-          # ── OpenAI ──────────────────────────────────────────────────
           - "openai/gpt-4o"
           - "openai/gpt-4o-mini"
           - "openai/gpt-4.1"
@@ -139,29 +108,20 @@ on:
           - "openai/o3-mini"
           - "openai/o1"
           - "openai/o1-mini"
-          # ── Meta Llama (vision) ─────────────────────────────────────
           - "meta/llama-4-scout-17b-16e-instruct"
           - "meta/llama-4-maverick-17b-128e-instruct"
           - "meta/Llama-3.2-11B-Vision-Instruct"
           - "meta/Llama-3.2-90B-Vision-Instruct"
-          # ── Microsoft Phi (multimodal) ──────────────────────────────
           - "microsoft/Phi-4-multimodal-instruct"
           - "microsoft/Phi-3.5-vision-instruct"
-          # ── Mistral ─────────────────────────────────────────────────
           - "mistral/pixtral-large-2411"
           - "mistral/mistral-small-2503"
-
-      # ── Cloudflare bypass ─────────────────────────────────────────────────
-      cf_clearance:
-        description: >
-          Cloudflare cf_clearance cookie from a browser session.
-          Use to bypass Cloudflare Managed Challenges.
+     cf_clearance:
+        description: "Cloudflare cf_clearance cookie from a browser session. Use to bypass Cloudflare Managed Challenges."
         required: false
         default: ""
         type: string
-
-      # ── Repository output ─────────────────────────────────────────────────
-      create_repo:
+     create_repo:
         description: "Create a new GitHub repository and push crawled files there live"
         required: false
         default: true
@@ -177,9 +137,7 @@ on:
         default: "100"
         type: string
       upload_extensions:
-        description: >
-          Extensions to include in git pushes (comma-separated: zip,bin,rar) or
-          'all' to upload every file.  Use this to avoid pushing huge binaries.
+        description: "Extensions to include in git pushes (comma-separated: zip,bin,rar) or 'all' to upload every file.  Use this to avoid pushing huge binaries."
         required: false
         default: "all"
         type: string
@@ -188,8 +146,6 @@ on:
         required: false
         default: false
         type: boolean
-
-      # ── Diagnostics ───────────────────────────────────────────────────────
       debug:
         description: "Verbose logging + save HTTP response headers (.headers files) to repo"
         required: false
