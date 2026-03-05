@@ -468,7 +468,9 @@ class LenovoIDAuth:
                     )):
                         _log("[LenovoID] Browser: invalid credentials")
                     elif "captcha" in body_lower or "robot" in body_lower:
-                        _log("[LenovoID] Browser: CAPTCHA shown — manual action required")
+                        _log("[LenovoID] Browser: CAPTCHA detected — "
+                             "attempting AI solver")
+                        wust = self._solve_captcha_with_ai(page, captured)
                     elif "blocked" in body_lower and "akamai" in body_lower:
                         _log("[LenovoID] Browser: blocked by Akamai Bot Manager")
                     else:
@@ -479,6 +481,91 @@ class LenovoIDAuth:
             _log(f"[LenovoID] Browser login exception: {exc}")
 
         return wust
+
+    def _solve_captcha_with_ai(
+        self,
+        page: object,
+        captured: list[str],
+    ) -> Optional[str]:
+        """Use the AI CAPTCHA solver to solve a CAPTCHA on the Lenovo ID
+        login page and capture the WUST token from the redirect.
+
+        Called when ``_obtain_wust_browser`` detects a CAPTCHA challenge.
+        Requires ``GITHUB_TOKEN`` env var to be set for the GitHub Models
+        vision API.
+
+        Returns the WUST token on success, ``None`` on failure.
+        """
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if not github_token:
+            _log("[LenovoID] GITHUB_TOKEN not set — cannot use AI CAPTCHA solver")
+            return None
+
+        try:
+            from web_crawler.ai.github_models import GitHubModelsClient
+            from web_crawler.ai.captcha_solver import AICaptchaSolver
+        except ImportError as exc:
+            _log(f"[LenovoID] AI module not available: {exc}")
+            return None
+
+        ai_model = os.environ.get("AI_MODEL", "openai/gpt-4o")
+        ai_client = GitHubModelsClient(token=github_token, model=ai_model)
+        solver = AICaptchaSolver(ai_client=ai_client, max_attempts=3)
+
+        _log("[LenovoID] [AI-CAPTCHA] Attempting to solve CAPTCHA…")
+        for attempt in range(1, 4):
+            solution = solver.solve_captcha_on_page(page)  # type: ignore[arg-type]
+            if not solution:
+                _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: no solution")
+                continue
+
+            _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: solution='{solution}'")
+
+            # Fill the CAPTCHA input and submit
+            captcha_filled = False
+            for sel in [
+                "input[id*='captcha' i]",
+                "input[name*='captcha' i]",
+                "input[id*='verify' i]",
+                "input[name*='verify' i]",
+                "input[placeholder*='code' i]",
+                "input[placeholder*='captcha' i]",
+            ]:
+                try:
+                    el = page.query_selector(sel)  # type: ignore[union-attr]
+                    if el and el.is_visible():
+                        el.fill("")
+                        el.type(solution, delay=50)
+                        el.dispatch_event("input")
+                        el.dispatch_event("change")
+                        captcha_filled = True
+                        break
+                except Exception:
+                    continue
+
+            if not captcha_filled:
+                _log("[LenovoID] [AI-CAPTCHA] Could not find CAPTCHA input field")
+                continue
+
+            page.keyboard.press("Enter")  # type: ignore[union-attr]
+            page.wait_for_timeout(5000)  # type: ignore[union-attr]
+
+            # Check if WUST was captured after CAPTCHA submit
+            for url in captured:
+                w = _find_wust(url)
+                if w:
+                    _log("[LenovoID] [AI-CAPTCHA] ✓ WUST captured after solving CAPTCHA")
+                    return w
+
+            w = _find_wust(page.url)  # type: ignore[union-attr]
+            if w:
+                _log("[LenovoID] [AI-CAPTCHA] ✓ WUST found in URL after CAPTCHA")
+                return w
+
+            _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: no WUST after submit")
+
+        _log("[LenovoID] [AI-CAPTCHA] All attempts failed")
+        return None
 
     def _obtain_wust_requests(
         self, email: str, password: str, login_url: str
