@@ -2,7 +2,11 @@
 
 Provides a singleton-based logger factory with:
 - Debug mode: verbose output with timestamps, module names, and all levels
-- Normal mode: clean, minimalist INFO-only output for end users
+- Normal mode: clean, minimalist output for end users — internal modules
+  (api_client, http_client, headers, authenticator, request_builder,
+  encryption) are silenced on the console so only user-facing messages
+  from cli.py, search_engine.py, download_manager.py and __main__.py
+  are shown.
 - Console handler with colorama-powered colored output
 - Rotating file handler with configurable size and backup count
 - Automatic logs/ directory creation
@@ -35,10 +39,25 @@ DEFAULT_BACKUP_COUNT = 5
 
 # Verbose format for debug mode (timestamps + module + level)
 DEBUG_LOG_FORMAT = "%(asctime)s [%(name)s] [%(levelname)s] %(message)s"
-# Minimal format for normal mode (clean user-facing output)
-MINIMAL_LOG_FORMAT = "%(levelname)s: %(message)s"
+# Minimal format for normal mode — message only, no module path
+MINIMAL_LOG_FORMAT = "%(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 FILE_LOG_FORMAT = "%(asctime)s [%(name)s] [%(levelname)s] %(message)s"
+
+# Internal modules whose console output should be suppressed in normal mode.
+# Their messages still go to the log file at DEBUG level for diagnostics.
+_INTERNAL_MODULES = (
+    "motorola_downloader.utils.api_client",
+    "motorola_downloader.utils.http_client",
+    "motorola_downloader.utils.headers",
+    "motorola_downloader.utils.request_builder",
+    "motorola_downloader.utils.encryption",
+    "motorola_downloader.utils.validators",
+    "motorola_downloader.utils.url_utils",
+    "motorola_downloader.auth.authenticator",
+    "motorola_downloader.auth.session_manager",
+    "motorola_downloader.settings",
+)
 
 # Singleton registry for loggers
 _loggers: dict[str, logging.Logger] = {}
@@ -104,6 +123,24 @@ class _ColorFormatter(logging.Formatter):
         return formatted
 
 
+class _InternalModuleFilter(logging.Filter):
+    """Console filter that blocks INFO/DEBUG from internal modules.
+
+    In normal (non-debug) mode this filter is attached to the console
+    handler.  It drops messages at INFO or DEBUG level when they
+    originate from one of the ``_INTERNAL_MODULES``.  WARNING and
+    above always pass through so genuine problems are still visible.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        for prefix in _INTERNAL_MODULES:
+            if record.name == prefix or record.name.startswith(prefix + "."):
+                return False
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -118,9 +155,19 @@ def setup_logging(
     """Initialize the logging system for the application.
 
     Sets up console and optional file handlers on the root 'motorola_downloader'
-    logger. When debug=True, console shows all levels with verbose timestamps
-    and module names. When debug=False, console shows only INFO+ with clean
-    minimal format.
+    logger.
+
+    **Debug mode** (``debug=True``):
+      Console shows ALL levels from ALL modules with verbose timestamps
+      and module names — useful for development and troubleshooting.
+
+    **Normal mode** (``debug=False``):
+      Console shows only INFO+ messages from *user-facing* modules
+      (cli, search_engine, download_manager, __main__).  Internal
+      plumbing modules (api_client, http_client, headers, authenticator,
+      …) are silenced on the console so the user never sees raw POST
+      URLs or JWT rotation noise.  All messages still go to the log
+      file at DEBUG level.
 
     Args:
         level: Logging level string (DEBUG, INFO, WARNING, ERROR, CRITICAL).
@@ -159,6 +206,13 @@ def setup_logging(
     )
     root_logger.addHandler(console_handler)
 
+    # In normal mode, silence internal modules on the console.
+    # They still emit to the file handler at DEBUG for diagnostics.
+    if not debug:
+        for mod_name in _INTERNAL_MODULES:
+            mod_logger = logging.getLogger(mod_name)
+            mod_logger.setLevel(logging.WARNING)
+
     # File handler (rotating) — always captures DEBUG for diagnostics
     if log_file:
         log_path = Path(log_file)
@@ -174,6 +228,14 @@ def setup_logging(
             logging.Formatter(FILE_LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
         )
         root_logger.addHandler(file_handler)
+
+        # Internal modules should still write DEBUG to file even though
+        # their logger level is WARNING.  Restore their level to DEBUG
+        # and add a filter to the *console handler* instead.
+        if not debug:
+            console_handler.addFilter(_InternalModuleFilter())
+            for mod_name in _INTERNAL_MODULES:
+                logging.getLogger(mod_name).setLevel(logging.DEBUG)
 
     _initialized = True
 

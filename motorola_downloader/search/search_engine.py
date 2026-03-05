@@ -477,18 +477,25 @@ class SearchEngine:
 
     @staticmethod
     def _expand_model_variants(query: str) -> List[str]:
-        """Expand a model codename into known variant suffixes.
+        """Expand a model codename or XT number into known variants.
 
         Motorola uses codename families where the base name is shared
         across regional/carrier/chipset variants.  For example the
         "lamu" family includes: lamu, lamuc, lamug, lamumite.
 
+        For XT model numbers (e.g. ``xt2523``), the engine generates
+        dash-number suffixes: xt2523-1, xt2523-2, …, xt2523-10.
+        If the user already provides a full XT number like ``xt2523-2``,
+        the base is extracted and all siblings are included.
+
         The expansion algorithm:
           1. Always include the original query.
-          2. Append common Motorola suffixes (c, g, mite, ds, f, p, s,
-             plus, lite, ultra) unless the query already ends with that
-             suffix.
-          3. Return a deduplicated, ordered list.
+          2. If the query looks like an XT model number (``xt`` + digits,
+             optionally followed by ``-N``), generate ``xt…-1`` to
+             ``xt…-10``.
+          3. Otherwise append common Motorola codename suffixes (c, g,
+             mite, ds, f, p, s, plus, lite, ultra).
+          4. Return a deduplicated, ordered list.
 
         Args:
             query: User-provided model name or codename.
@@ -496,15 +503,28 @@ class SearchEngine:
         Returns:
             List of model name variants to search (always ≥ 1 item).
         """
+        import re
+
         base = query.strip().lower()
         if not base:
             return [query]
 
-        # Common Motorola codename suffixes observed in ROM catalogue
+        # XT model number pattern: "xt" + digits, optionally "-N"
+        xt_match = re.match(r'^(xt\d+)(?:-\d+)?$', base)
+        if xt_match:
+            xt_base = xt_match.group(1)
+            variants: list[str] = [base]
+            for n in range(1, 11):
+                candidate = f"{xt_base}-{n}"
+                if candidate not in variants:
+                    variants.append(candidate)
+            return variants
+
+        # Codename expansion: common Motorola suffixes
         _SUFFIXES = ("c", "g", "mite", "ds", "f", "p", "s",
                      "plus", "lite", "ultra")
 
-        variants: list[str] = [base]
+        variants = [base]
         for suffix in _SUFFIXES:
             candidate = base + suffix
             if candidate != base:

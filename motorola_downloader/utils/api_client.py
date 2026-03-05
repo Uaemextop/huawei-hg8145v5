@@ -469,21 +469,23 @@ class LMSAClient:
         if android_version:
             params["androidVersion"] = android_version
 
-        self.logger.info("Querying firmware for %s...", model_name)
+        self.logger.debug("Querying firmware for %s...", model_name)
         data = self._post(_EP_GET_RESOURCE, params)
         if data is None:
             return None
 
         code = data.get("code", "")
         if code == "402":
-            self.logger.error("Token expired (402) — re-authentication needed")
+            self.logger.warning("Token expired (402) — re-authentication needed")
             return None
         if code == "403":
-            self.logger.error("Firmware query blocked — token required")
+            self.logger.warning("Firmware query blocked — token required")
             return None
         if code != _CODE_OK:
-            self.logger.error(
-                "Firmware query error: %s — %s", code, data.get("msg", "")
+            # Code 1000 = "model not found" — expected during multi-variant
+            # search; do not pollute the console with expected misses.
+            self.logger.debug(
+                "Firmware query for '%s': code %s", model_name, code,
             )
             return None
 
