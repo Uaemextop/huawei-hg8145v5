@@ -378,14 +378,16 @@ class LenovoIDAuth:
                 page.wait_for_timeout(5000)
 
                 # The Lenovo ID page (glbwebauthnv6) is a two-step SPA:
-                # Step A: type email in #emailOrPhoneInput (first, since there
-                #         are two with that id) then press Enter/click Next.
+                # Step A: type email in #emailOrPhoneInput then click the
+                #         "Siguiente" (Next) button in div.loginClass1.
                 # Step B: wait for #emailOrPhonePswInput to become visible
-                #         then fill password → click the submit button.
-                # Confirmed from live HTML inspection on glbwebauthnv6/preLogin.
+                #         then fill password → click the submit button
+                #         (button.loadingBtnHide) in div.loginClass2.
+                # Confirmed from Chrome DevTools recording on glbwebauthnv6/preLogin.
                 filled_email = False
                 for sel in [
                     '#emailOrPhoneInput',
+                    'input.noneTheme1',
                     'input[type="text"]:visible',
                     'input[type="email"]:visible',
                 ]:
@@ -406,9 +408,29 @@ class LenovoIDAuth:
                 if not filled_email:
                     _log("[LenovoID] Browser: could not locate email field")
 
-                # Press Enter to advance to the password step.
-                page.keyboard.press("Enter")
-                page.wait_for_timeout(1000)
+                # Click the "Siguiente" (Next) button to advance to the
+                # password step.  The button lives inside div.loginClass1.
+                # Confirmed from Chrome DevTools recording selectors.
+                _clicked_next = False
+                for sel in [
+                    'div.loginClass1 >> button:has-text("Siguiente")',
+                    'div.loginClass1 button >> nth=0',
+                    'button:has-text("Siguiente")',
+                    'button:has-text("Next")',
+                ]:
+                    try:
+                        btn = page.locator(sel).first
+                        btn.wait_for(state="visible", timeout=3000)
+                        btn.click(timeout=3000)
+                        _clicked_next = True
+                        break
+                    except Exception:
+                        continue
+                if not _clicked_next:
+                    # Fallback: press Enter if no button found.
+                    page.keyboard.press("Enter")
+
+                page.wait_for_timeout(2000)
 
                 # Wait for password field (SPA transition after email submit).
                 try:
@@ -426,6 +448,7 @@ class LenovoIDAuth:
                 # with CryptoJS.MD5, then writes it to the hidden password field).
                 try:
                     for sel in ['#emailOrPhonePswInput',
+                                "div.loginClass2 input[type='password']",
                                 'input[type="password"]:visible']:
                         try:
                             loc = page.locator(sel).first
@@ -442,11 +465,28 @@ class LenovoIDAuth:
                 # Akamai bot-ID (bid) to be populated by page JS.
                 page.wait_for_timeout(3000)
 
-                # Submit credentials via keyboard Enter — this triggers
-                # the page's keydown handler: 13==e.keyCode&&nextHandler()
-                # which hashes the password, appends the GT token, waits
-                # for bid, then submits the form.
-                page.keyboard.press("Enter")
+                # Click the submit "Siguiente" button.  The submit button
+                # in the password step has class loadingBtnHide and lives
+                # inside div.loginClass2.
+                # Confirmed from Chrome DevTools recording selectors.
+                _clicked_submit = False
+                for sel in [
+                    'button.loadingBtnHide',
+                    'div.loginClass2 >> button:has-text("Siguiente")',
+                    'button:has-text("Siguiente")',
+                    'button:has-text("Next")',
+                ]:
+                    try:
+                        btn = page.locator(sel).first
+                        btn.wait_for(state="visible", timeout=3000)
+                        btn.click(timeout=3000)
+                        _clicked_submit = True
+                        break
+                    except Exception:
+                        continue
+                if not _clicked_submit:
+                    # Fallback: press Enter if no button found.
+                    page.keyboard.press("Enter")
 
                 # Wait for the JS to hash password, append GT, poll for bid,
                 # and submit the form (bid poll interval = 500ms).

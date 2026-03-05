@@ -425,5 +425,228 @@ class TestEndpointFallback(unittest.TestCase):
         self.assertIn("fail", str(ctx.exception))
 
 
+# ------------------------------------------------------------------ #
+# LenovoIDAuth._obtain_wust_browser login button clicks
+# ------------------------------------------------------------------ #
+
+class TestLenovoIDBrowserLoginButtons(unittest.TestCase):
+    """Test that _obtain_wust_browser clicks the 'Siguiente' buttons
+    instead of pressing Enter for email and password submission.
+
+    The Lenovo passport login SPA (glbwebauthnv6/preLogin) has two
+    explicit buttons:
+    - div.loginClass1 button (Next after email)
+    - button.loadingBtnHide (Submit after password)
+
+    These must be clicked; pressing Enter alone may not trigger the
+    correct JS handler (especially nextHandler + reCAPTCHA token).
+    """
+
+    def _make_auth(self):
+        from web_crawler.auth.lenovo_id import LenovoIDAuth
+        return LenovoIDAuth(verify_ssl=False)
+
+    def _make_mock_page(self, final_url="https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=MOCK_WUST"):
+        """Create a mock Playwright page with locator support."""
+        page = MagicMock()
+        page.url = final_url
+
+        # Create a mock locator that simulates finding elements
+        def _make_locator_chain():
+            loc = MagicMock()
+            loc.first = loc
+            loc.wait_for.return_value = None
+            loc.click.return_value = None
+            loc.type.return_value = None
+            return loc
+
+        page.locator.return_value = _make_locator_chain()
+        page.wait_for_timeout.return_value = None
+        page.wait_for_selector.return_value = MagicMock()
+        page.wait_for_url.return_value = None
+        page.keyboard = MagicMock()
+        page.on.return_value = None
+        page.goto.return_value = None
+        page.content.return_value = ""
+        return page
+
+    @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)
+    @patch("web_crawler.auth.lenovo_id._sync_playwright", create=True)
+    def test_clicks_siguiente_button_after_email(self, mock_pw):
+        """After entering email, the code should try to click the
+        'Siguiente' button in div.loginClass1 instead of just pressing Enter."""
+        auth = self._make_auth()
+
+        page = self._make_mock_page()
+
+        # Track which selectors were used with locator()
+        locator_selectors = []
+        def _track_locator(sel):
+            locator_selectors.append(sel)
+            loc = MagicMock()
+            loc.first = loc
+            loc.wait_for.return_value = None
+            loc.click.return_value = None
+            loc.type.return_value = None
+            return loc
+
+        page.locator.side_effect = _track_locator
+
+        # Set up the Playwright context mock
+        mock_browser = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.new_page.return_value = page
+        mock_browser.new_context.return_value = mock_ctx
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.firefox.launch.return_value = mock_browser
+        mock_pw.return_value.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_pw.return_value.__exit__ = MagicMock(return_value=False)
+
+        auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
+
+        # Verify that a button selector for "Siguiente" was used
+        siguiente_selectors = [s for s in locator_selectors if 'Siguiente' in s or 'loginClass1' in s]
+        self.assertTrue(
+            len(siguiente_selectors) > 0,
+            f"Expected 'Siguiente' or 'loginClass1' button selector, got: {locator_selectors}"
+        )
+
+    @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)
+    @patch("web_crawler.auth.lenovo_id._sync_playwright", create=True)
+    def test_clicks_submit_button_after_password(self, mock_pw):
+        """After entering password, the code should try to click the submit
+        button (button.loadingBtnHide) instead of just pressing Enter."""
+        auth = self._make_auth()
+
+        page = self._make_mock_page()
+
+        locator_selectors = []
+        def _track_locator(sel):
+            locator_selectors.append(sel)
+            loc = MagicMock()
+            loc.first = loc
+            loc.wait_for.return_value = None
+            loc.click.return_value = None
+            loc.type.return_value = None
+            return loc
+
+        page.locator.side_effect = _track_locator
+
+        mock_browser = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.new_page.return_value = page
+        mock_browser.new_context.return_value = mock_ctx
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.firefox.launch.return_value = mock_browser
+        mock_pw.return_value.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_pw.return_value.__exit__ = MagicMock(return_value=False)
+
+        auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
+
+        # Verify that the submit button selector was used
+        submit_selectors = [s for s in locator_selectors if 'loadingBtnHide' in s or 'loginClass2' in s]
+        self.assertTrue(
+            len(submit_selectors) > 0,
+            f"Expected 'loadingBtnHide' or 'loginClass2' submit selector, got: {locator_selectors}"
+        )
+
+    @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)
+    @patch("web_crawler.auth.lenovo_id._sync_playwright", create=True)
+    def test_password_field_selectors_include_loginClass2(self, mock_pw):
+        """Password field selectors should include div.loginClass2 input[type='password']
+        as a fallback when #emailOrPhonePswInput is not found."""
+        auth = self._make_auth()
+
+        page = self._make_mock_page()
+
+        locator_selectors = []
+        def _track_locator(sel):
+            locator_selectors.append(sel)
+            loc = MagicMock()
+            loc.first = loc
+            # Email field works
+            if sel == '#emailOrPhoneInput':
+                loc.wait_for.return_value = None
+                loc.click.return_value = None
+                loc.type.return_value = None
+                return loc
+            # Make #emailOrPhonePswInput fail so the loginClass2 selector is tried
+            if sel == '#emailOrPhonePswInput':
+                loc.wait_for.side_effect = Exception("not found")
+                return loc
+            # All other selectors succeed
+            loc.wait_for.return_value = None
+            loc.click.return_value = None
+            loc.type.return_value = None
+            return loc
+
+        page.locator.side_effect = _track_locator
+
+        mock_browser = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.new_page.return_value = page
+        mock_browser.new_context.return_value = mock_ctx
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.firefox.launch.return_value = mock_browser
+        mock_pw.return_value.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_pw.return_value.__exit__ = MagicMock(return_value=False)
+
+        auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
+
+        # Verify password field selector includes loginClass2 as fallback
+        pwd_selectors = [s for s in locator_selectors if "loginClass2" in s and "password" in s]
+        self.assertTrue(
+            len(pwd_selectors) > 0,
+            f"Expected loginClass2 password selector, got: {locator_selectors}"
+        )
+
+    @patch("web_crawler.auth.lenovo_id._PLAYWRIGHT_AVAILABLE", True)
+    @patch("web_crawler.auth.lenovo_id._sync_playwright", create=True)
+    def test_falls_back_to_enter_when_button_not_found(self, mock_pw):
+        """If the Siguiente button is not found, fallback to pressing Enter."""
+        auth = self._make_auth()
+
+        page = self._make_mock_page()
+
+        def _failing_locator(sel):
+            loc = MagicMock()
+            loc.first = loc
+            # Email field locators succeed
+            if sel == '#emailOrPhoneInput':
+                loc.wait_for.return_value = None
+                loc.click.return_value = None
+                loc.type.return_value = None
+                return loc
+            # Password field locators succeed
+            if sel == '#emailOrPhonePswInput':
+                loc.wait_for.return_value = None
+                loc.click.return_value = None
+                loc.type.return_value = None
+                return loc
+            # Button locators fail
+            loc.wait_for.side_effect = Exception("not found")
+            return loc
+
+        page.locator.side_effect = _failing_locator
+
+        mock_browser = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.new_page.return_value = page
+        mock_browser.new_context.return_value = mock_ctx
+        mock_pw_instance = MagicMock()
+        mock_pw_instance.firefox.launch.return_value = mock_browser
+        mock_pw.return_value.__enter__ = MagicMock(return_value=mock_pw_instance)
+        mock_pw.return_value.__exit__ = MagicMock(return_value=False)
+
+        auth._obtain_wust_browser("test@example.com", "pass123", "https://passport.lenovo.com/test")
+
+        # When buttons are not found, Enter should be pressed as fallback
+        enter_calls = [c for c in page.keyboard.press.call_args_list if c[0][0] == "Enter"]
+        self.assertTrue(
+            len(enter_calls) >= 2,
+            f"Expected at least 2 Enter fallbacks, got {len(enter_calls)}: {page.keyboard.press.call_args_list}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
