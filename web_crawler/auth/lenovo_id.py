@@ -420,26 +420,49 @@ class LenovoIDAuth:
                     _log("[LenovoID] Browser: password field never appeared "
                          "(Akamai may have blocked the request)")
 
-                # Fill password field.
+                # Fill password field.  Use type() instead of fill() so that
+                # the JS input/keyup/keydown handlers fire for every keystroke
+                # (the page's nextHandler reads the visible value, hashes it
+                # with CryptoJS.MD5, then writes it to the hidden password field).
                 try:
                     for sel in ['#emailOrPhonePswInput',
                                 'input[type="password"]:visible']:
                         try:
                             loc = page.locator(sel).first
                             loc.wait_for(state="visible", timeout=4000)
-                            loc.fill(password, timeout=5000)
+                            loc.click(timeout=3000)
+                            loc.type(password, delay=60)
                             break
                         except Exception:
                             continue
                 except Exception:
                     _log("[LenovoID] Browser: could not fill password field")
 
-                # Submit credentials.
-                page.keyboard.press("Enter")
-                page.wait_for_timeout(1000)
+                # Wait for reCAPTCHA Enterprise token (GT variable) and
+                # Akamai bot-ID (bid) to be populated by page JS.
+                page.wait_for_timeout(3000)
 
-                # Wait for redirect / WUST extraction.
-                page.wait_for_timeout(8000)
+                # Submit credentials via keyboard Enter — this triggers
+                # the page's keydown handler: 13==e.keyCode&&nextHandler()
+                # which hashes the password, appends the GT token, waits
+                # for bid, then submits the form.
+                page.keyboard.press("Enter")
+
+                # Wait for the JS to hash password, append GT, poll for bid,
+                # and submit the form (bid poll interval = 500ms).
+                page.wait_for_timeout(3000)
+
+                # Wait for redirect / WUST extraction.  The server validates
+                # credentials and redirects to lenovoIdSuccess.html?lenovoid.wust=...
+                try:
+                    page.wait_for_url(
+                        "**/Tips/lenovoIdSuccess.html*",
+                        timeout=15000,
+                    )
+                except Exception:
+                    # Redirect might not match the pattern; fall through
+                    # to check captured URLs and page URL below.
+                    page.wait_for_timeout(5000)
 
                 # Check captured navigation events.
                 for url in captured:
@@ -601,6 +624,11 @@ class LenovoIDAuth:
         form_fields["lenovoid.cb"] = _LMSA_CB_URL
         form_fields["username"] = email
         form_fields["password"] = _hash_password(password)
+        # loginfinish=1 signals the email+password form (loginClass2).
+        # gt is the reCAPTCHA Enterprise v3 token — normally injected by
+        # JS but we send an empty value for the HTTP-only fallback path.
+        form_fields.setdefault("loginfinish", "1")
+        form_fields.setdefault("gt", "")
 
         post_url = urljoin(PASSPORT_BASE, _USERLOGIN_PATH)
         _log(f"[LenovoID] Submitting credentials: {post_url}")
