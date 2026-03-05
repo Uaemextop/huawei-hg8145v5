@@ -126,7 +126,7 @@ class AICaptchaSolver:
             raise ImportError(
                 "Playwright is required for AI CAPTCHA solving.  "
                 "Install it with:  pip install playwright && "
-                "playwright install chromium"
+                "playwright install chromium firefox"
             )
         self._ai = ai_client
         self._headless = headless
@@ -180,10 +180,18 @@ class AICaptchaSolver:
         log.info("[AI-CAPTCHA] Opening login page: %s", url)
 
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=self._headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            # Try Firefox first — its TLS fingerprint is less likely to
+            # be flagged by bot-detection systems like Akamai.
+            try:
+                browser = pw.firefox.launch(headless=self._headless)
+                log.info("[AI-CAPTCHA] Using Firefox browser engine")
+            except Exception:
+                browser = pw.chromium.launch(
+                    headless=self._headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                log.info("[AI-CAPTCHA] Using Chromium browser engine "
+                         "(Firefox unavailable)")
             context = browser.new_context()
             page = context.new_page()
 
@@ -202,6 +210,26 @@ class AICaptchaSolver:
                 return None
 
             page.wait_for_timeout(_CAPTCHA_WAIT_MS)
+
+            # Early-exit when the page is clearly not a login/CAPTCHA page
+            # (e.g. the Apache Tomcat default page at lsa.lenovo.com).
+            if not captcha_img_selector and not username:
+                has_captcha = self._find_element(
+                    page, _CAPTCHA_IMAGE_SELECTORS,
+                )
+                has_login_form = self._find_element(page, [
+                    "input[type='password']",
+                    "form[action*='login' i]",
+                    "form[action*='signin' i]",
+                    "input[name*='captcha' i]",
+                ])
+                if not has_captcha and not has_login_form:
+                    log.warning(
+                        "[AI-CAPTCHA] Page has no CAPTCHA or login form — "
+                        "skipping (not a login page)"
+                    )
+                    browser.close()
+                    return None
 
             # Fill credentials if provided
             if username:

@@ -440,6 +440,28 @@ def main() -> None:
                     captcha_type=args.ai_captcha_type,
                 )
                 captcha_url = args.ai_captcha_url or target_url
+
+                # LMSA hosts (lsa.lenovo.com, rsddownload-secure.lenovo.com)
+                # require authentication via passport.lenovo.com — redirect
+                # the CAPTCHA solver to the actual login page.
+                _LMSA_CAPTCHA_HOSTS = {
+                    "lsa.lenovo.com",
+                    "rsddownload-secure.lenovo.com",
+                }
+                captcha_parsed = urllib.parse.urlparse(captcha_url)
+                if captcha_parsed.hostname in _LMSA_CAPTCHA_HOSTS:
+                    captcha_url = (
+                        "https://passport.lenovo.com/glbwebauthnv6/preLogin"
+                        "?lenovoid.action=uilogin"
+                        "&lenovoid.realm=lmsaclient"
+                        "&lenovoid.cb=https://lsa.lenovo.com"
+                        "/Tips/lenovoIdSuccess.html"
+                    )
+                    log.info(
+                        "[AI-CAPTCHA] LMSA target detected — redirecting "
+                        "CAPTCHA solver to passport.lenovo.com login"
+                    )
+
                 log.info(
                     "[AI-CAPTCHA] Solving CAPTCHA at %s (model=%s, type=%s)",
                     captcha_url, args.ai_model, args.ai_captcha_type,
@@ -488,11 +510,18 @@ def main() -> None:
     # session so that subsequent requests carry the login cookies.
     if ai_cookies:
         parsed = urllib.parse.urlparse(target_url)
+        # Cookies from passport.lenovo.com need to be set on .lenovo.com
+        # for cross-subdomain access (lsa.lenovo.com, rsddownload-secure.lenovo.com).
+        hostname = parsed.hostname or ""
+        if hostname.endswith(".lenovo.com"):
+            cookie_domain = ".lenovo.com"
+        else:
+            cookie_domain = hostname
         for name, value in ai_cookies.items():
-            crawler.session.cookies.set(name, value, domain=parsed.hostname)
+            crawler.session.cookies.set(name, value, domain=cookie_domain)
         log.info(
-            "[AI-CAPTCHA] Injected %d cookies into crawler session",
-            len(ai_cookies),
+            "[AI-CAPTCHA] Injected %d cookies into crawler session "
+            "(domain=%s)", len(ai_cookies), cookie_domain,
         )
 
     t0 = time.monotonic()
