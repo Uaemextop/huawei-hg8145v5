@@ -22,6 +22,7 @@ setup(
         "ai": [
             "openai>=1.0.0",
             "playwright>=1.40.0",
+            "playwright-stealth>=2.0.0",
         ],
     },
     entry_points={

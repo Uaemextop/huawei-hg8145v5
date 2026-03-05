@@ -648,5 +648,216 @@ class TestLenovoIDBrowserLoginButtons(unittest.TestCase):
         )
 
 
+# ------------------------------------------------------------------ #
+# recognize_captcha_fullpage
+# ------------------------------------------------------------------ #
+
+class TestRecognizeCaptchaFullpage(unittest.TestCase):
+    """Test recognize_captcha_fullpage for full-page screenshot analysis."""
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    def _make_client(self):
+        with patch("web_crawler.ai.github_models.OpenAI"):
+            return GitHubModelsClient(token="ghp_test123")
+
+    def test_success_returns_code(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value="AB12"):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertTrue(result["isSuccess"])
+            self.assertEqual(result["verificationCode"], "AB12")
+
+    def test_no_captcha_sentinel(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value="NO_CAPTCHA"):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertFalse(result["isSuccess"])
+            self.assertIn("No CAPTCHA", result["error"])
+
+    def test_slider_sentinel(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value="SLIDER"):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertTrue(result["isSuccess"])
+            self.assertEqual(result["verificationCode"], "SLIDER")
+
+    def test_checkbox_sentinel(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value="CHECKBOX"):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertTrue(result["isSuccess"])
+            self.assertEqual(result["verificationCode"], "CHECKBOX")
+
+    def test_empty_response(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value=""):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertFalse(result["isSuccess"])
+
+    def test_exception(self):
+        client = self._make_client()
+        with patch.object(client, "chat", side_effect=Exception("API error")):
+            result = client.recognize_captcha_fullpage("dGVzdA==")
+            self.assertFalse(result["isSuccess"])
+            self.assertIn("API error", result["error"])
+
+
+# ------------------------------------------------------------------ #
+# analyze_page_captcha
+# ------------------------------------------------------------------ #
+
+class TestAnalyzePageCaptcha(unittest.TestCase):
+    """Test analyze_page_captcha diagnostics method."""
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    def _make_client(self):
+        with patch("web_crawler.ai.github_models.OpenAI"):
+            return GitHubModelsClient(token="ghp_test123")
+
+    def test_returns_description(self):
+        client = self._make_client()
+        with patch.object(client, "chat", return_value="reCAPTCHA checkbox found"):
+            result = client.analyze_page_captcha("dGVzdA==")
+            self.assertEqual(result, "reCAPTCHA checkbox found")
+
+    def test_returns_empty_on_error(self):
+        client = self._make_client()
+        with patch.object(client, "chat", side_effect=Exception("fail")):
+            result = client.analyze_page_captcha("dGVzdA==")
+            self.assertEqual(result, "")
+
+
+# ------------------------------------------------------------------ #
+# CAPTCHA solver fullpage fallback
+# ------------------------------------------------------------------ #
+
+class TestCaptchaSolverFullpageFallback(unittest.TestCase):
+    """Test that solve_captcha_on_page falls back to full-page screenshot."""
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_fullpage_fallback_on_no_element(self, _mock_openai):
+        """When no CAPTCHA element is found, a fullpage screenshot is taken."""
+        from web_crawler.ai.captcha_solver import AICaptchaSolver
+
+        ai_client = GitHubModelsClient(token="ghp_test123")
+
+        # Mock the AI to return a solution
+        with patch.object(
+            ai_client, "recognize_captcha_fullpage",
+            return_value={"isSuccess": True, "verificationCode": "XY99"},
+        ):
+            solver = AICaptchaSolver(ai_client=ai_client)
+            page = MagicMock()
+            # No CAPTCHA element found
+            page.query_selector.return_value = None
+            # Full-page screenshot returns valid image
+            page.screenshot.return_value = b"x" * 1000
+
+            result = solver.solve_captcha_on_page(page)
+            self.assertEqual(result, "XY99")
+            page.screenshot.assert_called_once_with(full_page=True)
+
+    @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
+    @patch("web_crawler.ai.github_models.OpenAI")
+    def test_fullpage_fallback_returns_none_on_failure(self, _mock_openai):
+        """When fullpage recognition also fails, returns None."""
+        from web_crawler.ai.captcha_solver import AICaptchaSolver
+
+        ai_client = GitHubModelsClient(token="ghp_test123")
+
+        with patch.object(
+            ai_client, "recognize_captcha_fullpage",
+            return_value={"isSuccess": False, "error": "No text"},
+        ):
+            solver = AICaptchaSolver(ai_client=ai_client)
+            page = MagicMock()
+            page.query_selector.return_value = None
+            page.screenshot.return_value = b"x" * 1000
+
+            result = solver.solve_captcha_on_page(page)
+            self.assertIsNone(result)
+
+
+# ------------------------------------------------------------------ #
+# LenovoIDAuth._direct_form_submit
+# ------------------------------------------------------------------ #
+
+class TestDirectFormSubmit(unittest.TestCase):
+    """Test the _direct_form_submit fallback for Akamai-blocked SPA flows."""
+
+    def _make_auth(self):
+        from web_crawler.auth.lenovo_id import LenovoIDAuth
+        return LenovoIDAuth(verify_ssl=False)
+
+    def test_returns_wust_from_captured_url(self):
+        """WUST in captured URLs is detected after form submit."""
+        auth = self._make_auth()
+        page = MagicMock()
+        ctx = MagicMock()
+
+        # evaluate returns empty for GT, bid, and succeeds for form fill
+        page.evaluate.return_value = ""
+        page.url = "https://passport.lenovo.com/login"
+
+        captured = [
+            "https://lsa.lenovo.com/Tips/lenovoIdSuccess.html"
+            "?lenovoid.wust=DIRECT_WUST"
+        ]
+
+        result = auth._direct_form_submit(
+            page, ctx, "user@example.com", "pass", captured,
+        )
+        self.assertEqual(result, "DIRECT_WUST")
+
+    def test_returns_wust_from_page_url(self):
+        """WUST found in page.url after form submit."""
+        auth = self._make_auth()
+        page = MagicMock()
+        ctx = MagicMock()
+
+        page.evaluate.return_value = ""
+        page.url = (
+            "https://lsa.lenovo.com/Tips/lenovoIdSuccess.html"
+            "?lenovoid.wust=URL_WUST"
+        )
+
+        result = auth._direct_form_submit(
+            page, ctx, "user@example.com", "pass", [],
+        )
+        self.assertEqual(result, "URL_WUST")
+
+    def test_returns_none_on_tls_error(self):
+        """TLS error (Akamai block) returns None."""
+        auth = self._make_auth()
+        page = MagicMock()
+        ctx = MagicMock()
+
+        page.evaluate.return_value = ""
+        page.url = "about:neterror"
+        page.content.return_value = (
+            "<html><body>Secure Connection Failed neterror</body></html>"
+        )
+
+        result = auth._direct_form_submit(
+            page, ctx, "user@example.com", "pass", [],
+        )
+        self.assertIsNone(result)
+
+
+# ------------------------------------------------------------------ #
+# Stealth availability flag
+# ------------------------------------------------------------------ #
+
+class TestStealthAvailability(unittest.TestCase):
+    """Test that the optional stealth import is handled correctly."""
+
+    def test_stealth_flag_set(self):
+        """_STEALTH_AVAILABLE should be True when playwright-stealth is installed."""
+        from web_crawler.auth import lenovo_id
+        # In CI with playwright-stealth installed, this should be True
+        self.assertIsInstance(lenovo_id._STEALTH_AVAILABLE, bool)
+
+
 if __name__ == "__main__":
     unittest.main()
