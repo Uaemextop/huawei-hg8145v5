@@ -366,15 +366,16 @@ class LenovoIDAuth:
 
                 _log(f"[LenovoID] Browser → login: {login_url[:80]}")
                 try:
-                    page.goto(login_url, timeout=20_000,
-                              wait_until="networkidle")
+                    page.goto(login_url, timeout=60_000,
+                              wait_until="domcontentloaded")
                 except Exception as exc:
                     _log(f"[LenovoID] Browser goto error (Akamai may be blocking): {exc}")
                     browser.close()
                     return None
 
-                # Allow JS challenges to run (Akamai sensor_data generation).
-                page.wait_for_timeout(3000)
+                # Allow JS challenges to run (Akamai sensor_data generation +
+                # reCAPTCHA Enterprise invisible token acquisition).
+                page.wait_for_timeout(5000)
 
                 # The Lenovo ID page (glbwebauthnv6) is a two-step SPA:
                 # Step A: type email in #emailOrPhoneInput (first, since there
@@ -614,7 +615,7 @@ class LenovoIDAuth:
                     "Referer":      r.url,
                     "Origin":       PASSPORT_BASE,
                 },
-                timeout=15,
+                timeout=30,
                 # Don't auto-follow past the callback host — we intercept
                 # the WUST from the Location header of the redirect.
                 allow_redirects=False,

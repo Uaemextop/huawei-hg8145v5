@@ -372,9 +372,9 @@ def solve_cf_challenge(
     Strategy:
       1. **curl_cffi** (preferred) — impersonates a real browser TLS
          fingerprint.  Tries multiple profiles (Chrome, Safari).
-      2. **Playwright** (fallback) — launches a headless Firefox (preferred)
-         instance with a real User-Agent, hides the ``webdriver`` flag,
-         and retries with rotated UAs on failure.
+      2. **Playwright** (fallback) — launches a headless browser (Firefox
+         preferred, Chromium fallback) with a real User-Agent, hides the
+         ``webdriver`` flag, and retries with rotated UAs on failure.
 
     Returns ``(cookies, user_agent)`` on success or ``None``.
     """

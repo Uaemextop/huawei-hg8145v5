@@ -211,6 +211,27 @@ class AICaptchaSolver:
 
             page.wait_for_timeout(_CAPTCHA_WAIT_MS)
 
+            # Early-exit when the page is clearly not a login/CAPTCHA page
+            # (e.g. the Apache Tomcat default page at lsa.lenovo.com).
+            if not captcha_img_selector and not username:
+                has_captcha = self._find_element(
+                    page, _CAPTCHA_IMAGE_SELECTORS,
+                )
+                has_login_form = self._find_element(page, [
+                    "input[type='password']",
+                    "form[action*='login' i]",
+                    "form[action*='Login' i]",
+                    "form[action*='signin' i]",
+                    "input[name*='captcha' i]",
+                ])
+                if not has_captcha and not has_login_form:
+                    log.warning(
+                        "[AI-CAPTCHA] Page has no CAPTCHA or login form — "
+                        "skipping (not a login page)"
+                    )
+                    browser.close()
+                    return None
+
             # Fill credentials if provided
             if username:
                 self._fill_field(page, username, username_selector, [
