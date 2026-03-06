@@ -734,6 +734,7 @@ class TestAnalyzePageCaptcha(unittest.TestCase):
 class TestCaptchaSolverFullpageFallback(unittest.TestCase):
     """Test that solve_captcha_on_page falls back to full-page screenshot."""
 
+    @patch("web_crawler.ai.captcha_solver._PLAYWRIGHT_AVAILABLE", True)
     @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
     @patch("web_crawler.ai.github_models.OpenAI")
     def test_fullpage_fallback_on_no_element(self, _mock_openai):
@@ -758,6 +759,7 @@ class TestCaptchaSolverFullpageFallback(unittest.TestCase):
             self.assertEqual(result, "XY99")
             page.screenshot.assert_called_once_with(full_page=True)
 
+    @patch("web_crawler.ai.captcha_solver._PLAYWRIGHT_AVAILABLE", True)
     @patch("web_crawler.ai.github_models._OPENAI_AVAILABLE", True)
     @patch("web_crawler.ai.github_models.OpenAI")
     def test_fullpage_fallback_returns_none_on_failure(self, _mock_openai):
