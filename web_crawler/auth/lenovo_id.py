@@ -514,163 +514,244 @@ class LenovoIDAuth:
             # which never resolve in a virtual environment and would hang forever.
             page.set.load_mode.eager()
 
-            # Capture /userLogin response body via CDP network listener so we
-            # can extract WUST even when the page redirects immediately.
-            page.listen.start("userLogin", method="POST")
+            # Listen for the lenovoIdSuccess callback URL where the server
+            # redirects after successful login.  The WUST appears in the
+            # query string: ?lenovoid.wust=TOKEN
+            # Also listen for lenovoIdLogin (WUST in response body fallback).
+            page.listen.start("lenovoIdSuccess")
 
             _log("[LenovoID] DrissionPage: GET preLogin…")
             page.get(login_url)
 
             import time as _time
+            import json as _json_mod
 
-            # Simulate realistic mouse movements after page load.
-            # Akamai's bmak.js sensor tracks mouse events; with SwiftShader
-            # WebGL + genuine mouse activity it validates _abck to ~0~.
-            # Confirmed by live test on Xvfb: _abck~0~ after 25 s with movements.
-            _log("[LenovoID] DrissionPage: simulating mouse movements for Akamai sensor…")
-            _mouse_pts = [
+            # ── Step A: poll for _abck ~0~ while doing mouse movements ─────
+            # Akamai's bmak.js sensor tracks mouse events and browser
+            # fingerprint.  With SwiftShader WebGL + genuine mouse movements
+            # _abck validates to ~0~ in a fresh Edge+Xvfb session.
+            # We poll every 5 s and move the mouse each tick to keep the
+            # sensor active.  Maximum wait: 90 s.
+            _log("[LenovoID] DrissionPage: waiting up to 90 s for Akamai _abck validation…")
+            _pts = [
                 (100, 100), (300, 200), (500, 150), (700, 250), (900, 300),
-                (800, 200), (600, 400), (400, 300), (200, 250), (100, 300),
-                (400, 200), (600, 250), (800, 300), (640, 400), (320, 200),
+                (400, 350), (600, 200), (800, 300), (200, 400), (500, 300),
+                (700, 150), (350, 400), (550, 100), (750, 350), (250, 300),
+                (450, 200), (650, 300), (850, 200), (150, 350), (550, 250),
             ]
-            for _pt in _mouse_pts:
-                page.actions.move_to(_pt, duration=0.1)
-                _time.sleep(0.15)
+            _abck_ok = False
+            for _tick in range(18):  # 18 × 5 s = 90 s max
+                try:
+                    page.actions.move_to(_pts[_tick % len(_pts)], duration=0.1)
+                except Exception:
+                    pass
+                _time.sleep(5)
+                _cks = {c["name"]: c.get("value", "") for c in page.cookies()}
+                _abck_ok = "~0~" in _cks.get("_abck", "")
+                if _tick % 3 == 0 or _abck_ok:
+                    _log(
+                        f"[LenovoID] DrissionPage: t={(_tick+1)*5}s "
+                        f"_abck={'✓' if _abck_ok else '✗'}  "
+                        f"AKA_A2={_cks.get('AKA_A2', '?')}"
+                    )
+                if _abck_ok:
+                    _log(f"[LenovoID] DrissionPage: ✓ _abck validated at {(_tick+1)*5}s")
+                    break
+            if not _abck_ok:
+                _log("[LenovoID] DrissionPage: ⚠ _abck not validated — proceeding anyway")
 
-            _log("[LenovoID] DrissionPage: waiting 25 s for Akamai bmak sensor…")
-            _time.sleep(25)
-
-            cks = {c["name"]: c.get("value", "") for c in page.cookies()}
-            _log(
-                f"[LenovoID] DrissionPage: cookies after preLogin — "
-                f"AKA_A2={cks.get('AKA_A2', 'not set')} "
-                f"_abck_validated={'~0~' in cks.get('_abck', '')}"
-            )
-
-            # ── Step A: email ──────────────────────────────────────────────
+            # ── Step B: email ──────────────────────────────────────────────
             email_el = page.ele("#emailOrPhoneInput", timeout=15)
             if not getattr(email_el, "tag", None):
                 _log("[LenovoID] DrissionPage: email input not found")
                 return None
-            page.actions.move_to(email_el)
-            _time.sleep(0.3)
-            email_el.click()
+            email_el.click(by_js=True)
             _time.sleep(0.3)
             email_el.input(email, clear=True)
             _time.sleep(1)
             _log(f"[LenovoID] DrissionPage: email filled: {email_el.value}")
 
-            # ── Step B: click Next ─────────────────────────────────────────
-            # The SPA renders multiple login steps in the DOM simultaneously;
-            # button.next-static is the email-step Next button (confirmed by
-            # inspecting the live page element list).
+            # ── Step C: click Next ─────────────────────────────────────────
+            # The SPA renders all login steps simultaneously; next-static is
+            # the email-step Next button.  Use by_js because in Xvfb the
+            # button may have no bounding rect (NoRectError on regular click).
             next_btn = page.ele(
                 "css:button.next-static:not(.nextLoadingBtn)", timeout=5,
             )
             if not getattr(next_btn, "tag", None):
                 _log("[LenovoID] DrissionPage: Next button not found")
                 return None
-            page.actions.move_to(next_btn)
-            _time.sleep(0.5)
-            next_btn.click()
-            _log("[LenovoID] DrissionPage: Next clicked, waiting for password step…")
+            next_btn.click(by_js=True)
+            _log("[LenovoID] DrissionPage: Next clicked — waiting 12 s for password step…")
             _time.sleep(12)
 
-            # ── Step C: password ───────────────────────────────────────────
+            # ── Step D: password ───────────────────────────────────────────
             pwd_el = page.ele("#emailOrPhonePswInput", timeout=10)
             if not getattr(pwd_el, "tag", None):
                 _log("[LenovoID] DrissionPage: password field not found")
                 return None
-            page.actions.move_to(pwd_el)
-            _time.sleep(0.3)
-            pwd_el.click()
+            pwd_el.click(by_js=True)
             _time.sleep(0.3)
             pwd_el.input(password, clear=True)
+
             # Give Akamai sensor time to update _abck after user interaction.
-            _time.sleep(10)
-
-            cks2 = {c["name"]: c.get("value", "") for c in page.cookies()}
-            _log(
-                f"[LenovoID] DrissionPage: cookies after password entry — "
-                f"AKA_A2={cks2.get('AKA_A2', 'not set')} "
-                f"_abck_validated={'~0~' in cks2.get('_abck', '')}"
-            )
-
-            # ── Step D: submit ─────────────────────────────────────────────
-            # button.loadingBtnHide is the visible (non-loading) submit button
-            # for the password step.  Use by_js=True because the element may
-            # not have a bounding rect when rendered inside an iframe.
-            submit_btn = page.ele("css:button.loadingBtnHide", timeout=5)
-            if getattr(submit_btn, "tag", None):
-                page.actions.move_to(submit_btn)
-                _time.sleep(0.3)
+            # Continue moving the mouse while waiting.
+            for _tick2 in range(6):  # 30 s extra
                 try:
-                    submit_btn.click(by_js=True)
-                    _log("[LenovoID] DrissionPage: submit clicked (by_js)")
-                except Exception as _ce:
-                    _log(f"[LenovoID] DrissionPage: submit click error: {_ce}")
-                    pwd_el.input("\n")
-            else:
-                pwd_el.input("\n")
-                _log("[LenovoID] DrissionPage: Enter pressed on password field")
+                    page.actions.move_to(_pts[(_tick2 + 10) % len(_pts)], duration=0.1)
+                except Exception:
+                    pass
+                _time.sleep(5)
+                _cks2 = {c["name"]: c.get("value", "") for c in page.cookies()}
+                _abck_ok2 = "~0~" in _cks2.get("_abck", "")
+                _log(
+                    f"[LenovoID] DrissionPage: pwd-poll t={(_tick2+1)*5}s "
+                    f"_abck={'✓' if _abck_ok2 else '✗'}"
+                )
+                if _abck_ok2:
+                    _abck_ok = True
+                    _log("[LenovoID] DrissionPage: ✓ _abck validated after password entry")
+                    break
 
-            # ── Step E: capture /userLogin response ────────────────────────
-            _log("[LenovoID] DrissionPage: waiting up to 30 s for /userLogin…")
-            packet = page.listen.wait(timeout=30)
+            # ── Step E: get reCAPTCHA GT token ─────────────────────────────
+            # reCAPTCHA Enterprise v3 (invisible).  Execute asynchronously and
+            # store in window._gt.  Typically resolves in < 2 s.
+            # Site key: 6Ld_eBkmAAAAAKGzqykvtH0laOzfRdELmh-YBxub (passport.lenovo.com)
+            _RCKEY = "6Ld_eBkmAAAAAKGzqykvtH0laOzfRdELmh-YBxub"
+            _log("[LenovoID] DrissionPage: requesting reCAPTCHA GT token…")
+            page.run_js(
+                f"window._gt=null;window._gtErr=null;"
+                f"if(window.grecaptcha&&window.grecaptcha.enterprise){{"
+                f"window.grecaptcha.enterprise.execute('{_RCKEY}',{{action:'login'}})"
+                f".then(function(t){{window._gt=t;}})"
+                f".catch(function(e){{window._gt='';window._gtErr=String(e);}});"
+                f"}}else{{window._gt='';window._gtErr='no grecaptcha.enterprise';}}"
+            )
+            _gt = ""
+            for _gi in range(15):
+                _time.sleep(1)
+                _res = page.run_js("return {gt:window._gt,err:window._gtErr}")
+                if _res.get("gt") is not None:
+                    _gt = _res["gt"]
+                    _log(f"[LenovoID] DrissionPage: ✓ GT token in {_gi+1}s len={len(_gt)}")
+                    break
+                if _res.get("err"):
+                    _log(f"[LenovoID] DrissionPage: GT error: {_res['err']}")
+                    break
+            if not _gt:
+                _log("[LenovoID] DrissionPage: ⚠ GT empty — submitting without token")
+
+            # ── Step F: inject all form fields + submit ─────────────────────
+            # We use json.dumps inlining (not *args) to safely pass values that
+            # may contain special chars (e.g. @ $ # in email/password/gt).
+            # Field mapping (HAR-verified):
+            #   username      = email
+            #   password      = hex_md5(hex_md5(raw_password))  (double MD5)
+            #   gt            = reCAPTCHA Enterprise v3 token
+            #   lenovoid.lang = "en_US"   (HAR shows en_US, form defaults null)
+            #   bid           = already set by Fingerprint2 JS on page load
+            _log(
+                f"[LenovoID] DrissionPage: submitting form "
+                f"(abck={'✓' if _abck_ok else '✗'} gt_len={len(_gt)})…"
+            )
+            _email_js = _json_mod.dumps(email)
+            _pwd_js   = _json_mod.dumps(password)
+            _gt_js    = _json_mod.dumps(_gt)
+            page.run_js(f"""
+(function(){{
+    var em={_email_js}, rp={_pwd_js}, gt={_gt_js};
+    // double-MD5 (hex_md5 loaded from passport.lenovo.com/login.js)
+    var h1=(typeof hex_md5==='function')?hex_md5(rp):rp;
+    var h2=(typeof hex_md5==='function')?hex_md5(h1):h1;
+    // Find active (visible) userLogin form
+    var forms=document.querySelectorAll('form[action*="userLogin"]');
+    var form=null;
+    for(var i=0;i<forms.length;i++){{
+        if(forms[i].offsetParent!==null){{form=forms[i];break;}}
+    }}
+    if(!form)form=forms[0];
+    if(!form){{window._ferr='no form';return;}}
+    function setF(n,v){{
+        var e=form.querySelector('input[name="'+n+'"]');
+        if(!e){{e=document.createElement('input');e.type='hidden';e.name=n;form.appendChild(e);}}
+        e.value=v;
+    }}
+    setF('username',em);
+    setF('password',h2);
+    setF('gt',gt);
+    setF('lenovoid.lang','en_US');
+    window._dbg={{user:em,passLen:h2.length,gt:gt.substring(0,20),hex:typeof hex_md5==='function'}};
+    window._submitted=true;
+    form.submit();
+}})();
+""")
+
+            # ── Step G: extract WUST ───────────────────────────────────────
+            # After successful /userLogin the browser is redirected to
+            # lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=TOKEN
+            # Our listener captures this GET and we read WUST from the URL.
+            _log("[LenovoID] DrissionPage: waiting 40 s for lenovoIdSuccess redirect…")
             wust: Optional[str] = None
+            try:
+                packet = page.listen.wait(timeout=40)
+            except Exception:
+                packet = None
 
             if packet:
-                _log(
-                    f"[LenovoID] DrissionPage: captured {packet.url[:80]} "
-                    f"status={getattr(packet.response, 'status', '?')}"
-                )
-                try:
-                    resp_body = packet.response.body or b""
-                    if isinstance(resp_body, bytes):
-                        resp_body = resp_body.decode("utf-8", errors="replace")
-                except Exception:
-                    resp_body = ""
+                _log(f"[LenovoID] DrissionPage: captured {packet.url[:100]}")
+                wust = _find_wust(packet.url)
+                if wust:
+                    _log("[LenovoID] ✓ WUST from lenovoIdSuccess URL")
+                    return wust
 
-                # (a) WUST in var gateway = '...' JS variable.
-                gw_m = re.search(r"var\s+gateway\s*=\s*'([^']+)'", resp_body)
+            # Fallback: final page URL after navigation.
+            _time.sleep(5)
+            try:
+                final_url = page.url
+                wust = _find_wust(final_url)
+                if wust:
+                    _log("[LenovoID] ✓ WUST from DrissionPage final URL")
+                    return wust
+            except Exception:
+                final_url = ""
+
+            # LPSWUST cookie (set by /userLogin 200 response).
+            try:
+                _cks3 = {c["name"]: c.get("value", "") for c in page.cookies(all_domains=True)}
+                if _cks3.get("LPSWUST"):
+                    wust = _cks3["LPSWUST"]
+                    _log("[LenovoID] ✓ WUST from LPSWUST cookie")
+                    return wust
+            except Exception:
+                pass
+
+            # Page HTML (var gateway = '...?lenovoid.wust=TOKEN').
+            try:
+                body = page.html
+                gw_m = re.search(r"var\s+gateway\s*=\s*'([^']+)'", body)
                 if gw_m:
                     gw_url = gw_m.group(1).replace("\\/", "/")
                     wust = _find_wust(gw_url)
                     if wust:
-                        _log("[LenovoID] ✓ WUST from DrissionPage gateway JS")
+                        _log("[LenovoID] ✓ WUST from DrissionPage page body (gateway)")
                         return wust
-                # (b) Anywhere in body.
-                wust = _find_wust(resp_body)
+                wust = _find_wust(body)
                 if wust:
-                    _log("[LenovoID] ✓ WUST from DrissionPage response body")
+                    _log("[LenovoID] ✓ WUST from DrissionPage page body")
                     return wust
+            except Exception:
+                body = ""
 
-            # Fallback: check the final page URL (may contain lenovoid.wust=).
-            _time.sleep(5)
-            final_url = page.url
-            wust = _find_wust(final_url)
-            if wust:
-                _log("[LenovoID] ✓ WUST from DrissionPage final URL")
-                return wust
-
-            # Try page body directly (in case SPA navigated within the iframe).
-            body = page.html
-            gw_m2 = re.search(r"var\s+gateway\s*=\s*'([^']+)'", body)
-            if gw_m2:
-                gw_url2 = gw_m2.group(1).replace("\\/", "/")
-                wust = _find_wust(gw_url2)
-                if wust:
-                    _log("[LenovoID] ✓ WUST from DrissionPage page body (gateway)")
-                    return wust
-            wust = _find_wust(body)
-            if wust:
-                _log("[LenovoID] ✓ WUST from DrissionPage page body")
-                return wust
+            try:
+                _dbg = page.run_js("return window._dbg||{}")
+                _log(f"[LenovoID] DrissionPage: JS debug={_dbg}")
+            except Exception:
+                pass
 
             _log(
                 f"[LenovoID] DrissionPage: no WUST found — "
                 f"final_url={final_url[:80]} "
-                f"_abck_validated={'~0~' in cks2.get('_abck', '')}"
+                f"_abck={'✓' if _abck_ok else '✗'}"
             )
             return None
 
