@@ -51,14 +51,23 @@ import requests
 # curl_cffi – TLS fingerprint impersonation (bypasses Akamai TLS-layer block).
 # Standard ``requests`` exposes Python/urllib3 TLS fingerprints that Akamai
 # detects and blocks with a TLS reset.  curl_cffi's ``impersonate`` option
-# replaces the TLS handshake with an exact copy of Chrome's, which Akamai
-# accepts without any JS challenge.  This is the lightest-weight Akamai bypass
-# available (no browser needed).
+# replaces the TLS handshake with an exact copy of Edge's, which Akamai
+# accepts and also causes it to set AKA_A2=A organically (confirmed from
+# HAR HTTPToolkit_2026-03-03_18-12.har: AKA_A2=A present in /userLogin cookie).
 try:
     from curl_cffi import requests as _cffi_requests  # type: ignore[import]
     _CURL_CFFI_AVAILABLE = True
 except ImportError:
     _CURL_CFFI_AVAILABLE = False
+
+# DrissionPage – headed Microsoft Edge via CDP for full Akamai JS-sensor bypass.
+# Uses Microsoft Edge (headed, via Xvfb in CI) so Akamai's bmak sensor executes
+# and validates _abck normally.  HAR confirmed the real LMSA app used Edge 146.
+try:
+    from DrissionPage import ChromiumPage as _ChromiumPage, ChromiumOptions as _ChromiumOptions  # type: ignore[import]
+    _DRISSIONPAGE_AVAILABLE = True
+except ImportError:
+    _DRISSIONPAGE_AVAILABLE = False
 
 from web_crawler.auth.lmsa import (
     LMSASession,
@@ -343,15 +352,24 @@ class LenovoIDAuth:
 
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
         then tries backends in order of Akamai bypass effectiveness:
-        1. **curl_cffi** (Chrome TLS impersonation — lightest, bypasses Akamai
-           TLS fingerprint check; no browser needed).
-        2. **Hero** (ulixee/Hero Node.js — Human Emulator + proprietary CDP
-           tunnel, best Akamai bypass rate; no WebDriver fingerprint).
-        3. **zendriver** (Python CDP-based, very good Akamai bypass).
-        4. **Playwright** (traditional, with stealth patches).
-        5. **Plain HTTP** requests (no Akamai bypass).
+        1. **DrissionPage** (Microsoft Edge headed via Xvfb — full Akamai JS
+           sensor execution, best bypass rate; HAR confirmed Edge is what the
+           real LMSA app uses).
+        2. **curl_cffi** (Edge TLS impersonation — gets AKA_A2=A organically;
+           no browser needed but cannot validate _abck without JS).
+        3. **Hero** (ulixee/Hero Node.js — Human Emulator + proprietary CDP
+           tunnel; no WebDriver fingerprint).
+        4. **zendriver** (Python CDP-based, good Akamai bypass).
+        5. **Playwright** (traditional, with stealth patches).
+        6. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _DRISSIONPAGE_AVAILABLE:
+            wust = self._obtain_wust_drissionpage(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] DrissionPage login failed – trying curl_cffi fallback")
 
         if _CURL_CFFI_AVAILABLE:
             wust = self._obtain_wust_curl_cffi(email, password, login_url)
@@ -380,61 +398,366 @@ class LenovoIDAuth:
         return self._obtain_wust_requests(email, password, login_url)
 
     # ------------------------------------------------------------------
-    # curl_cffi Chrome-impersonation backend (primary — lightest-weight
-    # Akamai bypass)
+    # DrissionPage + Microsoft Edge backend (primary — full Akamai bypass)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _start_xvfb() -> "Optional[subprocess.Popen[bytes]]":
+        """Start a virtual framebuffer (Xvfb) on a free display if needed.
+
+        Returns the ``Popen`` object so the caller can terminate it on cleanup,
+        or ``None`` when a display is already set or Xvfb is not available.
+        """
+        if os.environ.get("DISPLAY"):
+            return None  # real/virtual display already available
+        if not shutil.which("Xvfb"):
+            return None
+
+        # Find a free display number (99 is conventional for CI).
+        import socket as _socket
+        for disp in range(99, 110):
+            try:
+                s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                s.connect(f"/tmp/.X11-unix/X{disp}")
+                s.close()
+                continue  # display already in use
+            except (FileNotFoundError, ConnectionRefusedError):
+                pass  # display free
+            try:
+                proc = subprocess.Popen(
+                    ["Xvfb", f":{disp}", "-screen", "0", "1280x800x24", "-ac",
+                     "+extension", "GLX"],  # GLX required for Mesa WebGL / SwiftShader
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                import time as _t; _t.sleep(1)
+                if proc.poll() is None:
+                    os.environ["DISPLAY"] = f":{disp}"
+                    _log(f"[LenovoID] DrissionPage: Xvfb started on display :{disp}")
+                    return proc
+            except Exception:
+                pass
+        return None
+
+    def _obtain_wust_drissionpage(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use DrissionPage + Microsoft Edge (headed via Xvfb) to login.
+
+        This backend uses a real Microsoft Edge browser (the same browser the
+        LMSA native app wraps via WebView2) running headed on a virtual
+        framebuffer.  Headed mode prevents Akamai's bmak sensor from detecting
+        a headless/virtual environment, allowing ``_abck`` to be validated and
+        POST /userLogin to succeed.
+
+        HAR analysis (HTTPToolkit_2026-03-03_18-12.har) confirmed:
+
+        * The real LMSA app used Edge 146 (``Edg/146.0.0.0``).
+        * /userLogin 200 response body contains::
+
+              var gateway = 'https://lsa.lenovo.com/.../lenovoIdSuccess.html
+                             ?lenovoid.wust=TOKEN';
+              window.location.href = gateway;
+
+        * JWT/GUID are returned by
+          ``POST https://lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml``
+          in the ``Authorization`` and ``Guid`` response headers.
+
+        Browser SPA flow:
+
+        1. GET preLogin (eager load — don't wait for Akamai sensor long-polls).
+        2. Fill ``#emailOrPhoneInput`` → click ``button.next-static`` (Next).
+        3. Fill ``#emailOrPhonePswInput`` (password).
+        4. Click ``button.loadingBtnHide`` via JavaScript (submit).
+        5. Capture the ``/userLogin`` response via network listener.
+        6. Extract WUST from ``var gateway`` or ``lenovoid.wust=`` in response.
+        """
+        _log("[LenovoID] Trying DrissionPage (Edge headed via Xvfb) login…")
+
+        # Locate Microsoft Edge binary.
+        _EDGE_PATHS = [
+            "/usr/bin/microsoft-edge-stable",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/msedge",
+            shutil.which("microsoft-edge-stable") or "",
+            shutil.which("microsoft-edge") or "",
+        ]
+        edge_bin: str = ""
+        for _p in _EDGE_PATHS:
+            if _p and os.path.isfile(_p):
+                edge_bin = _p
+                break
+        if not edge_bin:
+            _log("[LenovoID] DrissionPage: Microsoft Edge binary not found — skipping")
+            return None
+
+        xvfb_proc = self._start_xvfb()
+        page = None
+        try:
+            opts = _ChromiumOptions()
+            opts.auto_port()
+            opts.headless(False)    # headed — prevents Akamai headless detection
+            opts.set_argument("--no-sandbox")
+            opts.set_argument("--disable-setuid-sandbox")
+            opts.set_argument("--disable-dev-shm-usage")
+            opts.set_argument("--window-size=1280,800")
+            # SwiftShader enables WebGL in virtual display (Xvfb / Mesa).
+            # Confirmed by live test: with these flags + mouse movements,
+            # Akamai's bmak sensor validates _abck to ~0~ even on Xvfb.
+            opts.set_argument("--use-gl=swiftshader")
+            opts.set_argument("--enable-webgl")
+            opts.set_argument("--ignore-gpu-blocklist")
+            opts.set_browser_path(edge_bin)
+
+            page = _ChromiumPage(addr_or_opts=opts)
+            # eager: DOM content loaded — don't wait for Akamai sensor long-polls
+            # which never resolve in a virtual environment and would hang forever.
+            page.set.load_mode.eager()
+
+            # Capture /userLogin response body via CDP network listener so we
+            # can extract WUST even when the page redirects immediately.
+            page.listen.start("userLogin", method="POST")
+
+            _log("[LenovoID] DrissionPage: GET preLogin…")
+            page.get(login_url)
+
+            import time as _time
+
+            # Simulate realistic mouse movements after page load.
+            # Akamai's bmak.js sensor tracks mouse events; with SwiftShader
+            # WebGL + genuine mouse activity it validates _abck to ~0~.
+            # Confirmed by live test on Xvfb: _abck~0~ after 25 s with movements.
+            _log("[LenovoID] DrissionPage: simulating mouse movements for Akamai sensor…")
+            _mouse_pts = [
+                (100, 100), (300, 200), (500, 150), (700, 250), (900, 300),
+                (800, 200), (600, 400), (400, 300), (200, 250), (100, 300),
+                (400, 200), (600, 250), (800, 300), (640, 400), (320, 200),
+            ]
+            for _pt in _mouse_pts:
+                page.actions.move_to(_pt, duration=0.1)
+                _time.sleep(0.15)
+
+            _log("[LenovoID] DrissionPage: waiting 25 s for Akamai bmak sensor…")
+            _time.sleep(25)
+
+            cks = {c["name"]: c.get("value", "") for c in page.cookies()}
+            _log(
+                f"[LenovoID] DrissionPage: cookies after preLogin — "
+                f"AKA_A2={cks.get('AKA_A2', 'not set')} "
+                f"_abck_validated={'~0~' in cks.get('_abck', '')}"
+            )
+
+            # ── Step A: email ──────────────────────────────────────────────
+            email_el = page.ele("#emailOrPhoneInput", timeout=15)
+            if not getattr(email_el, "tag", None):
+                _log("[LenovoID] DrissionPage: email input not found")
+                return None
+            page.actions.move_to(email_el)
+            _time.sleep(0.3)
+            email_el.click()
+            _time.sleep(0.3)
+            email_el.input(email, clear=True)
+            _time.sleep(1)
+            _log(f"[LenovoID] DrissionPage: email filled: {email_el.value}")
+
+            # ── Step B: click Next ─────────────────────────────────────────
+            # The SPA renders multiple login steps in the DOM simultaneously;
+            # button.next-static is the email-step Next button (confirmed by
+            # inspecting the live page element list).
+            next_btn = page.ele(
+                "css:button.next-static:not(.nextLoadingBtn)", timeout=5,
+            )
+            if not getattr(next_btn, "tag", None):
+                _log("[LenovoID] DrissionPage: Next button not found")
+                return None
+            page.actions.move_to(next_btn)
+            _time.sleep(0.5)
+            next_btn.click()
+            _log("[LenovoID] DrissionPage: Next clicked, waiting for password step…")
+            _time.sleep(12)
+
+            # ── Step C: password ───────────────────────────────────────────
+            pwd_el = page.ele("#emailOrPhonePswInput", timeout=10)
+            if not getattr(pwd_el, "tag", None):
+                _log("[LenovoID] DrissionPage: password field not found")
+                return None
+            page.actions.move_to(pwd_el)
+            _time.sleep(0.3)
+            pwd_el.click()
+            _time.sleep(0.3)
+            pwd_el.input(password, clear=True)
+            # Give Akamai sensor time to update _abck after user interaction.
+            _time.sleep(10)
+
+            cks2 = {c["name"]: c.get("value", "") for c in page.cookies()}
+            _log(
+                f"[LenovoID] DrissionPage: cookies after password entry — "
+                f"AKA_A2={cks2.get('AKA_A2', 'not set')} "
+                f"_abck_validated={'~0~' in cks2.get('_abck', '')}"
+            )
+
+            # ── Step D: submit ─────────────────────────────────────────────
+            # button.loadingBtnHide is the visible (non-loading) submit button
+            # for the password step.  Use by_js=True because the element may
+            # not have a bounding rect when rendered inside an iframe.
+            submit_btn = page.ele("css:button.loadingBtnHide", timeout=5)
+            if getattr(submit_btn, "tag", None):
+                page.actions.move_to(submit_btn)
+                _time.sleep(0.3)
+                try:
+                    submit_btn.click(by_js=True)
+                    _log("[LenovoID] DrissionPage: submit clicked (by_js)")
+                except Exception as _ce:
+                    _log(f"[LenovoID] DrissionPage: submit click error: {_ce}")
+                    pwd_el.input("\n")
+            else:
+                pwd_el.input("\n")
+                _log("[LenovoID] DrissionPage: Enter pressed on password field")
+
+            # ── Step E: capture /userLogin response ────────────────────────
+            _log("[LenovoID] DrissionPage: waiting up to 30 s for /userLogin…")
+            packet = page.listen.wait(timeout=30)
+            wust: Optional[str] = None
+
+            if packet:
+                _log(
+                    f"[LenovoID] DrissionPage: captured {packet.url[:80]} "
+                    f"status={getattr(packet.response, 'status', '?')}"
+                )
+                try:
+                    resp_body = packet.response.body or b""
+                    if isinstance(resp_body, bytes):
+                        resp_body = resp_body.decode("utf-8", errors="replace")
+                except Exception:
+                    resp_body = ""
+
+                # (a) WUST in var gateway = '...' JS variable.
+                gw_m = re.search(r"var\s+gateway\s*=\s*'([^']+)'", resp_body)
+                if gw_m:
+                    gw_url = gw_m.group(1).replace("\\/", "/")
+                    wust = _find_wust(gw_url)
+                    if wust:
+                        _log("[LenovoID] ✓ WUST from DrissionPage gateway JS")
+                        return wust
+                # (b) Anywhere in body.
+                wust = _find_wust(resp_body)
+                if wust:
+                    _log("[LenovoID] ✓ WUST from DrissionPage response body")
+                    return wust
+
+            # Fallback: check the final page URL (may contain lenovoid.wust=).
+            _time.sleep(5)
+            final_url = page.url
+            wust = _find_wust(final_url)
+            if wust:
+                _log("[LenovoID] ✓ WUST from DrissionPage final URL")
+                return wust
+
+            # Try page body directly (in case SPA navigated within the iframe).
+            body = page.html
+            gw_m2 = re.search(r"var\s+gateway\s*=\s*'([^']+)'", body)
+            if gw_m2:
+                gw_url2 = gw_m2.group(1).replace("\\/", "/")
+                wust = _find_wust(gw_url2)
+                if wust:
+                    _log("[LenovoID] ✓ WUST from DrissionPage page body (gateway)")
+                    return wust
+            wust = _find_wust(body)
+            if wust:
+                _log("[LenovoID] ✓ WUST from DrissionPage page body")
+                return wust
+
+            _log(
+                f"[LenovoID] DrissionPage: no WUST found — "
+                f"final_url={final_url[:80]} "
+                f"_abck_validated={'~0~' in cks2.get('_abck', '')}"
+            )
+            return None
+
+        except Exception as exc:
+            _log(f"[LenovoID] DrissionPage: exception: {exc}")
+            return None
+        finally:
+            if page is not None:
+                try:
+                    page.listen.stop()
+                    page.close()
+                except Exception:
+                    pass
+            if xvfb_proc is not None:
+                try:
+                    xvfb_proc.terminate()
+                    os.environ.pop("DISPLAY", None)
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # curl_cffi Edge-impersonation backend (fallback — lightest-weight)
     # ------------------------------------------------------------------
 
     def _obtain_wust_curl_cffi(
         self, email: str, password: str, login_url: str,
     ) -> Optional[str]:
-        """Use curl_cffi (Chrome TLS impersonation) to complete Lenovo ID OAuth.
+        """Use curl_cffi (Edge TLS impersonation) to complete Lenovo ID OAuth.
 
         curl_cffi replaces Python/urllib3's TLS fingerprint with an exact copy
-        of Chrome's JA3/JA4 fingerprint.  Akamai Bot Manager uses TLS
-        fingerprinting as the *first* layer of its bot detection stack; a
-        matching Chrome fingerprint passes this layer without any JS challenge,
-        allowing the full ``preLogin → ajaxUserRoam → userLogin`` flow to
-        complete over plain HTTPS.
+        of Microsoft Edge's JA3/JA4 fingerprint.  HAR analysis confirmed that:
+
+        * The real LMSA app uses Edge (``Edg/146``).
+        * ``edge101`` impersonation causes Akamai to set ``AKA_A2=A``
+          *organically* during GET preLogin (chrome120 does not).
+        * Without a validated ``_abck`` cookie (requires Akamai JS sensor),
+          POST /userLogin returns HTTP/2 INTERNAL_ERROR (curl 92).  When this
+          happens the DrissionPage backend (headed Edge via Xvfb) is used as
+          fallback.
 
         HAR analysis (HTTPToolkit_2026-03-03_18-12.har) confirmed the exact
         request structure:
 
-        1. GET preLogin  → JSESSIONID, lenovoid.webLoginSignkey, bm_sz cookies.
-        2. POST ajaxUserRoam  → {"resultCode": 0}  (roaming account registration).
-        3. POST /userLogin with double-MD5 password hash, lenovoid.lang=en_US.
+        1. GET preLogin  → JSESSIONID, AKA_A2=A, ak_bmsc cookies.
+        2. POST ajaxUserRoam  → {"resultCode": 0}  (roaming account).
+        3. POST /userLogin with double-MD5 password hash.
            Response: 200 HTML with::
 
                var gateway = 'https://lsa.lenovo.com/.../lenovoIdSuccess.html
                               ?lenovoid.wust=TOKEN';
                window.location.href = gateway;
 
-        The WUST is extracted from ``var gateway`` before any redirect occurs.
+        JWT/GUID are obtained via a separate POST to:
+            ``https://lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml``
+        which is handled by :meth:`_exchange_wust_for_jwt` after this method
+        returns the WUST.
         """
-        _log("[LenovoID] Trying curl_cffi (Chrome TLS impersonation) login…")
+        _log("[LenovoID] Trying curl_cffi (Edge TLS impersonation) login…")
 
-        # Use exact headers from the real browser session (HAR-verified).
-        _CHROME_UA = (
+        # Use Edge 146 UA and sec-ch-ua matching the real LMSA HAR session.
+        _EDGE_UA = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
         )
         _LANG = "es-419,es;q=0.9,es-ES;q=0.8,en;q=0.7,en-GB;q=0.6,en-US;q=0.5"
 
         try:
-            sess = _cffi_requests.Session(impersonate="chrome120")
+            # edge101 impersonation: Akamai sets AKA_A2=A organically during
+            # GET preLogin (confirmed in live tests — chrome120 does not get it).
+            sess = _cffi_requests.Session(impersonate="edge101")
             sess.headers.update({
-                "User-Agent": _CHROME_UA,
+                "User-Agent": _EDGE_UA,
                 "Accept-Language": _LANG,
                 "Accept-Encoding": "gzip, deflate, br, zstd",
                 "sec-ch-ua": (
-                    '"Not_A Brand";v="8", "Chromium";v="120", '
-                    '"Google Chrome";v="120"'
+                    '"Not-A.Brand";v="24", "Microsoft Edge";v="146", '
+                    '"Chromium";v="146"'
                 ),
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Windows"',
             })
 
             # ── Step 1: GET preLogin ──────────────────────────────────────
+            # With edge101 impersonation Akamai sets AKA_A2=A, ak_bmsc, and
+            # _abck cookies organically in the preLogin response (confirmed in
+            # live tests — no manual injection needed).
             _log("[LenovoID] curl_cffi: GET preLogin…")
             r_pre = sess.get(
                 login_url,
@@ -452,21 +775,14 @@ class LenovoIDAuth:
                 timeout=30,
                 allow_redirects=True,
             )
-            _log(f"[LenovoID] curl_cffi: preLogin HTTP {r_pre.status_code}")
+            _log(f"[LenovoID] curl_cffi: preLogin HTTP {r_pre.status_code} "
+                 f"AKA_A2={dict(sess.cookies).get('AKA_A2','not set')}")
             if r_pre.status_code not in (200, 302):
                 _log(
                     f"[LenovoID] curl_cffi: unexpected preLogin status "
                     f"{r_pre.status_code}"
                 )
                 return None
-
-            # Inject AKA_A2=A — Akamai Bot Manager "certified browser" flag.
-            # HAR analysis confirmed every successful request to
-            # passport.lenovo.com carries this cookie.  It is set by Akamai
-            # after the browser has been validated by the JS challenge in a
-            # prior session.  Without it, /userLogin returns HTTP/2
-            # INTERNAL_ERROR (Akamai RST_STREAM on form POSTs).
-            sess.cookies.set("AKA_A2", "A", domain="passport.lenovo.com")
 
             # ── Step 2: POST ajaxUserRoam (roaming account pre-registration) ──
             # HAR confirmed: for eduardo@uaemex.top (roaming account),
@@ -1569,16 +1885,26 @@ class LenovoIDAuth:
         """POST the WUST to ``lenovoIdLogin.jhtml`` and return an
         authenticated :class:`LMSASession`.
 
-        Confirmed by decompiling ``Software Fix.exe``:
-        - ``author: false`` → NO ``guid`` header in the HTTP request.
-        - ``dparams`` contains ``{wust: WUST, guid: PLAIN_GUID}``.
-        - JWT is extracted from the ``Authorization`` response header
-          when the server echoes back the client GUID in the ``Guid``
-          response header.
+        HAR-confirmed flow (HTTPToolkit_2026-03-03_18-12.har, entry [37]):
+
+        * URL:  ``POST https://lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml``
+        * Auth: ``author: false`` → NO ``guid`` or ``Authorization`` request headers.
+        * Body: ``{"client":{"version":"7.5.4.2"},"dparams":{"wust":"…","guid":"…"},
+          "language":"en-US","windowsInfo":"Microsoft Windows 11 Pro, x64-based PC"}``
+        * JWT : returned in **response** ``Authorization`` header (raw, no "Bearer " prefix).
+        * GUID: echoed back in response ``Guid`` header (must match request body guid).
+
+        Subsequent API calls (card.jhtml, languagePack.jhtml, …) add::
+
+            Authorization: Bearer <JWT>
+            guid: <GUID>
+
+        to every request header.
         """
         guid = str(uuid.uuid4()).lower()
         # _lmsa_base is already "https://lsa.lenovo.com/Interface"
         # so we must NOT add another "/Interface" prefix here.
+        # URL confirmed by HAR entry [37]: POST lsa.lenovo.com/Interface/user/lenovoIdLogin.jhtml
         url = f"{self._lmsa_base}/user/lenovoIdLogin.jhtml"
 
         body = {
@@ -1590,7 +1916,7 @@ class LenovoIDAuth:
         # author: false in C# source — do NOT send guid request header
         hdrs = dict(_BASE_HEADERS)
 
-        _log(f"[LenovoID] Exchanging WUST for JWT: {url}")
+        _log(f"[LenovoID] Exchanging WUST for JWT via {url}")
         try:
             r = requests.post(url, json=body, headers=hdrs,
                               timeout=30, verify=self._verify_ssl)
@@ -1599,16 +1925,20 @@ class LenovoIDAuth:
             return None
 
         # JWT arrives in Authorization response header when server echoes GUID.
-        # From RequestBase in WebApiHttpRequest.cs (decompiled):
+        # HAR entry [37] confirmed: response Authorization is a raw token (no
+        # "Bearer " prefix).  C# source (RequestBase, WebApiHttpRequest.cs):
         #   if (Guid_header == WebApiContext.GUID && Authorization_header != "")
         #       JWT_TOKEN = Authorization_header;
         jwt = None
         guid_resp = r.headers.get("Guid", "")
         auth_hdr  = r.headers.get("Authorization", "")
         if guid_resp.lower() == guid and auth_hdr:
-            jwt = auth_hdr
-        elif auth_hdr.startswith("Bearer "):
-            jwt = auth_hdr[len("Bearer "):]
+            # Primary path (HAR-confirmed): server echoes our GUID back.
+            jwt = auth_hdr.removeprefix("Bearer ").strip()
+        elif auth_hdr:
+            # Fallback: accept any non-empty Authorization regardless of GUID echo
+            # (handles edge-case server responses that include "Bearer " prefix).
+            jwt = auth_hdr.removeprefix("Bearer ").strip()
 
         try:
             data = r.json()
@@ -1643,9 +1973,12 @@ class LenovoIDAuth:
             guid=guid,
         )
         if jwt:
-            # Inject token directly into the private field.
+            # Inject token directly into the private field and into the
+            # session's permanent headers (needed for direct GET calls that
+            # bypass _post() / _request_headers()).
             session._jwt_token = jwt
             session._session.headers["Authorization"] = f"Bearer {jwt}"
+            session._session.headers["guid"] = guid
             _log("[LenovoID] ✓ JWT token received — session ready")
         else:
             _log(

@@ -28,6 +28,12 @@ setup(
         "zendriver": [
             "zendriver>=0.15.0",
         ],
+        "edge": [
+            # DrissionPage + Microsoft Edge (headed via Xvfb) — primary
+            # Akamai bypass backend.  Requires msedge or chromium installed.
+            # Install Xvfb separately: apt-get install xvfb
+            "DrissionPage>=4.1.0",
+        ],
         # Node.js @ulixee/hero-playground is installed separately:
         #   cd web_crawler/auth && npm install
         # No Python package required for the Hero backend.
