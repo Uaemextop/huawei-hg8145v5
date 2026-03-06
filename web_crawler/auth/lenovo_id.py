@@ -32,8 +32,10 @@ Security notes
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json as _json
+import random as _rnd
 import uuid as _uuid
 
 import os
@@ -61,6 +63,24 @@ try:
     _PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
+
+# Optional playwright-stealth for anti-detection.
+try:
+    from playwright_stealth import Stealth as _Stealth
+    _STEALTH_AVAILABLE = True
+except ImportError:
+    _STEALTH_AVAILABLE = False
+
+# Optional zendriver import — a CDP-based "driverless" browser that achieves
+# significantly better Akamai Bot Manager bypass rates than Playwright or
+# Selenium because it communicates directly via Chrome DevTools Protocol
+# without exposing any WebDriver fingerprints.
+# Ref: https://pypi.org/project/zendriver/
+try:
+    import zendriver as _zendriver
+    _ZENDRIVER_AVAILABLE = True
+except ImportError:
+    _ZENDRIVER_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -295,10 +315,20 @@ class LenovoIDAuth:
         """Run the Lenovo ID login form flow and return the WUST token.
 
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
-        then tries Playwright browser automation (bypasses Akamai Bot Manager),
-        falling back to plain HTTP requests when Playwright is not installed.
+        then tries browser automation backends in order of Akamai bypass
+        effectiveness:
+        1. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
+           reCAPTCHA, and bid without WebDriver fingerprints).
+        2. **Playwright** (traditional, with stealth patches).
+        3. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _ZENDRIVER_AVAILABLE:
+            wust = self._obtain_wust_zendriver(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] Zendriver login failed – trying Playwright fallback")
 
         if _PLAYWRIGHT_AVAILABLE:
             wust = self._obtain_wust_browser(email, password, login_url)
@@ -307,6 +337,199 @@ class LenovoIDAuth:
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
         return self._obtain_wust_requests(email, password, login_url)
+
+    # ------------------------------------------------------------------
+    # Zendriver (CDP-based) browser backend
+    # ------------------------------------------------------------------
+
+    def _obtain_wust_zendriver(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use zendriver (CDP-based) to complete the Lenovo ID OAuth.
+
+        Zendriver communicates with the browser directly via Chrome DevTools
+        Protocol without any WebDriver binary, which avoids the automation
+        fingerprints that Akamai Bot Manager detects.  In benchmark tests
+        zendriver successfully bypasses Akamai where Playwright and Selenium
+        fail (see: baseline comparison by dimakynal on Medium).
+
+        The method loads the Akamai-protected login page, waits for the
+        ``bmak`` sensor, reCAPTCHA Enterprise token (GT), and Fingerprint2
+        browser ID (bid) to initialise, then performs the two-step SPA login
+        flow (email → password → submit → WUST redirect).
+        """
+        _log("[LenovoID] Launching zendriver (CDP) for Akamai-protected login…")
+
+        async def _run() -> Optional[str]:
+            captured: list[str] = []
+            hashed = _hash_password(password)
+
+            browser = await _zendriver.start(
+                headless=True,
+                sandbox=False,
+                browser_connection_timeout=2.0,
+                browser_connection_max_tries=30,
+            )
+            try:
+                page = await browser.get(login_url)
+
+                # Wait for Akamai sensor + reCAPTCHA + page JS to initialise.
+                await asyncio.sleep(15)
+
+                # Wait for global-loader overlay to disappear.
+                loader_vis = await page.evaluate(
+                    "(() => { const l = document.getElementById('global-loader');"
+                    " return l ? l.offsetParent !== null : false; })()"
+                )
+                if loader_vis:
+                    for _i in range(30):
+                        await asyncio.sleep(1)
+                        hidden = await page.evaluate(
+                            "!document.getElementById('global-loader')"
+                            " || document.getElementById('global-loader')"
+                            ".offsetParent === null"
+                        )
+                        if hidden:
+                            break
+                    else:
+                        await page.evaluate(
+                            "document.getElementById('global-loader')?.remove()"
+                        )
+
+                await asyncio.sleep(2)
+
+                # --- Fill email ---
+                el = await page.select("#emailOrPhoneInput")
+                if el:
+                    await el.click()
+                    await asyncio.sleep(0.3)
+                    await el.send_keys(email)
+                else:
+                    _log("[LenovoID] zendriver: email field not found")
+                    return None
+
+                await asyncio.sleep(1)
+
+                # --- Click Next ---
+                btn = await page.select("div.loginClass1 button")
+                if btn:
+                    await btn.click()
+                else:
+                    await page.evaluate(
+                        "document.querySelector('div.loginClass1 button')?.click()"
+                    )
+
+                # --- Wait for password field ---
+                await asyncio.sleep(5)
+                pw_appeared = False
+                for _i in range(15):
+                    vis = await page.evaluate(
+                        "(() => { const e = document.querySelector("
+                        "'#emailOrPhonePswInput');"
+                        " return e && e.offsetParent !== null; })()"
+                    )
+                    if vis:
+                        pw_appeared = True
+                        break
+                    await asyncio.sleep(1)
+
+                if pw_appeared:
+                    # --- SPA flow: fill password ---
+                    _log("[LenovoID] zendriver: password step appeared (SPA OK)")
+                    pwd_el = await page.select("#emailOrPhonePswInput")
+                    if pwd_el:
+                        await pwd_el.click()
+                        await asyncio.sleep(0.2)
+                        for ch in password:
+                            await pwd_el.send_keys(ch)
+                            await asyncio.sleep(_rnd.uniform(0.05, 0.12))
+
+                    await asyncio.sleep(5)
+
+                    # Click submit
+                    sub = await page.select("button.loadingBtnHide")
+                    if sub:
+                        await sub.click()
+                    else:
+                        await page.evaluate(
+                            "document.querySelector("
+                            "'div.loginClass2 button')?.click()"
+                        )
+
+                    # Wait for WUST redirect
+                    for _i in range(25):
+                        url = page.url or ""
+                        if "lenovoid.wust" in url or "lenovoIdSuccess" in url:
+                            break
+                        await asyncio.sleep(1)
+                else:
+                    # --- Direct form submission fallback ---
+                    _log("[LenovoID] zendriver: SPA blocked, direct form submit")
+                    gt = (await page.evaluate(
+                        "(async () => {"
+                        " if (typeof grecaptcha !== 'undefined'"
+                        " && grecaptcha.enterprise) {"
+                        "  try { return await grecaptcha.enterprise.execute("
+                        "   '6Ld_eBkmAAAAAKGzqykvtH0laOzfRdELmh-YBxub',"
+                        "   {action: 'LOGIN'});"
+                        "  } catch(e) { return ''; }"
+                        " } return '';"
+                        "})()"
+                    )) or ""
+                    bid = (await page.evaluate(
+                        "document.querySelector('.jsBid')?.value || ''"
+                    )) or ""
+
+                    await page.evaluate(
+                        """(args => {
+                        const f = document.querySelector('.loginClass2 form');
+                        if (!f) return;
+                        f.querySelectorAll('input[name="username"]')
+                            .forEach(e => e.value = args[0]);
+                        f.querySelectorAll('.emailAddressInput')
+                            .forEach(e => e.value = args[0]);
+                        f.querySelectorAll('input[name="password"]')
+                            .forEach(e => e.value = args[1]);
+                        f.querySelectorAll('input[name="loginfinish"]')
+                            .forEach(e => e.value = '1');
+                        let g = f.querySelector('input[name="gt"]');
+                        if (!g) {
+                            g = document.createElement('input');
+                            g.type = 'hidden'; g.name = 'gt';
+                            f.appendChild(g);
+                        }
+                        g.value = args[2];
+                        f.submit();
+                        })"""
+                        + f"(['{email}', '{hashed}', '{gt}'])"
+                    )
+                    await asyncio.sleep(10)
+
+                # --- Extract WUST ---
+                wust = _find_wust(page.url or "")
+                if not wust:
+                    body = await page.evaluate(
+                        "document.documentElement?.outerHTML || ''"
+                    )
+                    wust = _find_wust(body)
+
+                if wust:
+                    _log("[LenovoID] ✓ WUST obtained via zendriver")
+                return wust
+            except Exception as exc:
+                _log(f"[LenovoID] zendriver error: {exc}")
+                return None
+            finally:
+                try:
+                    await browser.stop()
+                except Exception:
+                    pass
+
+        try:
+            return asyncio.run(_run())
+        except Exception as exc:
+            _log(f"[LenovoID] zendriver asyncio error: {exc}")
+            return None
 
     def _obtain_wust_browser(
         self, email: str, password: str, login_url: str
@@ -318,13 +541,34 @@ class LenovoIDAuth:
         a real browser context.  This method launches a headless Firefox instance,
         navigates to the real login URL (from getApiInfo.jhtml), fills in
         credentials, and intercepts the WUST from the redirect URL.
+
+        When the normal SPA flow fails (Akamai blocks the AJAX email-validation
+        call), a direct form-submission fallback is attempted: the loginClass2
+        form is filled programmatically (username, double-MD5 password,
+        reCAPTCHA token, browser fingerprint) and submitted directly, bypassing
+        the SPA email-validation step entirely.
         """
         _log("[LenovoID] Launching headless browser for Akamai-protected login…")
         wust: Optional[str] = None
         captured: list[str] = []
 
         try:
-            with _sync_playwright() as p:
+            # Use playwright-stealth context manager when available — it
+            # patches browser APIs (navigator.webdriver, plugins, WebGL,
+            # etc.) to reduce Akamai Bot Manager detection rates.
+            pw_cm = _sync_playwright()
+            if _STEALTH_AVAILABLE:
+                # Language matches the LMSA client form defaults
+                # (lenovoid.lang=es_ES) and the browser context locale below.
+                _stealth = _Stealth(
+                    navigator_languages_override=("es-419", "es"),
+                    navigator_platform_override="Win32",
+                    webgl_vendor_override="Intel Inc.",
+                    webgl_renderer_override="Intel Iris OpenGL Engine",
+                )
+                pw_cm = _stealth.use_sync(pw_cm)
+
+            with pw_cm as p:
                 # Try Firefox first — it has a different TLS fingerprint from
                 # Playwright's Chromium and avoids the HTTP/2 protocol error that
                 # Akamai triggers against automated Chromium instances.
@@ -355,6 +599,14 @@ class LenovoIDAuth:
                 )
                 page = ctx.new_page()
 
+                # Hide webdriver property (defence-in-depth; playwright-stealth
+                # also patches this when available).
+                if not _STEALTH_AVAILABLE:
+                    page.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined})"
+                    )
+
                 # Intercept every navigation and capture WUST from callback URL.
                 # LoginCallback in Software Fix.exe checks for path /Tips/lenovoIdSuccess.html
                 def _on_nav(frame: object) -> None:
@@ -375,7 +627,14 @@ class LenovoIDAuth:
 
                 # Allow JS challenges to run (Akamai sensor_data generation +
                 # reCAPTCHA Enterprise invisible token acquisition).
+                # Simulate realistic user mouse movements to help the Akamai
+                # sensor collect valid interaction data.
                 page.wait_for_timeout(5000)
+                for _i in range(15):
+                    page.mouse.move(_rnd.randint(100, 900),
+                                    _rnd.randint(100, 600))
+                    page.wait_for_timeout(_rnd.randint(30, 120))
+                page.wait_for_timeout(3000)
 
                 # The Lenovo ID page (glbwebauthnv6) is a two-step SPA:
                 # Step A: type email in #emailOrPhoneInput then click the
@@ -433,19 +692,41 @@ class LenovoIDAuth:
                 page.wait_for_timeout(2000)
 
                 # Wait for password field (SPA transition after email submit).
+                _password_appeared = False
                 try:
                     page.wait_for_selector(
                         '#emailOrPhonePswInput, input[type="password"]:visible',
                         timeout=10000,
                     )
+                    _password_appeared = True
                 except Exception:
                     _log("[LenovoID] Browser: password field never appeared "
                          "(Akamai may have blocked the request)")
+
+                # ----- Direct form-submission fallback -----
+                # When Akamai blocks the AJAX email-validation call
+                # (ajaxUserExistedServlet), the SPA never transitions to
+                # the password step.  In this case we bypass the SPA
+                # entirely: programmatically fill the loginClass2 hidden
+                # form (double-MD5 password + reCAPTCHA token + bid) and
+                # submit it directly.
+                if not _password_appeared:
+                    _log("[LenovoID] Browser: attempting direct form submission "
+                         "(bypassing SPA email validation)")
+                    wust = self._direct_form_submit(
+                        page, ctx, email, password, captured,
+                    )
+                    if wust:
+                        browser.close()
+                        return wust
+                    # If direct submit also fails, continue with the normal
+                    # flow in case the password field is present but hidden.
 
                 # Fill password field.  Use type() instead of fill() so that
                 # the JS input/keyup/keydown handlers fire for every keystroke
                 # (the page's nextHandler reads the visible value, hashes it
                 # with CryptoJS.MD5, then writes it to the hidden password field).
+                _filled_password = False
                 try:
                     for sel in ['#emailOrPhonePswInput',
                                 "div.loginClass2 input[type='password']",
@@ -455,11 +736,18 @@ class LenovoIDAuth:
                             loc.wait_for(state="visible", timeout=4000)
                             loc.click(timeout=3000)
                             loc.type(password, delay=60)
+                            _filled_password = True
                             break
                         except Exception:
                             continue
                 except Exception:
                     _log("[LenovoID] Browser: could not fill password field")
+
+                if not _filled_password and not _password_appeared:
+                    # Neither the SPA flow nor the password field worked.
+                    _log("[LenovoID] Browser: no password field accessible")
+                    browser.close()
+                    return wust  # may be None or set by _direct_form_submit
 
                 # Wait for reCAPTCHA Enterprise token (GT variable) and
                 # Akamai bot-ID (bid) to be populated by page JS.
@@ -537,6 +825,9 @@ class LenovoIDAuth:
                         wust = self._solve_captcha_with_ai(page, captured)
                     elif "blocked" in body_lower and "akamai" in body_lower:
                         _log("[LenovoID] Browser: blocked by Akamai Bot Manager")
+                    elif "network access error" in body_lower:
+                        _log("[LenovoID] Browser: Akamai blocked AJAX calls "
+                             "(Network access error)")
                     else:
                         _log(f"[LenovoID] Browser: no WUST — final URL: {page.url[:80]}")
 
@@ -545,6 +836,144 @@ class LenovoIDAuth:
             _log(f"[LenovoID] Browser login exception: {exc}")
 
         return wust
+
+    def _direct_form_submit(
+        self,
+        page: object,
+        ctx: object,
+        email: str,
+        password: str,
+        captured: list[str],
+    ) -> Optional[str]:
+        """Bypass SPA email-validation and submit the loginClass2 form directly.
+
+        When Akamai blocks the ``ajaxUserExistedServlet`` AJAX call (showing
+        "Network access error"), the normal two-step SPA flow cannot proceed.
+        This method fills all hidden form fields programmatically (username,
+        double-MD5 hashed password, reCAPTCHA Enterprise token, Fingerprint2
+        browser ID) and submits the form directly.
+
+        Returns the WUST token on success, ``None`` on failure.
+        """
+        hashed = _hash_password(password)
+
+        # Generate reCAPTCHA Enterprise token from the browser context.
+        gt = ""
+        try:
+            gt = page.evaluate(  # type: ignore[union-attr]
+                """() => {
+                return new Promise((resolve) => {
+                    if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
+                        grecaptcha.enterprise.ready(() => {
+                            grecaptcha.enterprise.execute(
+                                '6Ld_eBkmAAAAAKGzqykvtH0laOzfRdELmh-YBxub',
+                                {action: 'LOGIN'}
+                            ).then(resolve).catch(() => resolve(''));
+                        });
+                    } else { resolve(''); }
+                });
+            }"""
+            )
+        except Exception:
+            pass
+        _log(f"[LenovoID] Direct form: reCAPTCHA token "
+             f"{'obtained' if gt else 'unavailable'}")
+
+        # Read the bid (Fingerprint2 browser ID) the page JS already computed.
+        bid = ""
+        try:
+            bid = page.evaluate(  # type: ignore[union-attr]
+                """() => {
+                const el = document.querySelector('.jsBid, input[name="bid"]');
+                return el ? el.value : '';
+            }"""
+            )
+        except Exception:
+            pass
+
+        # Fill the loginClass2 form and submit.
+        try:
+            page.evaluate(  # type: ignore[union-attr]
+                """(args) => {
+                const form = document.querySelector('.loginClass2 form');
+                if (!form) return;
+                form.querySelectorAll('input[name="username"]')
+                    .forEach(el => { el.value = args.email; });
+                form.querySelectorAll('.emailAddressInput')
+                    .forEach(el => { el.value = args.email; });
+                form.querySelectorAll('input[name="password"]')
+                    .forEach(el => { el.value = args.hashed; });
+                form.querySelectorAll('input[name="loginfinish"]')
+                    .forEach(el => { el.value = '1'; });
+
+                // Append GT (reCAPTCHA) token
+                let gtEl = form.querySelector('input[name="gt"]');
+                if (!gtEl) {
+                    gtEl = document.createElement('input');
+                    gtEl.type = 'hidden';
+                    gtEl.name = 'gt';
+                    gtEl.className = 'GT';
+                    const jsBid = form.querySelector('.jsBid');
+                    if (jsBid) jsBid.after(gtEl);
+                    else form.appendChild(gtEl);
+                }
+                gtEl.value = args.gt;
+
+                // Ensure bid is set
+                const bidEl = form.querySelector('.jsBid, input[name="bid"]');
+                if (bidEl && !bidEl.value) bidEl.value = args.bid;
+            }""",
+                {"email": email, "hashed": hashed, "gt": gt, "bid": bid},
+            )
+        except Exception as exc:
+            _log(f"[LenovoID] Direct form: could not fill form: {exc}")
+            return None
+
+        _log("[LenovoID] Direct form: submitting loginClass2 form…")
+        try:
+            page.evaluate(  # type: ignore[union-attr]
+                "document.querySelector('.loginClass2 form').submit()"
+            )
+            page.wait_for_timeout(10000)  # type: ignore[union-attr]
+        except Exception as exc:
+            _log(f"[LenovoID] Direct form: submit error: {exc}")
+
+        # Check for WUST in captured navigation or final URL.
+        for url in captured:
+            w = _find_wust(url)
+            if w:
+                _log("[LenovoID] ✓ WUST captured from direct form redirect")
+                return w
+
+        try:
+            w = _find_wust(page.url)  # type: ignore[union-attr]
+            if w:
+                _log("[LenovoID] ✓ WUST found in URL after direct form submit")
+                return w
+        except Exception:
+            pass
+
+        try:
+            body = page.content()  # type: ignore[union-attr]
+            w = _find_wust(body)
+            if w:
+                _log("[LenovoID] ✓ WUST found in body after direct form submit")
+                return w
+            body_lower = body.lower()
+            if "secure connection failed" in body_lower or "neterror" in body_lower:
+                _log("[LenovoID] Direct form: TLS error (Akamai reset "
+                     "connection — _abck cookie not validated in headless mode)")
+            elif "incorrect" in body_lower or "wrong" in body_lower:
+                _log("[LenovoID] Direct form: invalid credentials")
+            elif "captcha" in body_lower or "robot" in body_lower:
+                _log("[LenovoID] Direct form: CAPTCHA/robot block")
+            else:
+                _log(f"[LenovoID] Direct form: no WUST — URL: "
+                     f"{page.url[:80]}")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+        return None
 
     def _solve_captcha_with_ai(
         self,
@@ -568,6 +997,7 @@ class LenovoIDAuth:
         try:
             from web_crawler.ai.github_models import GitHubModelsClient
             from web_crawler.ai.captcha_solver import AICaptchaSolver
+            import base64 as _b64
         except ImportError as exc:
             _log(f"[LenovoID] AI module not available: {exc}")
             return None
@@ -578,8 +1008,38 @@ class LenovoIDAuth:
         solver = AICaptchaSolver(ai_client=ai_client, max_attempts=max_attempts)
 
         _log("[LenovoID] [AI-CAPTCHA] Attempting to solve CAPTCHA…")
+
+        # Take a full-page screenshot for diagnostic analysis before
+        # attempting to solve.  This ensures the image is always sent
+        # to the AI model even when element-based detection fails.
+        try:
+            raw_screenshot = page.screenshot(full_page=True)  # type: ignore[union-attr]
+            page_b64 = _b64.b64encode(raw_screenshot).decode("ascii")
+            analysis = ai_client.analyze_page_captcha(page_b64)
+            if analysis:
+                _log(f"[LenovoID] [AI-CAPTCHA] Page analysis: {analysis[:200]}")
+        except Exception as exc:
+            _log(f"[LenovoID] [AI-CAPTCHA] Page screenshot/analysis error: {exc}")
+            page_b64 = ""
+
         for attempt in range(1, max_attempts + 1):
             solution = solver.solve_captcha_on_page(page)  # type: ignore[arg-type]
+            if not solution:
+                # Fallback: use the pre-captured full-page screenshot
+                # directly with the fullpage recogniser.
+                if page_b64:
+                    _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: "
+                         "element detection failed — trying fullpage screenshot")
+                    result = ai_client.recognize_captcha_fullpage(page_b64)
+                    if result.get("isSuccess"):
+                        solution = result["verificationCode"]
+                        upper = solution.upper()
+                        if upper in ("NO_CAPTCHA", "NOCAPTCHA",
+                                     "SLIDER", "CHECKBOX"):
+                            _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: "
+                                 f"AI detected '{upper}' — cannot auto-solve")
+                            solution = None
+
             if not solution:
                 _log(f"[LenovoID] [AI-CAPTCHA] Attempt {attempt}: no solution")
                 continue

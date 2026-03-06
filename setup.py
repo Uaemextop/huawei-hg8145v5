@@ -22,6 +22,14 @@ setup(
         "ai": [
             "openai>=1.0.0",
             "playwright>=1.40.0",
+            "playwright-stealth>=2.0.0",
+        ],
+        "zendriver": [
+            "zendriver>=0.15.0",
+        ],
+        "captcha": [
+            "flask>=3.0.0",
+            "openai>=1.0.0",
         ],
     },
     entry_points={

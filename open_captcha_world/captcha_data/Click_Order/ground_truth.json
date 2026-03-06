@@ -1,0 +1,242 @@
+{
+  "image1.png": {
+    "answer": [
+      [470, 100],
+      [325, 180],
+      [162, 100],
+      [190, 275]
+    ],
+    "order_image": "order1.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image2.png": {
+    "answer": [
+      [520, 170],
+      [300, 80],
+      [125, 310],
+      [500, 310]
+    ],
+    "order_image": "order2.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image3.png": {
+    "answer": [
+      [360, 275],
+      [73, 56],
+      [540, 185],
+      [80, 320]
+    ],
+    "order_image": "order3.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image4.png": {
+    "answer": [
+      [275, 165],
+      [450, 60],
+      [483, 222],
+      [369, 330]
+    ],
+    "order_image": "order4.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image5.png": {
+    "answer": [
+      [165, 75],
+      [498, 70],
+      [487, 270],
+      [210, 265]
+    ],
+    "order_image": "order5.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image6.png": {
+    "answer": [
+      [496, 295],
+      [437, 61],
+      [165, 75],
+      [310, 300]
+    ],
+    "order_image": "order6.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image7.png": {
+    "answer": [
+      [298, 98],
+      [493, 65],
+      [292, 291],
+      [420, 180]
+    ],
+    "order_image": "order7.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image8.png": {
+    "answer": [
+      [468, 118],
+      [280, 465],
+      [132, 121],
+      [470, 380]
+    ],
+    "order_image": "order7.png",
+    "tolerance": 50,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image9.png": {
+    "answer": [
+      [422, 70],
+      [55, 163],
+      [535, 100],
+      [562, 323]
+    ],
+    "order_image": "order9.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image10.png": {
+    "answer": [
+      [99, 192],
+      [384, 50],
+      [540, 100],
+      [242, 274]
+    ],
+    "order_image": "order10.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image11.png": {
+    "answer": [
+      [195, 100],
+      [120, 190],
+      [360, 65],
+      [390, 195]
+        ],
+    "order_image": "order11.png",
+    "tolerance": 40,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image12.png": {
+    "answer": [
+      [145, 280],
+      [420, 260],
+      [300, 465],
+      [470, 470]
+        ],
+    "order_image": "order12.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image13.png": {
+    "answer": [
+      [150, 150],
+      [145, 420],
+      [450, 415],
+      [450, 150]
+        ],
+    "order_image": "order13.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image14.png": {
+    "answer": [
+      [450, 710],
+      [150, 430],
+      [450, 150],
+      [450, 415]
+      
+        ],
+    "order_image": "order14.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image15.png": {
+    "answer": [
+      [155, 140],
+      [440, 430],
+      [160, 430]      
+        ],
+    "order_image": "order15.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image16.png": {
+    "answer": [
+      [435, 140],
+      [440, 430],
+      [155, 140],
+      [160, 430]      
+        ],
+    "order_image": "order16.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image17.png": {
+    "answer": [
+      [150, 130],
+      [425, 630],
+      [150, 620],
+      [430, 395]      
+        ],
+    "order_image": "order17.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image18.png": {
+    "answer": [
+      [430, 395],
+      [150, 410],
+      [150, 630],
+      [150, 130]
+        ],
+    "order_image": "order18.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image19.png": {
+    "answer": [
+      [430, 650],
+      [450, 390],
+      [460, 120],
+      [150, 410]
+        ],
+    "order_image": "order19.png",
+    "tolerance": 60,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  },
+  "image20.png": {
+    "answer": [
+      [440, 130],
+      [140, 700],
+      [470, 680],
+      [150, 110]
+        ],
+    "order_image": "order20.png",
+    "tolerance": 80,
+    "prompt": "Click the icons in order as shown in the reference image.",
+    "description": "User needs to click the icons in the specified order shown in the reference image."
+  }
+} 

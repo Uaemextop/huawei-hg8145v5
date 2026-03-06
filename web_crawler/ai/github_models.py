@@ -74,6 +74,36 @@ _CAPTCHA_PROMPTS: dict[str, str] = {
     ),
 }
 
+# Prompt used when sending a full-page screenshot (no specific CAPTCHA
+# element was found).  The AI must locate the challenge within the page.
+_FULLPAGE_CAPTCHA_PROMPT = (
+    "This is a screenshot of a web page that contains a CAPTCHA or "
+    "bot-detection challenge.  Carefully examine the entire image.  "
+    "If you can see a text CAPTCHA (distorted letters/numbers), return "
+    "ONLY the characters you read.  "
+    "If you see an image-selection challenge (e.g. 'select all images "
+    "with traffic lights'), describe which grid squares should be "
+    "selected using 1-based row,column notation (e.g. 'row1col2, "
+    "row2col3').  "
+    "If you see a slider puzzle, respond with 'SLIDER'.  "
+    "If the page shows a reCAPTCHA checkbox ('I am not a robot'), "
+    "respond with 'CHECKBOX'.  "
+    "If no CAPTCHA is visible, respond with 'NO_CAPTCHA'.  "
+    "Do NOT add any explanation — return only the solution or keyword."
+)
+
+# Prompt for analysing a page screenshot to identify the type of
+# challenge present and provide actionable instructions.
+_PAGE_ANALYSIS_PROMPT = (
+    "Analyse this screenshot of a login / CAPTCHA page.  Describe:\n"
+    "1. What type of challenge or CAPTCHA is shown (text, image-select, "
+    "slider, reCAPTCHA checkbox, Akamai challenge, none).\n"
+    "2. Where exactly the challenge element is located on the page.\n"
+    "3. Step-by-step instructions on how a browser automation script "
+    "should solve it (which element to click, what to type, etc.).\n"
+    "Be concise."
+)
+
 # Regex used to strip non-alphanumeric noise from the AI response,
 # mirroring ``verificationCode.match(/[a-zA-Z0-9]+/g).join('')`` in
 # the original extension.
@@ -275,6 +305,68 @@ class GitHubModelsClient:
             return {"isSuccess": False, "error": "No text detected in image."}
 
         return {"isSuccess": True, "verificationCode": verification_code}
+
+    def recognize_captcha_fullpage(
+        self,
+        image_base64: str,
+        *,
+        mime_type: str = "image/png",
+    ) -> dict[str, Any]:
+        """Recognise a CAPTCHA from a **full-page screenshot**.
+
+        Unlike :meth:`recognize_captcha` (which expects a tightly-cropped
+        CAPTCHA image), this method sends the full page to the AI model
+        together with a prompt that asks it to locate the challenge
+        element within the page and return its solution.
+
+        Returns the same ``{isSuccess, verificationCode/error}`` dict.
+        """
+        try:
+            raw = self.chat(
+                prompt=_FULLPAGE_CAPTCHA_PROMPT,
+                image_base64=image_base64,
+                mime_type=mime_type,
+            )
+        except Exception as exc:
+            return {"isSuccess": False, "error": str(exc)}
+
+        if not raw:
+            return {"isSuccess": False, "error": "No text detected in image."}
+
+        upper = raw.strip().upper()
+        # Sentinel keywords indicate non-text CAPTCHAs or absence.
+        if upper in ("NO_CAPTCHA", "NOCAPTCHA"):
+            return {"isSuccess": False, "error": "No CAPTCHA detected on page."}
+        if upper in ("SLIDER", "CHECKBOX"):
+            return {"isSuccess": True, "verificationCode": upper}
+
+        verification_code = _clean_verification_code(raw)
+        if not verification_code:
+            return {"isSuccess": False, "error": "No text detected in image."}
+
+        return {"isSuccess": True, "verificationCode": verification_code}
+
+    def analyze_page_captcha(
+        self,
+        image_base64: str,
+        *,
+        mime_type: str = "image/png",
+    ) -> str:
+        """Analyse a page screenshot and describe the challenge present.
+
+        Returns a free-text description with instructions on how to
+        solve the challenge.  Used for diagnostics and for guiding
+        the automation when the challenge type is unknown.
+        """
+        try:
+            return self.chat(
+                prompt=_PAGE_ANALYSIS_PROMPT,
+                image_base64=image_base64,
+                mime_type=mime_type,
+            )
+        except Exception as exc:
+            log.debug("[AI] analyze_page_captcha failed: %s", exc)
+            return ""
 
     # ------------------------------------------------------------------
     # Text extraction (OCR-like)
