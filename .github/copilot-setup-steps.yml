@@ -1,0 +1,124 @@
+# GitHub Copilot coding agent — custom setup steps
+# https://docs.github.com/en/copilot/customizing-copilot/customizing-the-copilot-coding-agent/customizing-the-setup-for-copilot-coding-agent-sessions
+#
+# This file is executed before every Copilot agent session and installs all
+# runtime dependencies required by the web_crawler package, including the
+# headed Microsoft Edge + Xvfb backend that bypasses Akamai Bot Manager
+# on passport.lenovo.com.
+
+steps:
+  # ── System packages ────────────────────────────────────────────────────────
+  - name: Install system dependencies (Xvfb, fonts, curl, git-lfs)
+    run: |
+      sudo apt-get update -qq
+      sudo apt-get install -y --no-install-recommends \
+        xvfb \
+        xauth \
+        x11-utils \
+        libgbm-dev \
+        libnss3 \
+        libatk-bridge2.0-0 \
+        libdrm2 \
+        libxkbcommon0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxrandr2 \
+        libpango-1.0-0 \
+        libcairo2 \
+        libasound2 \
+        libatspi2.0-0 \
+        fonts-liberation \
+        libvulkan1 \
+        git-lfs \
+        curl \
+        wget \
+        jq
+
+  # ── Microsoft Edge (headed browser for Akamai bypass via DrissionPage) ─────
+  # Akamai's bmak.js validates _abck only against a real desktop browser
+  # fingerprint.  Edge provides a genuine TLS + WebGL + JS fingerprint that
+  # passes the sensor when run headed on Xvfb.
+  - name: Install Microsoft Edge stable
+    run: |
+      if ! command -v microsoft-edge-stable &>/dev/null && \
+         ! command -v microsoft-edge &>/dev/null; then
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+          | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-edge.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-edge.gpg] \
+          https://packages.microsoft.com/repos/edge stable main" \
+          | sudo tee /etc/apt/sources.list.d/microsoft-edge.list
+        sudo apt-get update -qq
+        sudo apt-get install -y microsoft-edge-stable
+      fi
+      microsoft-edge-stable --version 2>/dev/null || microsoft-edge --version 2>/dev/null || \
+        { echo "::error::Microsoft Edge not found after install"; exit 1; }
+
+  # ── Python environment ──────────────────────────────────────────────────────
+  - name: Set up Python 3.11
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.11"
+
+  - name: Install Python crawler dependencies
+    run: |
+      pip install --upgrade pip
+
+      # Core crawler
+      pip install -r requirements.txt
+
+      # TLS fingerprint spoofing (Akamai / Cloudflare bypass)
+      pip install "curl_cffi>=0.7.0"
+
+      # DrissionPage — headed Edge via Xvfb (primary Akamai bypass backend)
+      pip install "DrissionPage>=4.1.0"
+
+      # Headless browser backends (fallback / AI-CAPTCHA)
+      pip install playwright
+      playwright install --with-deps chromium
+
+      # CDP driverless browser
+      pip install "zendriver>=0.15.0"
+
+      # Crypto (LMSA RSA/AES token init)
+      pip install pycryptodome
+
+      # Flask (OpenCaptchaWorld / local CAPTCHA solver server)
+      pip install flask
+
+      # 2captcha SDK (reCAPTCHA Enterprise v3 cloud solving)
+      pip install 2captcha-python
+
+      # Dev / test utilities
+      pip install pytest pytest-asyncio
+
+  # ── Node.js + Ulixee Hero (alternative Akamai bypass) ──────────────────────
+  - name: Set up Node.js 20
+    uses: actions/setup-node@v4
+    with:
+      node-version: "20"
+
+  - name: Install Hero npm dependencies
+    run: |
+      cd web_crawler/auth
+      npm install
+
+  # ── Git LFS ─────────────────────────────────────────────────────────────────
+  - name: Configure Git LFS
+    run: git lfs install
+
+  # ── Smoke test — verify all Python backends importable ──────────────────────
+  - name: Verify crawler imports
+    run: |
+      python3 - <<'EOF'
+      from web_crawler.auth.lenovo_id import (
+          LenovoIDAuth,
+          _DRISSIONPAGE_AVAILABLE,
+          _CURL_CFFI_AVAILABLE,
+      )
+      print(f"DrissionPage available : {_DRISSIONPAGE_AVAILABLE}")
+      print(f"curl_cffi available    : {_CURL_CFFI_AVAILABLE}")
+      assert _DRISSIONPAGE_AVAILABLE, "DrissionPage not importable"
+      assert _CURL_CFFI_AVAILABLE,    "curl_cffi not importable"
+      print("All checks passed ✓")
+      EOF

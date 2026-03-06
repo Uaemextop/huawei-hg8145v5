@@ -1,0 +1,16 @@
+{
+  "name": "lenovo-hero-login",
+  "version": "1.0.0",
+  "description": "ulixee/Hero-based Lenovo ID login for Akamai bypass",
+  "private": true,
+  "main": "hero_login.js",
+  "scripts": {
+    "setup": "npm install"
+  },
+  "dependencies": {
+    "@ulixee/hero-playground": "^2.0.0-alpha.34"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
