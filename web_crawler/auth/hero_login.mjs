@@ -42,10 +42,14 @@ const AKAMAI_SENSOR_INIT_MS = 8_000;
 // Timeout for the login XHR POST request.
 const XHR_TIMEOUT_MS = 30_000;
 
-const WUST_RE = /lenovoid\.wust=([^&\s"'<>]+)/;
+// Match WUST in both normal URLs and JS-escaped strings (e.g. https:\/\/ )
+const WUST_RE = /lenovoid[.\\/]+wust=([^&\s"'<>\\]+)/;
 
 function findWust(text) {
-  const m = WUST_RE.exec(text || "");
+  if (!text) return null;
+  // Also unescape JS string escapes before matching
+  const unescaped = text.replace(/\\\//g, "/");
+  const m = WUST_RE.exec(unescaped);
   return m ? m[1] : null;
 }
 
@@ -83,13 +87,20 @@ async function main() {
     await sleep(AKAMAI_SENSOR_INIT_MS);
 
     // Feed the Akamai sensor with realistic mouse interaction data.
-    for (let i = 0; i < 10; i++) {
-      const x = 200 + Math.floor(Math.random() * 600);
-      const y = 150 + Math.floor(Math.random() * 400);
+    // More interactions = higher sensor score = more likely to pass POST check.
+    for (let i = 0; i < 15; i++) {
+      const x = 200 + Math.floor(Math.random() * 800);
+      const y = 100 + Math.floor(Math.random() * 500);
       await hero.interact({ move: [x, y] });
-      await sleep(50 + Math.floor(Math.random() * 100));
+      await sleep(100 + Math.floor(Math.random() * 300));
     }
-    await sleep(3_000);
+    await sleep(2_000);
+
+    // Scroll down and back up (realistic user behaviour)
+    await hero.interact({ scroll: [0, 300] });
+    await sleep(500);
+    await hero.interact({ scroll: [0, -300] });
+    await sleep(2_000);
 
     // Wait for the global-loader overlay to disappear.
     for (let i = 0; i < 30; i++) {
@@ -102,17 +113,23 @@ async function main() {
     }
 
     // ---- Step 1: Fill email via Hero native interactions ----
+    // Move to the email field first, then click, then type slowly.
     const emailInput = hero.document.querySelector("#emailOrPhoneInput");
     if (emailInput) {
       await hero.interact({ click: emailInput });
-      await hero.interact({ type: email });
+      await sleep(500);
+      // Type email character by character with random delays
+      for (const ch of email) {
+        await hero.interact({ type: ch });
+        await sleep(50 + Math.floor(Math.random() * 100));
+      }
       log("Email filled");
     } else {
       log("ERROR: Email field #emailOrPhoneInput not found");
       process.exit(1);
     }
 
-    await sleep(1_000);
+    await sleep(1_500);
 
     // ---- Step 2: Click "Next" and wait for SPA transition ----
     const nextBtn = hero.document.querySelector("div.loginClass1 button");
@@ -324,50 +341,158 @@ async function main() {
     }
     await sleep(2_000);
 
-    // ---- Step 4: Click the "Next" button to trigger native login ----
-    // The page's own nextHandler() (in login.js) handles everything:
-    // MD5 hashing, reCAPTCHA token, Fingerprint2 bid, and form.submit().
-    // This is the correct flow — the page JS submits the form natively.
-    log("Clicking Next button in loginClass2…");
+    // More Akamai sensor interaction before login submit — scroll, mouse
+    for (let i = 0; i < 5; i++) {
+      await hero.interact({ move: [800 + Math.floor(Math.random() * 200), 300 + Math.floor(Math.random() * 200)] });
+      await sleep(200 + Math.floor(Math.random() * 300));
+    }
+    await sleep(3_000);
 
-    // First try native Hero click on the Next button
-    let nextClicked = false;
-    try {
-      const nextBtn2 = hero.document.querySelector(".loginClass2 button");
-      if (nextBtn2) {
-        await hero.interact({ click: nextBtn2 });
-        nextClicked = true;
-        log("Clicked loginClass2 Next button via Hero");
+    // ---- Step 4: Execute login submission directly ----
+    // The page's nextHandler() checks `initViewId == 2` (a closure
+    // variable we cannot set from outside).  Since we manually
+    // transitioned to loginClass2 via DOM manipulation, initViewId
+    // is still 1 and nextHandler() skips the login logic.
+    // Instead, we directly replicate what nextHandler() does when
+    // initViewId == 2: MD5 hash, get GT, get bid, set fields,
+    // then call form.submit() — all from within the page context.
+    log("Executing login submission (bypassing initViewId check)…");
+
+    const loginResult = await hero.activeTab.getJsValue(`(async () => {
+      try {
+        // 1. Double-MD5 hash password
+        let hashed = null;
+        if (typeof hex_md5 === 'function') {
+          const inner = hex_md5(${JSON.stringify(password)}).toUpperCase();
+          hashed = hex_md5(inner).toUpperCase();
+        } else if (typeof CryptoJS !== 'undefined' && CryptoJS.MD5) {
+          const inner = CryptoJS.MD5(${JSON.stringify(password)}).toString().toUpperCase();
+          hashed = CryptoJS.MD5(inner).toString().toUpperCase();
+        }
+        if (!hashed) return JSON.stringify({step: 'error', msg: 'no-md5-function'});
+
+        // 2. Get reCAPTCHA Enterprise token (GT)
+        let gt = '';
+        try {
+          if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
+            gt = await grecaptcha.enterprise.execute(
+              '${RECAPTCHA_SITE_KEY}', {action: 'LOGIN'});
+          }
+        } catch(e) {}
+
+        // 3. Get Fingerprint2 bid (poll up to 5s)
+        let bid = '';
+        for (let i = 0; i < 10; i++) {
+          const bidEl = document.querySelector('.jsBid, input[name="bid"]');
+          if (bidEl && bidEl.value) { bid = bidEl.value; break; }
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        // 4. Find the form and set all fields
+        const form = document.querySelector('.loginClass2 form')
+                     || document.querySelector('form');
+        if (!form) return JSON.stringify({step: 'error', msg: 'no-form'});
+
+        // Set password field (hidden + visible)
+        const pwInput = form.querySelector('#emailOrPhonePswInput')
+                       || form.querySelector('input[name="password"]');
+        if (pwInput) pwInput.value = hashed;
+
+        // Ensure username is set
+        const userInputs = form.querySelectorAll('input[name="username"]');
+        userInputs.forEach(el => el.value = ${JSON.stringify(email)});
+
+        // Set/create hidden fields
+        function setHidden(name, value) {
+          let el = form.querySelector('input[name="' + name + '"]');
+          if (!el) {
+            el = document.createElement('input');
+            el.type = 'hidden';
+            el.name = name;
+            form.appendChild(el);
+          }
+          el.value = value;
+        }
+        setHidden('password', hashed);
+        setHidden('loginfinish', '1');
+        setHidden('gt', gt);
+        setHidden('bid', bid);
+        setHidden('autoLoginState', '1');
+
+        // Collect form data for diagnostics
+        const fields = {};
+        form.querySelectorAll('input').forEach(el => {
+          if (el.name) fields[el.name] = el.value ? el.value.slice(0, 50) : '';
+        });
+
+        // 5. Submit the form (triggers full browser navigation)
+        form.submit();
+
+        return JSON.stringify({step: 'submitted', gt: gt ? 'yes' : 'no', bid: bid ? 'yes' : 'no', fields: Object.keys(fields).length});
+      } catch(e) {
+        return JSON.stringify({step: 'error', msg: e.message});
       }
-    } catch (e) {
-      log(`Hero click on Next button failed: ${e.message}`);
-    }
+    })()`);
+    log(`Login submission: ${loginResult}`);
 
-    // Fallback: click via JS
-    if (!nextClicked) {
-      const clicked = await hero.activeTab.getJsValue(`(() => {
-        // Find the Next button in loginClass2
-        const btn = document.querySelector('.loginClass2 button')
-                 || document.querySelector('.loginClass2 .next');
-        if (btn) { btn.click(); return 'clicked'; }
-        return 'not-found';
-      })()`);
-      log(`JS click result: ${clicked}`);
-      if (clicked === 'clicked') nextClicked = true;
-    }
+    // Wait for form.submit() navigation + server processing + JS redirect.
+    // The server returns HTML with window.location.href = gateway (which
+    // contains the WUST in the URL).  We poll for URL changes.
+    log("Waiting for server response after form.submit()…");
 
-    // Wait for page's JS to process (nextHandler does async operations:
-    // MD5 hash, reCAPTCHA execute, bid polling, then form.submit)
-    await sleep(20_000);
-    await takeScreenshot(hero, "after_next_click");
+    // Poll for up to 30s for the URL to change (indicates server responded)
+    const preSubmitUrl = loginUrl;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1_000);
+      try {
+        const curUrl = await hero.activeTab.url;
+        if (curUrl !== preSubmitUrl && !curUrl.includes('/preLogin')) {
+          log(`URL changed to: ${curUrl.slice(0, 120)}`);
+          // If already at the callback URL with WUST, we're done
+          const w = findWust(curUrl);
+          if (w) {
+            log("✓ WUST found in URL after redirect!");
+            wust = w;
+            break;
+          }
+          // If at userLogin, the page may be about to JS-redirect
+          if (curUrl.includes('/userLogin')) {
+            // Wait a bit for the JS redirect to execute
+            await sleep(5_000);
+            const newUrl = await hero.activeTab.url;
+            const w2 = findWust(newUrl);
+            if (w2) {
+              log("✓ WUST found after JS redirect!");
+              wust = w2;
+              break;
+            }
+            // Try to extract from the response body
+            try {
+              const body = await hero.activeTab.getJsValue(
+                "document.documentElement?.outerHTML?.slice(0, 15000) || ''"
+              );
+              const w3 = findWust(body);
+              if (w3) {
+                log("✓ WUST found in userLogin response body!");
+                wust = w3;
+                break;
+              }
+              log(`userLogin body (${body.length} chars): ${body.slice(0, 200)}`);
+            } catch {}
+          }
+          break;
+        }
+      } catch { /* navigation in progress */ }
+    }
+    await takeScreenshot(hero, "after_form_submit");
 
     // ---- Step 5: Extract WUST from resulting page ----
     let wust = null;
 
-    // Check current URL (form.submit may have navigated with redirects)
+    // Check current URL (form.submit follows redirects to callback with WUST)
     try {
       const curUrl = await hero.activeTab.url;
-      log(`Post-login URL: ${curUrl.slice(0, 120)}`);
+      log(`Post-login URL: ${curUrl.slice(0, 150)}`);
       wust = findWust(curUrl);
     } catch { /* navigation may be in progress */ }
 
@@ -379,20 +504,17 @@ async function main() {
         );
         wust = findWust(body);
         if (!wust) {
-          // Check for JS redirect in HTML
           const redirectMatch = body.match(
             /(?:window\.location(?:\.href)?\s*=\s*["']|url=)(https?:\/\/[^"'<>\s;]+)/i
           );
           if (redirectMatch) {
-            log(`Found redirect in body: ${redirectMatch[1].slice(0, 100)}`);
+            log(`Found redirect in body: ${redirectMatch[1].slice(0, 120)}`);
             wust = findWust(redirectMatch[1]);
-            // Follow the redirect if it has WUST
             if (!wust) {
               try {
                 await hero.goto(redirectMatch[1]);
                 await sleep(5_000);
-                const navUrl = await hero.activeTab.url;
-                wust = findWust(navUrl);
+                wust = findWust(await hero.activeTab.url);
               } catch {}
             }
           }
@@ -414,10 +536,10 @@ async function main() {
       } catch {}
     }
 
-    // If nextHandler failed (e.g. form.submit blocked by Akamai),
-    // extract session data for Python server-side fallback.
+    // If form.submit was blocked by Akamai, extract session data for
+    // Python server-side fallback.
     if (!wust) {
-      log("No WUST from native login flow — extracting session data for fallback…");
+      log("No WUST from form.submit — extracting session data for Python fallback…");
 
       const sessionData = await hero.activeTab.getJsValue(`(async () => {
         let hashed = null;
@@ -436,11 +558,10 @@ async function main() {
             gt = await grecaptcha.enterprise.execute(
               '${RECAPTCHA_SITE_KEY}', {action: 'LOGIN'});
           }
-        } catch(e) { gt = ''; }
+        } catch(e) {}
 
         const bidEl = document.querySelector('.jsBid, input[name="bid"]');
         const bid = bidEl ? bidEl.value : '';
-
         const form = document.querySelector('.loginClass2 form')
                      || document.querySelector('form');
         const formFields = {};
@@ -449,9 +570,9 @@ async function main() {
             if (el.name) formFields[el.name] = el.value;
           });
         }
-        const cookies = document.cookie;
         return JSON.stringify({
-          hashed, gt, bid, formFields, cookies,
+          hashed, gt, bid, formFields,
+          cookies: document.cookie,
           formAction: form ? form.action : '',
         });
       })()`);
@@ -471,8 +592,8 @@ async function main() {
 
         process.stdout.write(`FORM_DATA=${JSON.stringify(formData)}\n`);
         process.stdout.write(`COOKIES=${parsedSession.cookies}\n`);
-        const formAction = parsedSession.formAction || 'https://passport.lenovo.com/glbwebauthnv6/userLogin';
-        process.stdout.write(`FORM_ACTION=${formAction}\n`);
+        const fa = parsedSession.formAction || 'https://passport.lenovo.com/glbwebauthnv6/userLogin';
+        process.stdout.write(`FORM_ACTION=${fa}\n`);
         log("Session data extracted for Python fallback");
       }
     }
