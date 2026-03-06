@@ -1,18 +1,18 @@
-name: Publish Motorola Downloader
+name: Publish Motorola Firmware Suite
 
 on:
-  pull_request: 
-   branches: 
-     - "master"
-     - "main"
-     - 'copilot/**'
-  push:
-    branches: 
-     - "master"
-     - "main"
-     - 'copilot/**'
   workflow_dispatch:
     inputs:
+      target_owner:
+        description: 'User or organization to create the repo under'
+        required: true
+        default: 'Uaemextop'
+        type: string
+      repo_name:
+        description: 'Repository name'
+        required: true
+        default: 'motorola-firmware'
+        type: string
       repo_visibility:
         description: 'Repository visibility'
         required: true
@@ -23,16 +23,11 @@ on:
           - private
 
 permissions:
-  contents: write
-  repository-projects: write
-  pull-requests: write
-  id-token: write
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      TARGET_REPO: motorola-firmware
 
     steps:
       - name: Checkout source repository
@@ -41,25 +36,31 @@ jobs:
       - name: Create target repository
         env:
           GH_TOKEN: ${{ secrets.REPO_PAT }}
+          TARGET_OWNER: ${{ inputs.target_owner }}
+          TARGET_REPO: ${{ inputs.repo_name }}
+          VISIBILITY: ${{ inputs.repo_visibility }}
         run: |
-          # Check if repository already exists
-          if gh repo view "${{ github.repository_owner }}/${{ env.TARGET_REPO }}" &>/dev/null; then
-            echo "Repository ${{ env.TARGET_REPO }} already exists, skipping creation."
+          FULL_REPO="${TARGET_OWNER}/${TARGET_REPO}"
+
+          if gh repo view "$FULL_REPO" &>/dev/null; then
+            echo "Repository $FULL_REPO already exists, skipping creation."
           else
-            gh repo create "${{ github.repository_owner }}/${{ env.TARGET_REPO }}" \
-              --${{ inputs.repo_visibility }} \
-              --description "Motorola Firmware Downloader — search, authenticate & download Motorola firmware, ROMs and tools" \
+            gh repo create "$FULL_REPO" \
+              "--${VISIBILITY}" \
+              --description "Motorola Firmware Suite — search, authenticate & download Motorola firmware, ROMs and tools" \
               --clone=false
-            echo "Repository ${{ env.TARGET_REPO }} created."
+            echo "Repository $FULL_REPO created."
           fi
 
       - name: Push motorola_downloader content
         env:
           GH_TOKEN: ${{ secrets.REPO_PAT }}
+          TARGET_OWNER: ${{ inputs.target_owner }}
+          TARGET_REPO: ${{ inputs.repo_name }}
         run: |
           set -e
+          FULL_REPO="${TARGET_OWNER}/${TARGET_REPO}"
 
-          # Prepare a temporary directory with the package content
           WORK_DIR=$(mktemp -d)
           cp -r motorola_downloader/. "$WORK_DIR/"
 
@@ -83,18 +84,16 @@ jobs:
           *.key
           config.local.ini
           EOF
-          # Remove leading whitespace added by heredoc indentation
           sed -i 's/^[[:space:]]*//' "$WORK_DIR/.gitignore"
 
-          # Initialize and push
           cd "$WORK_DIR"
           git init -b main
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Initial commit: Motorola Firmware Downloader (source: ${{ github.repository }}@${{ github.sha }})"
+          git commit -m "Initial commit: Motorola Firmware Suite (source: ${{ github.repository }}@${{ github.sha }})"
 
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/${{ env.TARGET_REPO }}.git"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${FULL_REPO}.git"
           git push -u origin main --force
 
-          echo "✅ Published to https://github.com/${{ github.repository_owner }}/${{ env.TARGET_REPO }}"
+          echo "✅ Published to https://github.com/${FULL_REPO}"
