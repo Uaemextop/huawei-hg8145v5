@@ -13,7 +13,10 @@ on:
           - private
 
 permissions:
-  contents: read
+  contents: write
+  repository-projects: write
+  pull-requests: write
+  id-token: write
 
 jobs:
   publish:
