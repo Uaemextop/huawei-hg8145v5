@@ -480,28 +480,35 @@ class LenovoIDAuth:
                         "document.querySelector('.jsBid')?.value || ''"
                     )) or ""
 
+                    # Zendriver's page.evaluate() maps directly to
+                    # CDP Runtime.evaluate which does NOT support passing
+                    # arguments.  Inline the values via json.dumps() which
+                    # produces safe JS string literals (handles quotes,
+                    # backslashes, newlines, etc.).
+                    _email_js = _json.dumps(email)
+                    _hashed_js = _json.dumps(hashed)
+                    _gt_js = _json.dumps(gt)
                     await page.evaluate(
-                        """(args) => {
-                        const f = document.querySelector('.loginClass2 form');
-                        if (!f) return;
-                        f.querySelectorAll('input[name="username"]')
-                            .forEach(e => e.value = args[0]);
-                        f.querySelectorAll('.emailAddressInput')
-                            .forEach(e => e.value = args[0]);
-                        f.querySelectorAll('input[name="password"]')
-                            .forEach(e => e.value = args[1]);
-                        f.querySelectorAll('input[name="loginfinish"]')
-                            .forEach(e => e.value = '1');
-                        let g = f.querySelector('input[name="gt"]');
-                        if (!g) {
-                            g = document.createElement('input');
-                            g.type = 'hidden'; g.name = 'gt';
-                            f.appendChild(g);
-                        }
-                        g.value = args[2];
-                        f.submit();
-                        }""",
-                        [email, hashed, gt],
+                        "(() => {"
+                        " const f = document.querySelector('.loginClass2 form');"
+                        " if (!f) return;"
+                        " f.querySelectorAll('input[name=\"username\"]')"
+                        f"     .forEach(e => e.value = {_email_js});"
+                        " f.querySelectorAll('.emailAddressInput')"
+                        f"     .forEach(e => e.value = {_email_js});"
+                        " f.querySelectorAll('input[name=\"password\"]')"
+                        f"     .forEach(e => e.value = {_hashed_js});"
+                        " f.querySelectorAll('input[name=\"loginfinish\"]')"
+                        "     .forEach(e => e.value = '1');"
+                        " let g = f.querySelector('input[name=\"gt\"]');"
+                        " if (!g) {"
+                        "     g = document.createElement('input');"
+                        "     g.type = 'hidden'; g.name = 'gt';"
+                        "     f.appendChild(g);"
+                        " }"
+                        f" g.value = {_gt_js};"
+                        " f.submit();"
+                        "})()"
                     )
                     await asyncio.sleep(10)
 
