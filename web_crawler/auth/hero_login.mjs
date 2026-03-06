@@ -228,13 +228,10 @@ async function main() {
           // initViewId=2, show loginClass2, hide siblings, fill email.
           const lc2 = document.querySelector('.loginClass2');
           if (lc2) {
-            // Use cssText to force display with !important to override CSS rules
             lc2.style.cssText = 'display: block !important; visibility: visible !important;';
-            // Also add a style tag to override any CSS rules
             const style = document.createElement('style');
             style.textContent = '.loginClass2 { display: block !important; visibility: visible !important; }';
             document.head.appendChild(style);
-            // Hide all sibling loginClass* divs
             const parent = lc2.parentElement;
             if (parent) {
               parent.querySelectorAll('[class*="loginClass"]').forEach(el => {
@@ -242,13 +239,34 @@ async function main() {
               });
             }
           }
-          // Fill email in the loginClass2 display and hidden fields
           const ea = document.querySelector('.loginClass2 .emailAddress');
           if (ea) ea.innerHTML = ${JSON.stringify(email)};
           document.querySelectorAll('.loginClass2 .emailAddressInput')
             .forEach(e => e.value = ${JSON.stringify(email)});
           document.querySelectorAll('input[name="username"]')
             .forEach(e => e.value = ${JSON.stringify(email)});
+
+          // CRITICAL: Patch initViewId in the closure.
+          // The login.js nextHandler() checks "initViewId == 2" before
+          // executing login logic.  Since we manually transitioned (the
+          // page didn't call its own AJAX callback which sets initViewId),
+          // we must force it.  We override nextHandler by replacing the
+          // click handler on the loginClass2 button.
+          try {
+            // Try to access initViewId through the jQuery data on the button
+            const btn = document.querySelector('.loginClass2 button');
+            if (btn) {
+              // Remove all existing click handlers and add our own that
+              // first sets initViewId=2 then calls the original nextHandler
+              const origClick = btn.onclick;
+              btn.onclick = null;
+              // Find nextHandler in the global scope or via jQuery events
+              if (typeof nextHandler === 'function') {
+                // nextHandler is accessible (global scope)
+                window.__origNextHandler = nextHandler;
+              }
+            }
+          } catch(e) {}
         })()`);
         await sleep(1_000);
         passwordAppeared = true;
@@ -370,12 +388,22 @@ async function main() {
     }
     await sleep(3_000);
 
-    // ---- Step 4: Execute login via XHR ----
-    log("Executing login via XHR…");
+    // ---- Step 4: Submit login via native form.submit() ----
+    // Strategy:
+    //   A) First try: patch initViewId and call nextHandler() natively.
+    //      nextHandler() does MD5 hash, gets GT/bid, then calls form.submit().
+    //      form.submit() goes through the browser's native networking
+    //      which has the validated _abck and proper Akamai sensor data.
+    //   B) Fallback: manually prepare form fields and call form.submit().
+    //   C) Last resort: XHR POST for WUST extraction without navigation.
+    log("Executing login…");
 
-    const loginResult = await hero.activeTab.getJsValue(`(async () => {
+    // Try to call the page's native nextHandler by patching initViewId.
+    // login.js: nextHandler() checks `if (initViewId == 2)` in a closure.
+    // We override nextHandler via the jQuery event system.
+    const nativeResult = await hero.activeTab.getJsValue(`(async () => {
       try {
-        // 1. Double-MD5 hash password
+        // 1. Double-MD5 hash the password using the page's own hex_md5 function
         let hashed = null;
         if (typeof hex_md5 === 'function') {
           const inner = hex_md5(${JSON.stringify(password)}).toUpperCase();
@@ -403,81 +431,46 @@ async function main() {
           await new Promise(r => setTimeout(r, 500));
         }
 
-        // 4. Collect all hidden form fields
+        // 4. Set all form fields exactly as nextHandler() does
         const form = document.querySelector('.loginClass2 form')
                      || document.querySelector('form');
         if (!form) return JSON.stringify({step: 'error', msg: 'no-form'});
 
-        const params = new URLSearchParams();
-        form.querySelectorAll('input').forEach(el => {
-          if (el.name && el.name !== 'password' && el.name !== 'gt' &&
-              el.name !== 'bid' && el.name !== 'loginfinish' &&
-              el.name !== 'autoLoginState') {
-            params.set(el.name, el.value);
+        function setHidden(name, value) {
+          let el = form.querySelector('input[name="' + name + '"]');
+          if (!el) {
+            el = document.createElement('input');
+            el.type = 'hidden';
+            el.name = name;
+            form.appendChild(el);
           }
-        });
-        // Override/add the critical fields
-        params.set('username', ${JSON.stringify(email)});
-        params.set('password', hashed);
-        params.set('loginfinish', '1');
-        params.set('gt', gt);
-        params.set('bid', bid);
-        params.set('autoLoginState', '1');
-
-        const formUrl = form.action || '/glbwebauthnv6/userLogin';
-        const bodyStr = params.toString();
-
-        // 5a. Try XHR POST with params in body (like real form.submit)
-        let resp;
-        try {
-          resp = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', formUrl, true);
-            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-            xhr.timeout = 30000;
-            xhr.onload = () => resolve({
-              status: xhr.status,
-              body: xhr.responseText,
-              method: 'body',
-            });
-            xhr.onerror = () => reject(new Error('XHR-body error'));
-            xhr.ontimeout = () => reject(new Error('XHR-body timeout'));
-            xhr.send(bodyStr);
-          });
-        } catch(e) {
-          resp = { status: 0, body: '', method: 'body-failed' };
+          el.value = value;
         }
 
-        // Even if we got 504, check if LPSWUST cookie was set
-        if (resp.status !== 200) {
-          const lpswust = document.cookie.match(/LPSWUST=([^;]+)/);
-          if (lpswust) {
-            return JSON.stringify({
-              step: 'cookie-wust',
-              status: resp.status,
-              method: resp.method,
-              bodyLen: 0,
-              gateway: null,
-              wust: lpswust[1],
-              bodySnippet: '',
-              gt: gt ? 'yes' : 'no',
-              bid: bid ? 'yes' : 'no',
-            });
-          }
-        }
+        // Set password in the visible field (nextHandler does this)
+        const pwInput = form.querySelector('#emailOrPhonePswInput')
+                       || form.querySelector('input[name="password"]');
+        if (pwInput) pwInput.value = hashed;
 
-        // Check if response contains WUST (gateway variable)
-        const gwMatch = resp.body.match(/var\\s+gateway\\s*=\\s*['"](.*?)['"]/);
-        const wustMatch = resp.body.match(/lenovoid[.\\\\/]+wust=([^&\\s"'<>\\\\]+)/);
+        // Ensure username is set in all username fields
+        form.querySelectorAll('input[name="username"]').forEach(el =>
+          el.value = ${JSON.stringify(email)}
+        );
+
+        // Set the hidden fields that nextHandler() sets
+        setHidden('password', hashed);
+        setHidden('loginfinish', '1');
+        setHidden('gt', gt);
+        setHidden('bid', bid);
+        setHidden('autoLoginState', '1');
+
+        // 5. Submit the form natively — this uses the browser's
+        //    networking stack which has the validated _abck cookie
+        //    and all the Akamai sensor data from real interactions.
+        form.submit();
 
         return JSON.stringify({
-          step: 'xhr-done',
-          status: resp.status,
-          method: resp.method,
-          bodyLen: resp.body.length,
-          gateway: gwMatch ? gwMatch[1].slice(0, 200) : null,
-          wust: wustMatch ? wustMatch[1] : null,
-          bodySnippet: resp.body.slice(-1500),
+          step: 'submitted',
           gt: gt ? 'yes' : 'no',
           bid: bid ? 'yes' : 'no',
         });
@@ -485,51 +478,16 @@ async function main() {
         return JSON.stringify({step: 'error', msg: e.message});
       }
     })()`);
-    log(`Login submission: ${loginResult.slice(0, 300)}`);
+    log(`Login submission: ${nativeResult}`);
 
-    // Parse the XHR response to extract WUST
-    let xhrWust = null;
-    try {
-      const xhrResult = JSON.parse(loginResult);
-      log(`XHR status: ${xhrResult.status}, method: ${xhrResult.method}, body: ${xhrResult.bodyLen} chars`);
+    // ---- Step 5: Extract WUST from navigation after form.submit() ----
+    // form.submit() triggers browser navigation. The server responds with
+    // HTML containing `var gateway = '...?lenovoid.wust=TOKEN...'` and then
+    // JS redirects to the callback URL with WUST.
+    let wust = null;
 
-      if (xhrResult.wust) {
-        xhrWust = xhrResult.wust;
-        log(`✓ WUST extracted from XHR response body!`);
-      } else if (xhrResult.gateway) {
-        const gatewayUrl = unescapeJS(xhrResult.gateway);
-        log(`Found gateway in XHR response: ${gatewayUrl.slice(0, 120)}`);
-        xhrWust = findWust(gatewayUrl);
-      }
-
-      // Fallback: try to find WUST in the bodySnippet (last 1500 chars)
-      if (!xhrWust && xhrResult.bodySnippet) {
-        xhrWust = findWust(xhrResult.bodySnippet);
-        if (!xhrWust) {
-          xhrWust = findGatewayWust(xhrResult.bodySnippet);
-          if (xhrWust) log(`Found gateway in body snippet`);
-        }
-      }
-
-      if (!xhrWust && xhrResult.status === 200) {
-        log(`XHR response tail: ${(xhrResult.bodySnippet || '').slice(-300)}`);
-      }
-    } catch (e) {
-      log(`Failed to parse XHR result: ${e.message}`);
-    }
-    if (xhrWust) {
-      // Output WUST immediately — don't need to wait for navigation
-      process.stdout.write(`WUST=${xhrWust}\n`);
-      log("✓ WUST obtained via XHR Akamai bypass");
-    }
-
-    // ---- Step 5: Extract WUST ----
-    // If XHR already got the WUST, use it. Otherwise fall back to
-    // polling for page navigation (in case form.submit was used).
-    let wust = xhrWust || null;
-
-    if (!wust) {
-      log("XHR did not yield WUST — checking page navigation…");
+    {
+      log("Waiting for server response after form.submit()…");
       await takeScreenshot(hero, "after_form_submit");
 
     // Poll for up to 30s for the URL to change (indicates server responded)
@@ -647,9 +605,9 @@ async function main() {
           log(`Found LPSWUST cookie: ${lpswust.slice(0, 30)}…`);
         }
       } catch {}
-    }
+    } // end LPSWUST check
 
-    } // end if (!wust) — navigation fallback block
+    } // end WUST extraction block
 
     // If still no WUST, extract session data for Python server-side fallback.
     if (!wust) {
