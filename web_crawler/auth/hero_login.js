@@ -24,6 +24,19 @@
  *
  * Install:
  *   cd web_crawler/auth && npm install
+ *
+ * HAR Analysis (HTTPToolkit_2026-03-03_18-12.har):
+ *   - POST /userLogin returns 200 (not redirect) when browser carries:
+ *       AKA_A2=A          — Akamai Bot Manager "real browser" flag
+ *       ak_bmsc=<value>   — Akamai browser fingerprint (set by sensor JS
+ *                           in a previous session, persists across loads)
+ *       _abck=..~0~..     — Akamai sensor validated (achieved via interactions)
+ *   - Response body contains:
+ *       var gateway = 'https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=TOKEN';
+ *       window.location.href = gateway;
+ *   - ajaxUserExistedServlet returns 400 for roaming accounts (normal).
+ *   - ajaxUserRoam must be called before /userLogin for roaming accounts.
+ *   - lenovoid.lang must be en_US in the POST body.
  */
 
 'use strict';
@@ -44,13 +57,33 @@ if (!loginUrl || !email || !password) {
 }
 
 // ---------------------------------------------------------------------------
+// Akamai persistent-cookie values extracted from the HAR session
+// (HTTPToolkit_2026-03-03_18-12.har) that produced a successful login.
+//
+// These cookies are normally set by Akamai's Bot Manager JavaScript in a
+// previous browsing session and persist across page loads.  A fresh headless
+// browser session does not have them; injecting them replicates the trusted-
+// browser state that allows ajaxUserRoam and /userLogin to succeed.
+// ---------------------------------------------------------------------------
+const AKAMAI_AKA_A2 = 'A';
+const AKAMAI_AK_BMSC =
+  'FFF50944FF5DF76EA15E9504FC87731A~000000000000000000000000000000~' +
+  'YAAQxgbSF6F6PK2cAQAAgucbth9IVyH1MoPCd8hkl74hHCZGaOSDRv/xaTkhysjlNDrb' +
+  'zbD04RrXCngS5K9OoVSc+0f7I0/UvtFjzTHhkJdKKAtuBpihzXQcJ6TmvLEozh2T/ss' +
+  'TemQQEDLQHiHJRu5Pl22/L4pI+K2ZGvV93vGqPGC+u0cnzweJYcH2vE5Akfjc3c++Sfu' +
+  'JZuZsEjKoNKnBQGNDBwQCTP2XmX6b5bRd9VHx0d84VG05hrPy32S+fXKEkuh7sE586Eb' +
+  'vioOrTWsdvFjFKGVkm/2LXud3tzB3QF54RVq7SbcQlHZUqNvDzAGIuESzqz/gK6Sfm2q' +
+  'ZU+y7MqSoCG53P/rqejv8qWELajKd7n31zMyIznc4P8gUIUsKjYIiD/m5Ghj2bKhEBro' +
+  'XFfWuJF4QoBr1ifvO5SrB';
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /** Extract lenovoid.wust=<token> from a URL or HTML string. */
 function findWust(text) {
   if (!text) return null;
-  const m = text.match(/lenovoid\.wust=([^&\s"'<>]+)/);
+  const m = text.match(/lenovoid\.wust=([^&\s"'<>\\]+)/);
   return m ? m[1] : null;
 }
 
@@ -131,6 +164,29 @@ async function heroLogin() {
     // The _abck cookie starts as ~-1~ (unvalidated).  Human Emulator
     // interactions (typing, clicking) are required to advance it to ~0~.
     await sleep(20000);
+
+    // -----------------------------------------------------------------------
+    // Step 1.5: Inject Akamai persistent cookies from the trusted HAR session.
+    //
+    // HAR analysis confirmed the GET preLogin request in the real browser
+    // ALREADY carried AKA_A2=A and ak_bmsc (set in a previous session).
+    // A fresh Hero session has neither.  Injecting them replicates the
+    // trusted-browser state required for ajaxUserRoam and /userLogin.
+    //
+    // AKA_A2=A  — Akamai Bot Manager "real browser" certification flag.
+    // ak_bmsc   — Akamai browser fingerprint token (non-httpOnly, JS-settable).
+    // -----------------------------------------------------------------------
+    try {
+      const akaA2Js  = JSON.stringify(AKAMAI_AKA_A2);
+      const akBmscJs = JSON.stringify(AKAMAI_AK_BMSC);
+      await hero.activeTab.getJsValue(
+        `(() => {
+          document.cookie = 'AKA_A2=' + ${akaA2Js} + '; path=/; secure';
+          document.cookie = 'ak_bmsc=' + ${akBmscJs} + '; path=/; secure';
+        })()`
+      );
+      process.stderr.write('[Hero] Akamai cookies (AKA_A2, ak_bmsc) injected ✓\n');
+    } catch (_) { /* ignore */ }
 
     // -----------------------------------------------------------------------
     // Step 2: Fill in the email address.
@@ -251,6 +307,13 @@ async function heroLogin() {
       await sleep(300);
       await pwEl.$type(password);
 
+      // Ensure lenovoid.lang is en_US (HAR shows this is required).
+      try {
+        await hero.activeTab.getJsValue(
+          `document.querySelectorAll('input[name="lenovoid.lang"]').forEach(e => e.value = 'en_US')`
+        );
+      } catch (_) { /* ignore */ }
+
       // Wait for reCAPTCHA Enterprise token and Akamai bid to be populated.
       await sleep(5000);
 
@@ -276,22 +339,67 @@ async function heroLogin() {
       }
     } else {
       // -----------------------------------------------------------------------
-      // Step 5b: Direct form submission fallback.
+      // Step 5b: Direct submission for roaming account.
       //
-      // When the SPA password step doesn't appear (AJAX still blocked), bypass
-      // it by posting the loginClass2 form directly via XMLHttpRequest.
-      // XHR gives us responseURL (the final URL after all redirects) without
-      // page navigation, so we can extract the WUST even if the redirect goes
-      // cross-origin to lsa.lenovo.com.
+      // HAR flow for this account (eduardo@uaemex.top is a roaming user):
+      //   1. ajaxUserExistedServlet → 400  (expected for roaming accounts)
+      //   2. ajaxUserRoam → 200 {"resultCode":0}  (registers roaming intent)
+      //   3. POST /userLogin → 200 with gateway JS containing WUST
+      //
+      // We call ajaxUserRoam explicitly before submitting the form so the
+      // server records the roaming user's intent (without it, /userLogin
+      // may return an authentication error for this email).
       // -----------------------------------------------------------------------
-      process.stderr.write('[Hero] Attempting direct form submission via XHR…\n');
+      process.stderr.write('[Hero] Calling ajaxUserRoam to register roaming user…\n');
 
-      // Compute double-MD5 hash in Node.js (matches login.js nextHandler).
+      const emailEncoded = encodeURIComponent(email);
+      const cbEncoded = encodeURIComponent(
+        loginUrl.match(/lenovoid\.cb=([^&]+)/)?.[1] ||
+        'https://lsa.lenovo.com/Tips/lenovoIdSuccess.html'
+      );
+      const roamUrl = `https://passport.lenovo.com/glbwebauthnv6/ajaxUserRoam?username=${emailEncoded}&areacode=`;
+      const existUrl = `https://passport.lenovo.com/glbwebauthnv6/ajaxUserExistedServlet?username=${emailEncoded}&lenovoid.action=uilogin&lenovoid.realm=lmsaclient&lenovoid.lang=en_US&lenovoid.cb=${cbEncoded}&lenovoid.ctx=null`;
+
+      let roamResult = null;
+      try {
+        roamResult = await hero.activeTab.getJsValue(
+          `(async () => {
+            // First call ajaxUserExistedServlet (SPA does this before roam).
+            try {
+              await fetch(${JSON.stringify(existUrl)}, {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+                           'X-Requested-With': 'XMLHttpRequest',
+                           'Accept': 'application/json, text/javascript, */*; q=0.01' },
+                body: ''
+              });
+            } catch(_) {}
+            // Then call ajaxUserRoam.
+            const r = await fetch(${JSON.stringify(roamUrl)}, {
+              method: 'POST', credentials: 'include',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+                         'X-Requested-With': 'XMLHttpRequest',
+                         'Accept': 'application/json, text/javascript, */*; q=0.01' },
+              body: ''
+            });
+            const text = await r.text();
+            return { status: r.status, body: text };
+          })()`
+        );
+      } catch (_) { /* ignore */ }
+      process.stderr.write(`[Hero] ajaxUserRoam result: ${JSON.stringify(roamResult)}\n`);
+
+      // -----------------------------------------------------------------------
+      // Compute double-MD5 hash (matches login.js nextHandler).
+      // -----------------------------------------------------------------------
       const crypto = require('crypto');
       const inner = crypto.createHash('md5').update(password).digest('hex').toUpperCase();
       const hashed = crypto.createHash('md5').update(inner).digest('hex').toUpperCase();
 
-      // Collect reCAPTCHA Enterprise token via the browser's grecaptcha object.
+      // -----------------------------------------------------------------------
+      // Collect reCAPTCHA Enterprise token.
+      // -----------------------------------------------------------------------
+      process.stderr.write('[Hero] Obtaining reCAPTCHA Enterprise token…\n');
       let gt = '';
       try {
         gt = await hero.activeTab.getJsValue(
@@ -307,10 +415,12 @@ async function heroLogin() {
             return '';
           })()`
         ) || '';
-        if (gt) process.stderr.write('[Hero] reCAPTCHA Enterprise token obtained\n');
+        if (gt) process.stderr.write('[Hero] reCAPTCHA Enterprise token obtained ✓\n');
       } catch (_) { /* reCAPTCHA unavailable */ }
 
-      // Read bid (Fingerprint2 browser ID) from the page.
+      // -----------------------------------------------------------------------
+      // Read bid (Fingerprint2 browser ID).
+      // -----------------------------------------------------------------------
       let bid = '';
       try {
         bid = await hero.activeTab.getJsValue(
@@ -321,94 +431,64 @@ async function heroLogin() {
         ) || '';
       } catch (_) { /* bid unavailable */ }
 
-      // Fill and submit via XHR so we get responseURL after redirects.
-      const emailJs = JSON.stringify(email);
+      // -----------------------------------------------------------------------
+      // Fill all form fields and submit via form.submit().
+      //
+      // form.submit() triggers a real browser navigation with:
+      //   Sec-Fetch-Mode: navigate   (required by Akamai for /userLogin)
+      //   Sec-Fetch-User: ?1
+      //   Content-Type: application/x-www-form-urlencoded
+      // Unlike XHR which sends Sec-Fetch-Mode: cors and returns 504.
+      // -----------------------------------------------------------------------
+      process.stderr.write('[Hero] Submitting login form…\n');
+      const emailJs  = JSON.stringify(email);
       const hashedJs = JSON.stringify(hashed);
-      const gtJs = JSON.stringify(gt);
-      const bidJs = JSON.stringify(bid);
-
-      let xhrResult = null;
-      for (let attempt = 1; attempt <= 3 && !xhrResult; attempt++) {
-        if (attempt > 1) {
-          process.stderr.write(`[Hero] XHR retry ${attempt}/3…\n`);
-          await sleep(5000);
-        }
-        try {
-          xhrResult = await hero.activeTab.getJsValue(
-            `(async () => {
-              const f = document.querySelector('.loginClass2 form');
-              if (!f) return { error: 'form not found' };
-
-              // Build the POST body from form fields.
-              const params = new URLSearchParams(new FormData(f));
-              // Override with our values.
-              params.set('username', ${emailJs});
-              params.set('password', ${hashedJs});
-              params.set('loginfinish', '1');
-              params.set('gt', ${gtJs});
-              if (${bidJs}) params.set('bid', ${bidJs});
-
-              // Use XHR so we get responseURL after cross-origin redirects.
-              return await new Promise((resolve) => {
-                const xhr = new XMLHttpRequest();
-                xhr.timeout = 90000;
-                xhr.onload = function() {
-                  resolve({ responseURL: xhr.responseURL, status: xhr.status,
-                             body: xhr.responseText.substring(0, 300) });
-                };
-                xhr.onerror = function() {
-                  resolve({ error: 'xhr network error', status: xhr.status });
-                };
-                xhr.ontimeout = function() {
-                  resolve({ error: 'xhr timeout' });
-                };
-                xhr.open('POST', f.action, true);
-                xhr.withCredentials = true;
-                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-                xhr.send(params.toString());
-              });
-            })()`
-          );
-        } catch (e) {
-          process.stderr.write(`[Hero] XHR error (attempt ${attempt}): ${e.message}\n`);
-        }
-      }
-
-      if (xhrResult) {
-        process.stderr.write(`[Hero] XHR result: ${JSON.stringify(xhrResult).slice(0, 200)}\n`);
-        const xhrWust = findWust(xhrResult.responseURL || '') ||
-                        findWust(xhrResult.body || '');
-        if (xhrWust) {
-          process.stdout.write(JSON.stringify({ wust: xhrWust }) + '\n');
-          return true;
-        }
-      }
-
-      // Fallback: also try the traditional form.submit() after XHR (maybe
-      // the XHR is blocked by CORS but form navigation goes through).
-      process.stderr.write('[Hero] Trying form.submit() as final fallback…\n');
+      const gtJs     = JSON.stringify(gt);
+      const bidJs    = JSON.stringify(bid);
       try {
         await hero.activeTab.getJsValue(
           `(() => {
             const f = document.querySelector('.loginClass2 form');
             if (!f) return false;
-            f.querySelectorAll('input[name="username"],.emailAddressInput').forEach(e => e.value = ${emailJs});
-            f.querySelectorAll('input[name="password"]').forEach(e => e.value = ${hashedJs});
-            f.querySelectorAll('input[name="loginfinish"]').forEach(e => e.value = '1');
+            // Set all required fields exactly as the HAR shows.
+            f.querySelectorAll('input[name="username"],.emailAddressInput')
+              .forEach(e => { e.value = ${emailJs}; });
+            f.querySelectorAll('input[name="password"]')
+              .forEach(e => { e.value = ${hashedJs}; });
+            f.querySelectorAll('input[name="loginfinish"]')
+              .forEach(e => { e.value = '1'; });
+            f.querySelectorAll('input[name="lenovoid.lang"]')
+              .forEach(e => { e.value = 'en_US'; });
             let g = f.querySelector('input[name="gt"]');
-            if (!g) { g = document.createElement('input'); g.type='hidden'; g.name='gt'; f.appendChild(g); }
+            if (!g) {
+              g = document.createElement('input');
+              g.type = 'hidden'; g.name = 'gt';
+              f.appendChild(g);
+            }
             g.value = ${gtJs};
-            const bidEl = f.querySelector('.jsBid,input[name="bid"]');
+            const bidEl = f.querySelector('.jsBid, input[name="bid"]');
             if (bidEl && ${bidJs}) bidEl.value = ${bidJs};
             f.submit();
             return true;
           })()`
         );
-      } catch (_) { /* navigation interrupts evaluate */ }
+        process.stderr.write('[Hero] form.submit() called ✓\n');
+      } catch (e) {
+        // Navigation exception is normal — form.submit() triggers navigation.
+        process.stderr.write(`[Hero] form.submit() navigation: ${e.message}\n`);
+      }
     }
 
     // -----------------------------------------------------------------------
     // Step 6: Wait for the WUST redirect (up to 90 s).
+    //
+    // After a successful POST to /userLogin the server returns 200 with an
+    // HTML body containing:
+    //   var gateway = 'https://lsa.lenovo.com/Tips/lenovoIdSuccess.html?lenovoid.wust=TOKEN';
+    //   window.location.href = gateway;
+    // The browser executes this JS and navigates.  hero.url then shows the
+    // lsa.lenovo.com URL.  We also look inside the page body in case the
+    // browser is still rendering the /userLogin response.
     // -----------------------------------------------------------------------
     process.stderr.write('[Hero] Waiting for WUST redirect…\n');
     for (let i = 0; i < 90; i++) {
@@ -427,6 +507,24 @@ async function heroLogin() {
       if (wust) {
         process.stdout.write(JSON.stringify({ wust }) + '\n');
         return true;
+      }
+
+      // Also check the page body for the gateway URL (present on the
+      // /userLogin 200 response before JS navigation completes).
+      if (currentUrl.includes('userLogin') || currentUrl.includes('preLogin')) {
+        try {
+          const bodyWust = await hero.activeTab.getJsValue(
+            `(() => {
+              const m = document.documentElement.innerHTML.match(/lenovoid\\.wust=([^&'"\\s]+)/);
+              return m ? m[1] : null;
+            })()`
+          );
+          if (bodyWust) {
+            process.stderr.write(`[Hero] WUST found in page body ✓\n`);
+            process.stdout.write(JSON.stringify({ wust: bodyWust }) + '\n');
+            return true;
+          }
+        } catch (_) { /* navigation in progress */ }
       }
 
       if (
