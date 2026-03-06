@@ -6,3 +6,5 @@ dist/
 build/
 .eggs/
 node_modules/
+web_crawler/auth/package.json
+web_crawler/auth/package-lock.json

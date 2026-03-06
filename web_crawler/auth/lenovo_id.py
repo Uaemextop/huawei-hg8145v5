@@ -175,6 +175,57 @@ def _find_wust(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def extract_tokens_from_har(har_path: str) -> dict[str, str]:
+    """Extract WUST, JWT, and GUID tokens from an HTTP Archive (HAR) file.
+
+    Parses the HAR to find the successful Lenovo ID OAuth flow:
+    - **WUST**: from the ``lenovoIdSuccess.html?lenovoid.wust=`` redirect URL.
+    - **JWT**: from the ``Authorization`` response header on
+      ``lenovoIdLogin.jhtml``.
+    - **GUID**: from the ``Guid`` request/response headers.
+
+    Returns a dict with keys ``wust``, ``jwt``, ``guid`` (empty string if
+    not found).
+
+    Usage::
+
+        tokens = extract_tokens_from_har("/path/to/capture.har")
+        if tokens["wust"]:
+            session = LenovoIDAuth().login_with_wust(tokens["wust"])
+    """
+    tokens: dict[str, str] = {"wust": "", "jwt": "", "guid": ""}
+    try:
+        with open(har_path) as f:
+            har = _json.load(f)
+    except Exception as exc:
+        _log(f"[LenovoID] HAR parse error: {exc}")
+        return tokens
+
+    for entry in har.get("log", {}).get("entries", []):
+        url = entry.get("request", {}).get("url", "")
+
+        # WUST from redirect URL
+        if "lenovoid.wust" in url and not tokens["wust"]:
+            m = _WUST_RE.search(url)
+            if m:
+                tokens["wust"] = m.group(1)
+
+        # JWT from lenovoIdLogin response
+        if "lenovoIdLogin" in url:
+            for h in entry.get("response", {}).get("headers", []):
+                if h["name"].lower() == "authorization" and not tokens["jwt"]:
+                    tokens["jwt"] = h["value"]
+                if h["name"].lower() == "guid" and not tokens["guid"]:
+                    tokens["guid"] = h["value"]
+
+        # GUID from request headers
+        for h in entry.get("request", {}).get("headers", []):
+            if h["name"].lower() == "guid" and not tokens["guid"]:
+                tokens["guid"] = h["value"]
+
+    return tokens
+
+
 def _hash_password(password: str) -> str:
     """Hash a Lenovo ID password for form submission.
 
@@ -386,8 +437,12 @@ class LenovoIDAuth:
         """
         _log("[LenovoID] Launching Ulixee Hero for Akamai-protected login…")
         try:
+            # Pass credentials via stdin to avoid exposing them in
+            # process listings (ps / Task Manager).
+            stdin_data = f"{login_url}\n{email}\n{password}\n"
             result = subprocess.run(
-                ["node", str(_HERO_SCRIPT), login_url, email, password],
+                ["node", str(_HERO_SCRIPT)],
+                input=stdin_data,
                 capture_output=True,
                 text=True,
                 timeout=120,
