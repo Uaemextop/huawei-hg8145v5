@@ -348,15 +348,22 @@ async function main() {
     }
     await sleep(3_000);
 
-    // ---- Step 4: Execute login submission directly ----
-    // The page's nextHandler() checks `initViewId == 2` (a closure
-    // variable we cannot set from outside).  Since we manually
-    // transitioned to loginClass2 via DOM manipulation, initViewId
-    // is still 1 and nextHandler() skips the login logic.
-    // Instead, we directly replicate what nextHandler() does when
-    // initViewId == 2: MD5 hash, get GT, get bid, set fields,
-    // then call form.submit() — all from within the page context.
-    log("Executing login submission (bypassing initViewId check)…");
+    // ---- Step 4: Execute login via XHR ----
+    // Strategy: Try TWO approaches:
+    //   A) XHR POST with params in BODY (like real form.submit) — works if _abck is validated
+    //   B) XHR POST with params in URL + empty body — Akamai bypass for non-validated _abck
+    // The real LMSA desktop app uses form.submit() which puts params in the body.
+    // From HAR: Content-Type: application/x-www-form-urlencoded
+    //
+    // HAR shows the real LMSA app sets AKA_A2=A cookie — this is an Akamai
+    // cookie that the original desktop app sets via proxy/config. Set it
+    // before submitting.
+    try {
+      await hero.activeTab.getJsValue(
+        "document.cookie = 'AKA_A2=A; path=/; domain=.passport.lenovo.com; secure'"
+      );
+    } catch {}
+    log("Executing login via XHR…");
 
     const loginResult = await hero.activeTab.getJsValue(`(async () => {
       try {
@@ -388,57 +395,147 @@ async function main() {
           await new Promise(r => setTimeout(r, 500));
         }
 
-        // 4. Find the form and set all fields
+        // 4. Collect all hidden form fields
         const form = document.querySelector('.loginClass2 form')
                      || document.querySelector('form');
         if (!form) return JSON.stringify({step: 'error', msg: 'no-form'});
 
-        // Set password field (hidden + visible)
-        const pwInput = form.querySelector('#emailOrPhonePswInput')
-                       || form.querySelector('input[name="password"]');
-        if (pwInput) pwInput.value = hashed;
-
-        // Ensure username is set
-        const userInputs = form.querySelectorAll('input[name="username"]');
-        userInputs.forEach(el => el.value = ${JSON.stringify(email)});
-
-        // Set/create hidden fields
-        function setHidden(name, value) {
-          let el = form.querySelector('input[name="' + name + '"]');
-          if (!el) {
-            el = document.createElement('input');
-            el.type = 'hidden';
-            el.name = name;
-            form.appendChild(el);
-          }
-          el.value = value;
-        }
-        setHidden('password', hashed);
-        setHidden('loginfinish', '1');
-        setHidden('gt', gt);
-        setHidden('bid', bid);
-        setHidden('autoLoginState', '1');
-
-        // Collect form data for diagnostics
-        const fields = {};
+        const params = new URLSearchParams();
         form.querySelectorAll('input').forEach(el => {
-          if (el.name) fields[el.name] = el.value ? el.value.slice(0, 50) : '';
+          if (el.name && el.name !== 'password' && el.name !== 'gt' &&
+              el.name !== 'bid' && el.name !== 'loginfinish' &&
+              el.name !== 'autoLoginState') {
+            params.set(el.name, el.value);
+          }
         });
+        // Override/add the critical fields
+        params.set('username', ${JSON.stringify(email)});
+        params.set('password', hashed);
+        params.set('loginfinish', '1');
+        params.set('gt', gt);
+        params.set('bid', bid);
+        params.set('autoLoginState', '1');
 
-        // 5. Submit the form (triggers full browser navigation)
-        form.submit();
+        const formUrl = form.action || '/glbwebauthnv6/userLogin';
+        const bodyStr = params.toString();
 
-        return JSON.stringify({step: 'submitted', gt: gt ? 'yes' : 'no', bid: bid ? 'yes' : 'no', fields: Object.keys(fields).length});
+        // 5a. Try XHR POST with params in body (like real form.submit)
+        let resp;
+        try {
+          resp = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', formUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+            xhr.timeout = 30000;
+            xhr.onload = () => resolve({
+              status: xhr.status,
+              body: xhr.responseText,
+              method: 'body',
+            });
+            xhr.onerror = () => reject(new Error('XHR-body error'));
+            xhr.ontimeout = () => reject(new Error('XHR-body timeout'));
+            xhr.send(bodyStr);
+          });
+        } catch(e) {
+          resp = { status: 0, body: '', method: 'body-failed' };
+        }
+
+        // 5b. If body approach failed (504/0/error), try params in URL + empty body
+        if (resp.status !== 200) {
+          try {
+            const url = formUrl + '?' + bodyStr;
+            resp = await new Promise((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', url, true);
+              xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8');
+              xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+              xhr.timeout = 30000;
+              xhr.onload = () => resolve({
+                status: xhr.status,
+                body: xhr.responseText,
+                method: 'url-params',
+              });
+              xhr.onerror = () => reject(new Error('XHR-url error'));
+              xhr.ontimeout = () => reject(new Error('XHR-url timeout'));
+              xhr.send('');
+            });
+          } catch(e) {
+            // Both approaches failed
+          }
+        }
+
+        // Check if response contains WUST (gateway variable)
+        const gwMatch = resp.body.match(/var\\s+gateway\\s*=\\s*['"](.*?)['"]/);
+        const wustMatch = resp.body.match(/lenovoid[.\\\\/]+wust=([^&\\s"'<>\\\\]+)/);
+
+        return JSON.stringify({
+          step: 'xhr-done',
+          status: resp.status,
+          method: resp.method,
+          bodyLen: resp.body.length,
+          gateway: gwMatch ? gwMatch[1].slice(0, 200) : null,
+          wust: wustMatch ? wustMatch[1] : null,
+          bodySnippet: resp.body.slice(-1500),
+          gt: gt ? 'yes' : 'no',
+          bid: bid ? 'yes' : 'no',
+        });
       } catch(e) {
         return JSON.stringify({step: 'error', msg: e.message});
       }
     })()`);
-    log(`Login submission: ${loginResult}`);
+    log(`Login submission: ${loginResult.slice(0, 300)}`);
 
-    // Wait for form.submit() navigation + server processing + JS redirect.
-    // The server returns HTML with window.location.href = gateway (which
-    // contains the WUST in the URL).  We poll for URL changes.
-    log("Waiting for server response after form.submit()…");
+    // Parse the XHR response to extract WUST
+    let xhrWust = null;
+    try {
+      const xhrResult = JSON.parse(loginResult);
+      log(`XHR status: ${xhrResult.status}, method: ${xhrResult.method}, body: ${xhrResult.bodyLen} chars`);
+
+      if (xhrResult.wust) {
+        xhrWust = xhrResult.wust;
+        log(`✓ WUST extracted from XHR response body!`);
+      } else if (xhrResult.gateway) {
+        const gatewayUrl = xhrResult.gateway.replace(/\\\//g, "/");
+        log(`Found gateway in XHR response: ${gatewayUrl.slice(0, 120)}`);
+        xhrWust = findWust(gatewayUrl);
+      }
+
+      // Fallback: try to find WUST in the bodySnippet (last 1500 chars)
+      if (!xhrWust && xhrResult.bodySnippet) {
+        xhrWust = findWust(xhrResult.bodySnippet);
+        if (!xhrWust) {
+          // Look for gateway in the snippet
+          const gwMatch = xhrResult.bodySnippet.match(
+            /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
+          );
+          if (gwMatch) {
+            const url = gwMatch[1].replace(/\\\//g, "/");
+            log(`Found gateway in body snippet: ${url.slice(0, 120)}`);
+            xhrWust = findWust(url);
+          }
+        }
+      }
+
+      if (!xhrWust && xhrResult.status === 200) {
+        log(`XHR response tail: ${(xhrResult.bodySnippet || '').slice(-300)}`);
+      }
+    } catch (e) {
+      log(`Failed to parse XHR result: ${e.message}`);
+    }
+    if (xhrWust) {
+      // Output WUST immediately — don't need to wait for navigation
+      process.stdout.write(`WUST=${xhrWust}\n`);
+      log("✓ WUST obtained via XHR Akamai bypass");
+    }
+
+    // ---- Step 5: Extract WUST ----
+    // If XHR already got the WUST, use it. Otherwise fall back to
+    // polling for page navigation (in case form.submit was used).
+    let wust = xhrWust || null;
+
+    if (!wust) {
+      log("XHR did not yield WUST — checking page navigation…");
+      await takeScreenshot(hero, "after_form_submit");
 
     // Poll for up to 30s for the URL to change (indicates server responded)
     const preSubmitUrl = loginUrl;
@@ -455,22 +552,30 @@ async function main() {
             wust = w;
             break;
           }
-          // If at userLogin, the page may be about to JS-redirect
+          // If at userLogin, the server returned the gateway HTML page.
+          // The `var gateway = '...'` contains the WUST.
+          // Try to extract it from the HTML body BEFORE the JS redirect fires.
           if (curUrl.includes('/userLogin')) {
-            // Wait a bit for the JS redirect to execute
-            await sleep(5_000);
-            const newUrl = await hero.activeTab.url;
-            const w2 = findWust(newUrl);
-            if (w2) {
-              log("✓ WUST found after JS redirect!");
-              wust = w2;
-              break;
-            }
-            // Try to extract from the response body
             try {
               const body = await hero.activeTab.getJsValue(
                 "document.documentElement?.outerHTML?.slice(0, 15000) || ''"
               );
+              // Look for gateway variable pattern from HAR:
+              //   var gateway = 'https:\/\/...?lenovoid.wust=TOKEN...'
+              const gatewayMatch = body.match(
+                /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
+              );
+              if (gatewayMatch) {
+                const gatewayUrl = gatewayMatch[1].replace(/\\\//g, "/");
+                log(`Found gateway variable: ${gatewayUrl.slice(0, 120)}`);
+                const w2 = findWust(gatewayUrl);
+                if (w2) {
+                  log("✓ WUST found in gateway variable!");
+                  wust = w2;
+                  break;
+                }
+              }
+              // Also try direct WUST match in body
               const w3 = findWust(body);
               if (w3) {
                 log("✓ WUST found in userLogin response body!");
@@ -479,6 +584,18 @@ async function main() {
               }
               log(`userLogin body (${body.length} chars): ${body.slice(0, 200)}`);
             } catch {}
+
+            // Wait for the JS redirect to execute
+            await sleep(5_000);
+            try {
+              const newUrl = await hero.activeTab.url;
+              const w4 = findWust(newUrl);
+              if (w4) {
+                log("✓ WUST found after JS redirect!");
+                wust = w4;
+                break;
+              }
+            } catch {}
           }
           break;
         }
@@ -486,33 +603,47 @@ async function main() {
     }
     await takeScreenshot(hero, "after_form_submit");
 
-    // ---- Step 5: Extract WUST from resulting page ----
-    let wust = null;
+    // Secondary check: current URL may already contain WUST after redirect
+    if (!wust) {
+      try {
+        const curUrl = await hero.activeTab.url;
+        log(`Post-login URL: ${curUrl.slice(0, 150)}`);
+        wust = findWust(curUrl);
+      } catch { /* navigation may be in progress */ }
+    }
 
-    // Check current URL (form.submit follows redirects to callback with WUST)
-    try {
-      const curUrl = await hero.activeTab.url;
-      log(`Post-login URL: ${curUrl.slice(0, 150)}`);
-      wust = findWust(curUrl);
-    } catch { /* navigation may be in progress */ }
-
-    // Check page body for redirect URL containing WUST
+    // Check page body for gateway variable or redirect URL containing WUST
+    // From HAR: the /userLogin response body contains:
+    //   var gateway = 'https:\/\/lsa.lenovo.com\/Tips\/lenovoIdSuccess.html?lenovoid.wust=...'
+    //   window.location.href = gateway;
     if (!wust) {
       try {
         const body = await hero.activeTab.getJsValue(
-          "document.documentElement?.outerHTML?.slice(0, 10000) || ''",
+          "document.documentElement?.outerHTML?.slice(0, 15000) || ''",
         );
-        wust = findWust(body);
+        // First try the gateway variable pattern (from decompiled flow)
+        const gatewayMatch = body.match(
+          /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
+        );
+        if (gatewayMatch) {
+          const gatewayUrl = gatewayMatch[1].replace(/\\\//g, "/");
+          log(`Found gateway: ${gatewayUrl.slice(0, 120)}`);
+          wust = findWust(gatewayUrl);
+        }
+        // Fallback: direct WUST regex on body
+        if (!wust) wust = findWust(body);
+        // Fallback: any window.location redirect
         if (!wust) {
           const redirectMatch = body.match(
             /(?:window\.location(?:\.href)?\s*=\s*["']|url=)(https?:\/\/[^"'<>\s;]+)/i
           );
           if (redirectMatch) {
-            log(`Found redirect in body: ${redirectMatch[1].slice(0, 120)}`);
-            wust = findWust(redirectMatch[1]);
+            const rUrl = redirectMatch[1].replace(/\\\//g, "/");
+            log(`Found redirect in body: ${rUrl.slice(0, 120)}`);
+            wust = findWust(rUrl);
             if (!wust) {
               try {
-                await hero.goto(redirectMatch[1]);
+                await hero.goto(rUrl);
                 await sleep(5_000);
                 wust = findWust(await hero.activeTab.url);
               } catch {}
@@ -536,8 +667,9 @@ async function main() {
       } catch {}
     }
 
-    // If form.submit was blocked by Akamai, extract session data for
-    // Python server-side fallback.
+    } // end if (!wust) — navigation fallback block
+
+    // If still no WUST, extract session data for Python server-side fallback.
     if (!wust) {
       log("No WUST from form.submit — extracting session data for Python fallback…");
 
