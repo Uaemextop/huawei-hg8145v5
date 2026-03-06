@@ -1,0 +1,17 @@
+{
+  "name": "huawei-hg8145v5-hero-login",
+  "version": "1.0.0",
+  "description": "Ulixee Hero-based login helper for Lenovo passport Akamai bypass",
+  "main": "hero_login.js",
+  "scripts": {
+    "install-hero": "npm install @ulixee/hero"
+  },
+  "dependencies": {
+    "@ulixee/hero": "^2.0.0-alpha.34"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "author": "",
+  "license": "MIT"
+}

@@ -82,6 +82,19 @@ try:
 except ImportError:
     _ZENDRIVER_AVAILABLE = False
 
+# Optional Hero browser import — Ulixee Hero is a Node.js-based headless
+# browser specifically designed for advanced web scraping and bot evasion.
+# It provides superior Akamai Bot Manager bypass capabilities compared to
+# traditional automation tools because it's built from the ground up to
+# mimic real browser behavior, including TLS fingerprinting, network timing,
+# and comprehensive fingerprint evasion.
+# Ref: https://github.com/ulixee/hero
+try:
+    from web_crawler.auth.hero_client import HeroClient as _HeroClient
+    _HERO_AVAILABLE = True
+except ImportError:
+    _HERO_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -317,12 +330,20 @@ class LenovoIDAuth:
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
         then tries browser automation backends in order of Akamai bypass
         effectiveness:
-        1. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
+        1. **Hero** (Ulixee Hero — purpose-built for scraping with advanced
+           Akamai bypass, TLS fingerprinting, and network timing evasion).
+        2. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
            reCAPTCHA, and bid without WebDriver fingerprints).
-        2. **Playwright** (traditional, with stealth patches).
-        3. **Plain HTTP** requests (no Akamai bypass).
+        3. **Playwright** (traditional, with stealth patches).
+        4. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _HERO_AVAILABLE:
+            wust = self._obtain_wust_hero(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] Hero login failed – trying zendriver fallback")
 
         if _ZENDRIVER_AVAILABLE:
             wust = self._obtain_wust_zendriver(email, password, login_url)
@@ -337,6 +358,56 @@ class LenovoIDAuth:
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
         return self._obtain_wust_requests(email, password, login_url)
+
+    # ------------------------------------------------------------------
+    # Hero (Ulixee) browser backend
+    # ------------------------------------------------------------------
+
+    def _obtain_wust_hero(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use Ulixee Hero to complete the Lenovo ID OAuth.
+
+        Hero is a Node.js-based headless browser specifically designed for
+        advanced web scraping and bot evasion. Unlike traditional automation
+        tools (Playwright, Selenium, even zendriver), Hero was built from
+        the ground up to defeat sophisticated bot detection systems like
+        Akamai Bot Manager.
+
+        Key advantages over other automation tools:
+        - **Native TLS fingerprinting**: Mimics exact TLS handshakes of
+          real browsers (Chrome, Firefox, Safari) including cipher suites,
+          extensions, and negotiation patterns.
+        - **Network timing patterns**: Reproduces realistic request timing,
+          resource loading sequences, and HTTP/2 stream priorities.
+        - **Comprehensive evasion**: Eliminates all automation fingerprints
+          including navigator.webdriver, missing plugins, inconsistent
+          screen/viewport ratios, and WebGL vendor mismatches.
+        - **Active maintenance**: Continuously updated with latest Chrome
+          versions and anti-detection techniques.
+
+        This method calls the hero_login.js script via subprocess and
+        parses the JSON response containing the WUST token.
+        """
+        _log("[LenovoID] Attempting login via Ulixee Hero (Node.js)...")
+
+        try:
+            hero = _HeroClient()
+            if not hero.is_available():
+                _log("[LenovoID] Hero not available - install with: npm install")
+                return None
+
+            wust = hero.login(email, password, login_url, timeout=120)
+            if wust:
+                _log("[LenovoID] ✓ WUST obtained via Hero")
+                return wust
+            else:
+                _log("[LenovoID] Hero login failed - no WUST returned")
+                return None
+
+        except Exception as exc:
+            _log(f"[LenovoID] Hero login exception: {exc}")
+            return None
 
     # ------------------------------------------------------------------
     # Zendriver (CDP-based) browser backend
