@@ -27,6 +27,11 @@ setup(
         "zendriver": [
             "zendriver>=0.15.0",
         ],
+        "hero": [
+            # Ulixee Hero is a Node.js dependency — install with:
+            #   npm i @ulixee/hero-playground
+            # This extra is a marker; the actual package is managed by npm.
+        ],
         "captcha": [
             "flask>=3.0.0",
             "openai>=1.0.0",

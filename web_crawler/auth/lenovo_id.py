@@ -40,7 +40,10 @@ import uuid as _uuid
 
 import os
 import re
+import shutil
+import subprocess
 import uuid
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -81,6 +84,17 @@ try:
     _ZENDRIVER_AVAILABLE = True
 except ImportError:
     _ZENDRIVER_AVAILABLE = False
+
+# Ulixee Hero availability check.  Hero is a Node.js browser automation
+# tool specifically designed for web scraping that emulates real browser
+# TLS fingerprints, HTTP/2 settings, and DOM APIs — defeating Akamai Bot
+# Manager where Playwright and zendriver both fail.
+# Ref: https://github.com/ulixee/hero
+_HERO_SCRIPT = Path(__file__).with_name("hero_login.mjs")
+_HERO_AVAILABLE = (
+    _HERO_SCRIPT.is_file()
+    and shutil.which("node") is not None
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -317,12 +331,20 @@ class LenovoIDAuth:
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
         then tries browser automation backends in order of Akamai bypass
         effectiveness:
-        1. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
+        1. **Ulixee Hero** (Node.js, best Akamai bypass — emulates real
+           browser TLS fingerprints, HTTP/2, and DOM APIs).
+        2. **zendriver** (CDP-based, good Akamai bypass — loads bmak sensor,
            reCAPTCHA, and bid without WebDriver fingerprints).
-        2. **Playwright** (traditional, with stealth patches).
-        3. **Plain HTTP** requests (no Akamai bypass).
+        3. **Playwright** (traditional, with stealth patches).
+        4. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _HERO_AVAILABLE:
+            wust = self._obtain_wust_hero(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] Hero login failed – trying zendriver fallback")
 
         if _ZENDRIVER_AVAILABLE:
             wust = self._obtain_wust_zendriver(email, password, login_url)
@@ -337,6 +359,65 @@ class LenovoIDAuth:
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
         return self._obtain_wust_requests(email, password, login_url)
+
+    # ------------------------------------------------------------------
+    # Ulixee Hero (Node.js) browser backend
+    # ------------------------------------------------------------------
+
+    def _obtain_wust_hero(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use Ulixee Hero to complete the Lenovo ID OAuth.
+
+        Hero is a Node.js headless browser built specifically for web
+        scraping.  It emulates real browser TLS fingerprints, HTTP/2
+        settings, and DOM APIs so convincingly that Akamai Bot Manager
+        validates the ``_abck`` cookie — which Playwright and zendriver
+        cannot achieve in headless mode.
+
+        The login flow is delegated to ``hero_login.mjs`` (a Node.js
+        script shipped alongside this module).  Communication happens
+        via stdout/stderr: a successful login prints ``WUST=<token>``
+        to stdout.
+
+        Requires ``node`` on PATH and ``@ulixee/hero-playground``
+        installed (``npm i @ulixee/hero-playground`` in the package
+        directory).
+        """
+        _log("[LenovoID] Launching Ulixee Hero for Akamai-protected login…")
+        try:
+            result = subprocess.run(
+                ["node", str(_HERO_SCRIPT), login_url, email, password],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(_HERO_SCRIPT.parent),
+            )
+        except FileNotFoundError:
+            _log("[LenovoID] Hero: 'node' not found on PATH")
+            return None
+        except subprocess.TimeoutExpired:
+            _log("[LenovoID] Hero: subprocess timed out (120 s)")
+            return None
+
+        # Forward Hero diagnostic output to our log.
+        for line in (result.stderr or "").splitlines():
+            _log(f"  {line}")
+
+        if result.returncode != 0:
+            _log(f"[LenovoID] Hero: exited with code {result.returncode}")
+            return None
+
+        # Parse stdout for WUST=<token>.
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("WUST="):
+                wust = line[5:].strip()
+                if wust:
+                    _log("[LenovoID] ✓ WUST obtained via Ulixee Hero")
+                    return wust
+
+        _log("[LenovoID] Hero: no WUST in stdout")
+        return None
 
     # ------------------------------------------------------------------
     # Zendriver (CDP-based) browser backend
