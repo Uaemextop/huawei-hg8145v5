@@ -5,3 +5,5 @@ __pycache__/
 dist/
 build/
 .eggs/
+node_modules/
+package-lock.json

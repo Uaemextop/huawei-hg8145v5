@@ -36,6 +36,8 @@ import asyncio
 import hashlib
 import json as _json
 import random as _rnd
+import shutil
+import subprocess
 import uuid as _uuid
 
 import os
@@ -81,6 +83,19 @@ try:
     _ZENDRIVER_AVAILABLE = True
 except ImportError:
     _ZENDRIVER_AVAILABLE = False
+
+# ulixee/Hero availability check — detect whether Node.js is present and
+# the hero_login.js companion script (with its node_modules) has been
+# installed.  Hero uses a Human Emulator and a proprietary CDP tunnel that
+# is NOT recognised as WebDriver by Akamai Bot Manager, giving it the best
+# Akamai bypass rate of all available backends.
+# Install: cd web_crawler/auth && npm install
+_HERO_SCRIPT = os.path.join(os.path.dirname(__file__), "hero_login.js")
+_HERO_AVAILABLE: bool = (
+    shutil.which("node") is not None
+    and os.path.isfile(_HERO_SCRIPT)
+    and os.path.isdir(os.path.join(os.path.dirname(_HERO_SCRIPT), "node_modules"))
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -317,12 +332,19 @@ class LenovoIDAuth:
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
         then tries browser automation backends in order of Akamai bypass
         effectiveness:
-        1. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
-           reCAPTCHA, and bid without WebDriver fingerprints).
-        2. **Playwright** (traditional, with stealth patches).
-        3. **Plain HTTP** requests (no Akamai bypass).
+        1. **Hero** (ulixee/Hero Node.js — Human Emulator + proprietary CDP
+           tunnel, best Akamai bypass rate; no WebDriver fingerprint).
+        2. **zendriver** (Python CDP-based, very good Akamai bypass).
+        3. **Playwright** (traditional, with stealth patches).
+        4. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _HERO_AVAILABLE:
+            wust = self._obtain_wust_hero(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] Hero login failed – trying zendriver fallback")
 
         if _ZENDRIVER_AVAILABLE:
             wust = self._obtain_wust_zendriver(email, password, login_url)
@@ -337,6 +359,76 @@ class LenovoIDAuth:
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
         return self._obtain_wust_requests(email, password, login_url)
+
+    # ------------------------------------------------------------------
+    # Hero (ulixee/Hero Node.js) browser backend
+    # ------------------------------------------------------------------
+
+    def _obtain_wust_hero(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use ulixee/Hero (Node.js) to complete the Lenovo ID OAuth.
+
+        Hero (https://github.com/ulixee/hero) uses a built-in Human Emulator
+        that generates realistic mouse movements, scroll events, and typing
+        delays.  It communicates with the browser via a proprietary CDP-over-
+        WebSocket tunnel rather than the standard WebDriver protocol, so it
+        does not expose the ``webdriver`` navigator property that Akamai Bot
+        Manager checks.  This makes Hero the most effective backend for
+        bypassing the Akamai ``_abck`` cookie challenge on passport.lenovo.com.
+
+        Requires Node.js ≥ 18 and the ``@ulixee/hero-playground`` npm package
+        to be installed in the ``web_crawler/auth/`` directory::
+
+            cd web_crawler/auth && npm install
+
+        Availability is checked at module load time via :data:`_HERO_AVAILABLE`.
+        The login script is ``web_crawler/auth/hero_login.js``.
+        """
+        _log("[LenovoID] Launching Hero (ulixee/Hero Node.js) for Akamai-protected login…")
+        try:
+            result = subprocess.run(
+                ["node", _HERO_SCRIPT, login_url, email, password],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(_HERO_SCRIPT),
+            )
+        except subprocess.TimeoutExpired:
+            _log("[LenovoID] Hero: timed out after 300 s")
+            return None
+        except (OSError, FileNotFoundError) as exc:
+            _log(f"[LenovoID] Hero: could not start Node.js: {exc}")
+            return None
+        except Exception as exc:
+            _log(f"[LenovoID] Hero: unexpected error: {exc}")
+            return None
+
+        # Forward the last few lines of stderr for diagnostics.
+        if result.stderr:
+            for line in result.stderr.strip().splitlines()[-15:]:
+                _log(f"[LenovoID] Hero: {line}")
+
+        if not result.stdout:
+            _log("[LenovoID] Hero: no output from script")
+            return None
+
+        # Parse the last JSON line written to stdout.
+        try:
+            last_line = result.stdout.strip().splitlines()[-1]
+            data = _json.loads(last_line)
+        except (ValueError, IndexError):
+            _log(f"[LenovoID] Hero: unexpected output: {result.stdout[:200]}")
+            return None
+
+        wust = data.get("wust")
+        if wust:
+            _log("[LenovoID] ✓ WUST obtained via Hero")
+            return wust
+
+        err = data.get("error", "unknown error")
+        _log(f"[LenovoID] Hero: {err}")
+        return None
 
     # ------------------------------------------------------------------
     # Zendriver (CDP-based) browser backend

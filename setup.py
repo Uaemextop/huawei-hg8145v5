@@ -27,6 +27,10 @@ setup(
         "zendriver": [
             "zendriver>=0.15.0",
         ],
+        # Node.js @ulixee/hero-playground is installed separately:
+        #   cd web_crawler/auth && npm install
+        # No Python package required for the Hero backend.
+        "hero": [],
         "captcha": [
             "flask>=3.0.0",
             "openai>=1.0.0",
