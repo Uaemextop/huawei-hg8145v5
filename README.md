@@ -121,21 +121,24 @@ python -m web_crawler https://example.com --no-verify-ssl
 
 ### AI CAPTCHA Solving + Lenovo LMSA Authentication
 
-The crawler can authenticate with Lenovo's LMSA service and automatically solve
-CAPTCHAs using the **GitHub Models** vision API (GPT-4o).  This is required for
-crawling `rsddownload-secure.lenovo.com` (private S3 bucket).
+The crawler can authenticate with Lenovo's LMSA service using **Ulixee Hero** browser automation (superior Akamai bypass) and automatically solve CAPTCHAs using the **GitHub Models** vision API (GPT-4o). This is required for crawling `rsddownload-secure.lenovo.com` (private S3 bucket).
 
 **Prerequisites:**
-1. A **GitHub Personal Access Token** — create at
-   https://github.com/settings/tokens (the token needs access to GitHub Models;
-   enable the **Models** permission if prompted during token creation)
-2. **Playwright** + Chromium installed (`pip install playwright && playwright install chromium`)
+1. **Node.js** (v16+) and **npm** — required for Ulixee Hero browser
+   - Install from https://nodejs.org/ or via package manager
+   - Run `npm install` to install Hero dependencies
+2. A **GitHub Personal Access Token** (optional, for AI CAPTCHA solving) — create at
+   https://github.com/settings/tokens (enable the **Models** permission if prompted)
+3. **Playwright** + Chromium (optional fallback) — `pip install playwright && playwright install chromium`
 
 **⚠️ NEVER hardcode credentials in source code or command-line history.**
 Use environment variables or source from a secure `.env` file instead:
 
 ```bash
-# Step 1: Create a .env file (make sure it's in .gitignore!)
+# Step 1: Install Hero browser dependencies
+npm install
+
+# Step 2: Create a .env file (make sure it's in .gitignore!)
 cat > .env << 'EOF'
 export GITHUB_TOKEN="ghp_your_token_here"
 export LMSA_EMAIL="your_email@example.com"
@@ -143,7 +146,7 @@ export LMSA_PASSWORD="your_password_here"
 EOF
 chmod 600 .env
 
-# Step 2: Source the env file and run
+# Step 3: Source the env file and run
 source .env
 python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
   --lmsa-email "$LMSA_EMAIL" \
@@ -160,13 +163,16 @@ python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
 
 **What happens:**
 1. The crawler fetches the OAuth login URL from `lsa.lenovo.com`
-2. Launches a headless browser to navigate to `passport.lenovo.com`
-3. Fills in your Lenovo ID credentials
-4. If a CAPTCHA appears → screenshots it → sends to GitHub Models GPT-4o vision API → fills in the solution
-5. Captures the WUST token from the redirect
-6. Exchanges WUST for a JWT at `lsa.lenovo.com`
-7. Uses the JWT to generate pre-signed S3 URLs for firmware downloads
-8. Crawls and downloads all discovered files
+2. Launches **Ulixee Hero** browser (Node.js-based, advanced Akamai bypass)
+3. Hero navigates to `passport.lenovo.com` with full TLS and browser fingerprinting evasion
+4. Fills in your Lenovo ID credentials using realistic timing patterns
+5. If a CAPTCHA appears → screenshots it → sends to GitHub Models GPT-4o vision API → fills in the solution
+6. Captures the WUST token from the redirect
+7. Exchanges WUST for a JWT at `lsa.lenovo.com`
+8. Uses the JWT to generate pre-signed S3 URLs for firmware downloads
+9. Crawls and downloads all discovered files
+
+**Fallback chain:** Hero → zendriver → Playwright → plain HTTP (automatic)
 
 ### Options
 
