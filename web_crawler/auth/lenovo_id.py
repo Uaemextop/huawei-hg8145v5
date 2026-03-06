@@ -500,8 +500,9 @@ class LenovoIDAuth:
         Hero validates Akamai's ``_abck`` cookie through real browser
         emulation but cannot submit the login form directly (Akamai
         blocks XHR/form POSTs with body data → 504).  This method
-        replays the Akamai-validated cookies via Python ``requests``
-        to complete the login server-side.
+        replays the Akamai-validated cookies via ``curl_cffi`` (Chrome
+        TLS impersonation) or ``requests`` to complete the login
+        server-side.
         """
         try:
             form_data = _json.loads(form_data_json)
@@ -524,8 +525,13 @@ class LenovoIDAuth:
         _log(f"[LenovoID] Cookies: {', '.join(cookie_dict.keys())}")
         _log(f"[LenovoID] Form fields: {', '.join(form_data.keys())}")
 
+        # Try curl_cffi first (Chrome TLS impersonation matches _abck
+        # cookie binding better than Python requests).
         try:
-            r = requests.post(
+            from curl_cffi import requests as cffi_requests
+
+            _log("[LenovoID] Using curl_cffi with Chrome impersonation")
+            r = cffi_requests.post(
                 form_action,
                 data=form_data,
                 cookies=cookie_dict,
@@ -542,21 +548,56 @@ class LenovoIDAuth:
                 allow_redirects=True,
                 timeout=30,
                 verify=self._verify_ssl,
+                impersonate="chrome",
             )
-        except requests.RequestException as exc:
-            _log(f"[LenovoID] Server-side POST failed: {exc}")
-            return None
+        except Exception as cffi_exc:
+            _log(f"[LenovoID] curl_cffi failed ({cffi_exc}), "
+                 "falling back to requests")
+            try:
+                r = requests.post(
+                    form_action,
+                    data=form_data,
+                    cookies=cookie_dict,
+                    headers={
+                        "User-Agent": _BROWSER_UA,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": (
+                            "text/html,application/xhtml+xml,application/xml;"
+                            "q=0.9,*/*;q=0.8"
+                        ),
+                        "Accept-Language": "es-419,es;q=0.9",
+                        "Referer": f"{PASSPORT_BASE}{_PRELOGIN_PATH}",
+                    },
+                    allow_redirects=True,
+                    timeout=30,
+                    verify=self._verify_ssl,
+                )
+            except requests.RequestException as exc:
+                _log(f"[LenovoID] Server-side POST failed: {exc}")
+                return None
 
         _log(f"[LenovoID] Server-side POST → HTTP {r.status_code}, "
-             f"URL: {r.url[:80]}")
+             f"URL: {str(r.url)[:80]}")
 
         # Check final URL for WUST (after redirects).
-        wust = _find_wust(r.url)
+        wust = _find_wust(str(r.url))
         if wust:
             return wust
 
-        # Check response body.
-        wust = _find_wust(r.text)
+        # Check response body for gateway variable with WUST.
+        body = r.text
+        import re as _re_mod
+        gw = _re_mod.search(
+            r"var\s+gateway\s*=\s*['\"]([^'\"]+)['\"]", body,
+        )
+        if gw:
+            gateway_url = gw.group(1).replace("\\/", "/")
+            _log(f"[LenovoID] Found gateway: {gateway_url[:100]}")
+            wust = _find_wust(gateway_url)
+            if wust:
+                return wust
+
+        wust = _find_wust(body)
         if wust:
             return wust
 
@@ -567,7 +608,7 @@ class LenovoIDAuth:
             return lpswust
 
         _log(f"[LenovoID] Server-side POST: no WUST found in response "
-             f"(body: {r.text[:200]})")
+             f"(body: {body[:200]})")
         return None
 
     # ------------------------------------------------------------------

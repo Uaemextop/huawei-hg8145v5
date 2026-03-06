@@ -83,6 +83,14 @@ async function main() {
     await hero.goto(loginUrl);
     await hero.waitForPaintingStable();
 
+    // Set AKA_A2=A cookie (from HAR: present on all requests in the real LMSA app).
+    // This cookie helps bypass some Akamai checks.
+    try {
+      await hero.activeTab.getJsValue(
+        "document.cookie = 'AKA_A2=A; path=/; domain=.passport.lenovo.com; secure'"
+      );
+    } catch {}
+
     // Let Akamai sensor and page JS initialise.
     await sleep(AKAMAI_SENSOR_INIT_MS);
 
@@ -349,20 +357,6 @@ async function main() {
     await sleep(3_000);
 
     // ---- Step 4: Execute login via XHR ----
-    // Strategy: Try TWO approaches:
-    //   A) XHR POST with params in BODY (like real form.submit) — works if _abck is validated
-    //   B) XHR POST with params in URL + empty body — Akamai bypass for non-validated _abck
-    // The real LMSA desktop app uses form.submit() which puts params in the body.
-    // From HAR: Content-Type: application/x-www-form-urlencoded
-    //
-    // HAR shows the real LMSA app sets AKA_A2=A cookie — this is an Akamai
-    // cookie that the original desktop app sets via proxy/config. Set it
-    // before submitting.
-    try {
-      await hero.activeTab.getJsValue(
-        "document.cookie = 'AKA_A2=A; path=/; domain=.passport.lenovo.com; secure'"
-      );
-    } catch {}
     log("Executing login via XHR…");
 
     const loginResult = await hero.activeTab.getJsValue(`(async () => {
@@ -440,27 +434,21 @@ async function main() {
           resp = { status: 0, body: '', method: 'body-failed' };
         }
 
-        // 5b. If body approach failed (504/0/error), try params in URL + empty body
+        // Even if we got 504, check if LPSWUST cookie was set
         if (resp.status !== 200) {
-          try {
-            const url = formUrl + '?' + bodyStr;
-            resp = await new Promise((resolve, reject) => {
-              const xhr = new XMLHttpRequest();
-              xhr.open('POST', url, true);
-              xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=utf-8');
-              xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-              xhr.timeout = 30000;
-              xhr.onload = () => resolve({
-                status: xhr.status,
-                body: xhr.responseText,
-                method: 'url-params',
-              });
-              xhr.onerror = () => reject(new Error('XHR-url error'));
-              xhr.ontimeout = () => reject(new Error('XHR-url timeout'));
-              xhr.send('');
+          const lpswust = document.cookie.match(/LPSWUST=([^;]+)/);
+          if (lpswust) {
+            return JSON.stringify({
+              step: 'cookie-wust',
+              status: resp.status,
+              method: resp.method,
+              bodyLen: 0,
+              gateway: null,
+              wust: lpswust[1],
+              bodySnippet: '',
+              gt: gt ? 'yes' : 'no',
+              bid: bid ? 'yes' : 'no',
             });
-          } catch(e) {
-            // Both approaches failed
           }
         }
 
