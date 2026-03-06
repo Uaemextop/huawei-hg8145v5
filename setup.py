@@ -14,6 +14,7 @@ setup(
         "beautifulsoup4>=4.12.0",
         "lxml>=5.0.0",
         "urllib3>=2.0.0",
+        "pycryptodome>=3.20.0",
     ],
     extras_require={
         "ui": [
@@ -41,6 +42,17 @@ setup(
         "captcha": [
             "flask>=3.0.0",
             "openai>=1.0.0",
+            # 2captcha cloud service — reCAPTCHA Enterprise v3 solving
+            "2captcha-python>=1.2.0",
+        ],
+        # Full install: pip install -e '.[all]'
+        # References sibling extras to avoid duplicating version specs.
+        "all": [
+            "web-crawler[ui]",
+            "web-crawler[ai]",
+            "web-crawler[zendriver]",
+            "web-crawler[edge]",
+            "web-crawler[captcha]",
         ],
     },
     entry_points={
