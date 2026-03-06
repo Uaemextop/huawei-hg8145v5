@@ -586,8 +586,7 @@ class LenovoIDAuth:
 
         # Check response body for gateway variable with WUST.
         body = r.text
-        import re as _re_mod
-        gw = _re_mod.search(
+        gw = re.search(
             r"var\s+gateway\s*=\s*['\"]([^'\"]+)['\"]", body,
         )
         if gw:

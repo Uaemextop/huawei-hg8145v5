@@ -44,13 +44,27 @@ const XHR_TIMEOUT_MS = 30_000;
 
 // Match WUST in both normal URLs and JS-escaped strings (e.g. https:\/\/ )
 const WUST_RE = /lenovoid[.\\/]+wust=([^&\s"'<>\\]+)/;
+// Match the gateway variable in the /userLogin response body
+const GATEWAY_RE = /var\s+gateway\s*=\s*['"]([^'"]+)['"]/;
+
+/** Unescape JS string forward-slash escapes (\/ → /) */
+function unescapeJS(s) {
+  return s ? s.replace(/\\\//g, "/") : s;
+}
 
 function findWust(text) {
   if (!text) return null;
-  // Also unescape JS string escapes before matching
-  const unescaped = text.replace(/\\\//g, "/");
+  const unescaped = unescapeJS(text);
   const m = WUST_RE.exec(unescaped);
   return m ? m[1] : null;
+}
+
+/** Extract WUST from a gateway variable in HTML. */
+function findGatewayWust(html) {
+  if (!html) return null;
+  const m = GATEWAY_RE.exec(html);
+  if (!m) return null;
+  return findWust(unescapeJS(m[1]));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -483,7 +497,7 @@ async function main() {
         xhrWust = xhrResult.wust;
         log(`✓ WUST extracted from XHR response body!`);
       } else if (xhrResult.gateway) {
-        const gatewayUrl = xhrResult.gateway.replace(/\\\//g, "/");
+        const gatewayUrl = unescapeJS(xhrResult.gateway);
         log(`Found gateway in XHR response: ${gatewayUrl.slice(0, 120)}`);
         xhrWust = findWust(gatewayUrl);
       }
@@ -492,15 +506,8 @@ async function main() {
       if (!xhrWust && xhrResult.bodySnippet) {
         xhrWust = findWust(xhrResult.bodySnippet);
         if (!xhrWust) {
-          // Look for gateway in the snippet
-          const gwMatch = xhrResult.bodySnippet.match(
-            /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
-          );
-          if (gwMatch) {
-            const url = gwMatch[1].replace(/\\\//g, "/");
-            log(`Found gateway in body snippet: ${url.slice(0, 120)}`);
-            xhrWust = findWust(url);
-          }
+          xhrWust = findGatewayWust(xhrResult.bodySnippet);
+          if (xhrWust) log(`Found gateway in body snippet`);
         }
       }
 
@@ -550,18 +557,11 @@ async function main() {
               );
               // Look for gateway variable pattern from HAR:
               //   var gateway = 'https:\/\/...?lenovoid.wust=TOKEN...'
-              const gatewayMatch = body.match(
-                /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
-              );
-              if (gatewayMatch) {
-                const gatewayUrl = gatewayMatch[1].replace(/\\\//g, "/");
-                log(`Found gateway variable: ${gatewayUrl.slice(0, 120)}`);
-                const w2 = findWust(gatewayUrl);
-                if (w2) {
-                  log("✓ WUST found in gateway variable!");
-                  wust = w2;
-                  break;
-                }
+              const w2 = findGatewayWust(body);
+              if (w2) {
+                log("✓ WUST found in gateway variable!");
+                wust = w2;
+                break;
               }
               // Also try direct WUST match in body
               const w3 = findWust(body);
@@ -610,14 +610,8 @@ async function main() {
           "document.documentElement?.outerHTML?.slice(0, 15000) || ''",
         );
         // First try the gateway variable pattern (from decompiled flow)
-        const gatewayMatch = body.match(
-          /var\s+gateway\s*=\s*['"]([^'"]+)['"]/
-        );
-        if (gatewayMatch) {
-          const gatewayUrl = gatewayMatch[1].replace(/\\\//g, "/");
-          log(`Found gateway: ${gatewayUrl.slice(0, 120)}`);
-          wust = findWust(gatewayUrl);
-        }
+        wust = findGatewayWust(body);
+        if (wust) log(`Found gateway in body`);
         // Fallback: direct WUST regex on body
         if (!wust) wust = findWust(body);
         // Fallback: any window.location redirect
@@ -626,7 +620,7 @@ async function main() {
             /(?:window\.location(?:\.href)?\s*=\s*["']|url=)(https?:\/\/[^"'<>\s;]+)/i
           );
           if (redirectMatch) {
-            const rUrl = redirectMatch[1].replace(/\\\//g, "/");
+            const rUrl = unescapeJS(redirectMatch[1]);
             log(`Found redirect in body: ${rUrl.slice(0, 120)}`);
             wust = findWust(rUrl);
             if (!wust) {
