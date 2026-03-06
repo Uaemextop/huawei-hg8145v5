@@ -521,7 +521,7 @@ class LenovoIDAuth:
                 return None
             finally:
                 try:
-                    browser.stop()
+                    await browser.stop()
                 except Exception:
                     pass
 
