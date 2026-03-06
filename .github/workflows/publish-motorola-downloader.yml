@@ -1,6 +1,16 @@
 name: Publish Motorola Downloader
 
 on:
+  pull_request: 
+   branches: 
+     - "master"
+     - "main"
+     - 'copilot/**'
+  push:
+    branches: 
+     - "master"
+     - "main"
+     - 'copilot/**'
   workflow_dispatch:
     inputs:
       repo_visibility:
