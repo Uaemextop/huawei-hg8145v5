@@ -1041,6 +1041,146 @@ def get_types():
         'types': get_captcha_types()
     })
 
+
+# ---------------------------------------------------------------------------
+# AI-powered CAPTCHA solver endpoints
+# ---------------------------------------------------------------------------
+
+def _get_solver():
+    """Lazily initialise and return a CaptchaSolver instance.
+
+    The solver requires a GitHub token which is read from the environment
+    variables ``GITHUB_TOKEN`` or ``AI_TOKEN``.
+    """
+    if not hasattr(app, '_captcha_solver') or app._captcha_solver is None:
+        try:
+            from open_captcha_world.solver import CaptchaSolver
+            model = os.environ.get("AI_MODEL", "openai/gpt-4o")
+            app._captcha_solver = CaptchaSolver(model=model)
+        except Exception as exc:
+            app._captcha_solver = None
+            print(f"[solver] Init failed: {exc}")
+    return app._captcha_solver
+
+
+@app.route('/api/solve', methods=['POST'])
+def solve_puzzle():
+    """Solve a single CAPTCHA puzzle using GitHub Models AI.
+
+    Request JSON
+    -------------
+    - ``puzzle_type`` (str): CAPTCHA type, e.g. ``"Dice_Count"``.
+    - ``puzzle_id`` (str): Puzzle filename from ground truth.
+    - ``image_base64`` (str, optional): Base64-encoded image data.
+      If omitted the server loads the image from ``captcha_data/``.
+    - ``prompt`` (str, optional): Puzzle-specific prompt override.
+
+    Response JSON
+    -------------
+    ``{"success": true, "answer": ..., "raw": "..."}`` on success.
+    ``{"success": false, "error": "..."}`` on failure.
+    """
+    solver = _get_solver()
+    if solver is None:
+        return jsonify({
+            'success': False,
+            'error': 'AI solver not available. Set GITHUB_TOKEN or AI_TOKEN.',
+        }), 503
+
+    data = request.json or {}
+    puzzle_type = data.get('puzzle_type', '')
+    puzzle_id = data.get('puzzle_id', '')
+    image_b64 = data.get('image_base64', '')
+    prompt = data.get('prompt', '')
+
+    if not puzzle_type:
+        return jsonify({'success': False, 'error': 'Missing puzzle_type'}), 400
+
+    # If no image provided, try to load from captcha_data
+    if not image_b64 and puzzle_id:
+        img_path = os.path.join(BASE_DIR, 'captcha_data', puzzle_type, puzzle_id)
+        if os.path.isfile(img_path):
+            import base64 as _b64
+            with open(img_path, 'rb') as f:
+                image_b64 = _b64.b64encode(f.read()).decode('ascii')
+
+    if not image_b64:
+        return jsonify({
+            'success': False,
+            'error': 'No image provided and puzzle image not found on server.',
+        }), 400
+
+    # Load prompt from ground truth if not provided
+    if not prompt and puzzle_id:
+        gt = load_ground_truth(puzzle_type)
+        if gt and puzzle_id in gt:
+            prompt = gt[puzzle_id].get('prompt', '')
+
+    result = solver.solve(puzzle_type, image_b64, prompt)
+    return jsonify(result)
+
+
+@app.route('/api/solve_and_check', methods=['POST'])
+def solve_and_check():
+    """Solve a puzzle with AI and automatically check it against ground truth.
+
+    Request JSON
+    -------------
+    - ``puzzle_type`` (str): CAPTCHA type.
+    - ``puzzle_id`` (str): Puzzle filename.
+    - ``image_base64`` (str, optional): Image data.
+
+    Response JSON
+    -------------
+    ``{"ai_answer": ..., "correct_answer": ..., "is_correct": bool, ...}``
+    """
+    solver = _get_solver()
+    if solver is None:
+        return jsonify({
+            'success': False,
+            'error': 'AI solver not available. Set GITHUB_TOKEN or AI_TOKEN.',
+        }), 503
+
+    data = request.json or {}
+    puzzle_type = data.get('puzzle_type', '')
+    puzzle_id = data.get('puzzle_id', '')
+    image_b64 = data.get('image_base64', '')
+
+    if not puzzle_type or not puzzle_id:
+        return jsonify({'success': False, 'error': 'Missing puzzle_type or puzzle_id'}), 400
+
+    # Load image if needed
+    if not image_b64:
+        img_path = os.path.join(BASE_DIR, 'captcha_data', puzzle_type, puzzle_id)
+        if os.path.isfile(img_path):
+            import base64 as _b64
+            with open(img_path, 'rb') as f:
+                image_b64 = _b64.b64encode(f.read()).decode('ascii')
+
+    if not image_b64:
+        return jsonify({'success': False, 'error': 'Image not found'}), 400
+
+    # Get ground truth
+    gt = load_ground_truth(puzzle_type)
+    if not gt or puzzle_id not in gt:
+        return jsonify({'success': False, 'error': 'Ground truth not found'}), 404
+
+    prompt = gt[puzzle_id].get('prompt', '')
+    correct = gt[puzzle_id]
+
+    # Solve with AI
+    result = solver.solve(puzzle_type, image_b64, prompt)
+
+    return jsonify({
+        'success': result.get('success', False),
+        'ai_answer': result.get('answer'),
+        'ai_raw': result.get('raw', ''),
+        'correct_answer': correct,
+        'puzzle_type': puzzle_type,
+        'puzzle_id': puzzle_id,
+    })
+
+
 if __name__ == '__main__':
     # For local development
     if os.environ.get('DEVELOPMENT'):
