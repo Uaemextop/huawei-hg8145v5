@@ -32,7 +32,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      TARGET_REPO: motorola-firmware-downloader
+      TARGET_REPO: motorola-firmware
 
     steps:
       - name: Checkout source repository
