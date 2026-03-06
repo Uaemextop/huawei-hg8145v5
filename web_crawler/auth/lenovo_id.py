@@ -481,7 +481,7 @@ class LenovoIDAuth:
                     )) or ""
 
                     await page.evaluate(
-                        """(args => {
+                        """(args) => {
                         const f = document.querySelector('.loginClass2 form');
                         if (!f) return;
                         f.querySelectorAll('input[name="username"]')
@@ -500,8 +500,8 @@ class LenovoIDAuth:
                         }
                         g.value = args[2];
                         f.submit();
-                        })"""
-                        + f"(['{email}', '{hashed}', '{gt}'])"
+                        }""",
+                        [email, hashed, gt],
                     )
                     await asyncio.sleep(10)
 
