@@ -167,7 +167,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
+          # curl_cffi – TLS fingerprint spoofing for Cloudflare / Akamai bypass
           pip install curl_cffi
           # Playwright – headless browser for OAuth/CAPTCHA flows
           pip install playwright
@@ -180,6 +180,16 @@ jobs:
           pip install flask
           # Git LFS – for large binary firmware files
           git lfs install
+
+      - name: Set up Node.js for Hero (Akamai bypass)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Hero npm dependencies
+        run: |
+          cd web_crawler/auth
+          npm install
 
       - name: Generate normalized repo name
         id: reponame

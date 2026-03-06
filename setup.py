@@ -10,6 +10,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "requests>=2.31.0",
+        "curl-cffi>=0.7.0",
         "beautifulsoup4>=4.12.0",
         "lxml>=5.0.0",
         "urllib3>=2.0.0",

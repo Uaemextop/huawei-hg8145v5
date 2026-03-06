@@ -48,6 +48,18 @@ from urllib.parse import urljoin
 
 import requests
 
+# curl_cffi – TLS fingerprint impersonation (bypasses Akamai TLS-layer block).
+# Standard ``requests`` exposes Python/urllib3 TLS fingerprints that Akamai
+# detects and blocks with a TLS reset.  curl_cffi's ``impersonate`` option
+# replaces the TLS handshake with an exact copy of Chrome's, which Akamai
+# accepts without any JS challenge.  This is the lightest-weight Akamai bypass
+# available (no browser needed).
+try:
+    from curl_cffi import requests as _cffi_requests  # type: ignore[import]
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    _CURL_CFFI_AVAILABLE = False
+
 from web_crawler.auth.lmsa import (
     LMSASession,
     LMSA_BASE_URL,
@@ -330,15 +342,22 @@ class LenovoIDAuth:
         """Run the Lenovo ID login form flow and return the WUST token.
 
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
-        then tries browser automation backends in order of Akamai bypass
-        effectiveness:
-        1. **Hero** (ulixee/Hero Node.js — Human Emulator + proprietary CDP
+        then tries backends in order of Akamai bypass effectiveness:
+        1. **curl_cffi** (Chrome TLS impersonation — lightest, bypasses Akamai
+           TLS fingerprint check; no browser needed).
+        2. **Hero** (ulixee/Hero Node.js — Human Emulator + proprietary CDP
            tunnel, best Akamai bypass rate; no WebDriver fingerprint).
-        2. **zendriver** (Python CDP-based, very good Akamai bypass).
-        3. **Playwright** (traditional, with stealth patches).
-        4. **Plain HTTP** requests (no Akamai bypass).
+        3. **zendriver** (Python CDP-based, very good Akamai bypass).
+        4. **Playwright** (traditional, with stealth patches).
+        5. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _CURL_CFFI_AVAILABLE:
+            wust = self._obtain_wust_curl_cffi(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] curl_cffi login failed – trying Hero fallback")
 
         if _HERO_AVAILABLE:
             wust = self._obtain_wust_hero(email, password, login_url)
@@ -361,8 +380,239 @@ class LenovoIDAuth:
         return self._obtain_wust_requests(email, password, login_url)
 
     # ------------------------------------------------------------------
-    # Hero (ulixee/Hero Node.js) browser backend
+    # curl_cffi Chrome-impersonation backend (primary — lightest-weight
+    # Akamai bypass)
     # ------------------------------------------------------------------
+
+    def _obtain_wust_curl_cffi(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use curl_cffi (Chrome TLS impersonation) to complete Lenovo ID OAuth.
+
+        curl_cffi replaces Python/urllib3's TLS fingerprint with an exact copy
+        of Chrome's JA3/JA4 fingerprint.  Akamai Bot Manager uses TLS
+        fingerprinting as the *first* layer of its bot detection stack; a
+        matching Chrome fingerprint passes this layer without any JS challenge,
+        allowing the full ``preLogin → ajaxUserRoam → userLogin`` flow to
+        complete over plain HTTPS.
+
+        HAR analysis (HTTPToolkit_2026-03-03_18-12.har) confirmed the exact
+        request structure:
+
+        1. GET preLogin  → JSESSIONID, lenovoid.webLoginSignkey, bm_sz cookies.
+        2. POST ajaxUserRoam  → {"resultCode": 0}  (roaming account registration).
+        3. POST /userLogin with double-MD5 password hash, lenovoid.lang=en_US.
+           Response: 200 HTML with::
+
+               var gateway = 'https://lsa.lenovo.com/.../lenovoIdSuccess.html
+                              ?lenovoid.wust=TOKEN';
+               window.location.href = gateway;
+
+        The WUST is extracted from ``var gateway`` before any redirect occurs.
+        """
+        _log("[LenovoID] Trying curl_cffi (Chrome TLS impersonation) login…")
+
+        # Use exact headers from the real browser session (HAR-verified).
+        _CHROME_UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+        _LANG = "es-419,es;q=0.9,es-ES;q=0.8,en;q=0.7,en-GB;q=0.6,en-US;q=0.5"
+
+        try:
+            sess = _cffi_requests.Session(impersonate="chrome120")
+            sess.headers.update({
+                "User-Agent": _CHROME_UA,
+                "Accept-Language": _LANG,
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "sec-ch-ua": (
+                    '"Not_A Brand";v="8", "Chromium";v="120", '
+                    '"Google Chrome";v="120"'
+                ),
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            })
+
+            # ── Step 1: GET preLogin ──────────────────────────────────────
+            _log("[LenovoID] curl_cffi: GET preLogin…")
+            r_pre = sess.get(
+                login_url,
+                headers={
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;"
+                        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+                    ),
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-User": "?1",
+                    "Sec-Fetch-Dest": "document",
+                },
+                timeout=30,
+                allow_redirects=True,
+            )
+            _log(f"[LenovoID] curl_cffi: preLogin HTTP {r_pre.status_code}")
+            if r_pre.status_code not in (200, 302):
+                _log(
+                    f"[LenovoID] curl_cffi: unexpected preLogin status "
+                    f"{r_pre.status_code}"
+                )
+                return None
+
+            # Inject AKA_A2=A — Akamai Bot Manager "certified browser" flag.
+            # HAR analysis confirmed every successful request to
+            # passport.lenovo.com carries this cookie.  It is set by Akamai
+            # after the browser has been validated by the JS challenge in a
+            # prior session.  Without it, /userLogin returns HTTP/2
+            # INTERNAL_ERROR (Akamai RST_STREAM on form POSTs).
+            sess.cookies.set("AKA_A2", "A", domain="passport.lenovo.com")
+
+            # ── Step 2: POST ajaxUserRoam (roaming account pre-registration) ──
+            # HAR confirmed: for eduardo@uaemex.top (roaming account),
+            # ajaxUserExistedServlet → 400 (normal), then ajaxUserRoam must
+            # return {"resultCode": 0} before /userLogin will authenticate.
+            from urllib.parse import quote as _quote, urlparse as _urlparse
+            import re as _re
+
+            parsed = _urlparse(login_url)
+            cb_match = _re.search(r'lenovoid\.cb=([^&]+)', login_url)
+            cb_url = cb_match.group(1) if cb_match else _LMSA_CB_URL
+            lang_match = _re.search(r'lenovoid\.lang=([^&]+)', login_url)
+            lang = lang_match.group(1) if lang_match else "en_US"
+
+            _AJAX_HDRS = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+                "Content-Length": "0",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": "https://passport.lenovo.com",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "Referer": login_url,
+            }
+            roam_url = (
+                f"{PASSPORT_BASE}/glbwebauthnv6/ajaxUserRoam"
+                f"?username={_quote(email)}&areacode="
+            )
+            r_roam = sess.post(
+                roam_url, data="", headers=_AJAX_HDRS, timeout=20,
+            )
+            _log(
+                f"[LenovoID] curl_cffi: ajaxUserRoam HTTP {r_roam.status_code} "
+                f"body={r_roam.text[:80]}"
+            )
+
+            # ── Step 3: POST /userLogin ────────────────────────────────────
+            # Exact form body from HAR; lenovoid.lang MUST be en_US.
+            hashed = _hash_password(password)
+            post_data = {
+                "lenovoid.action":     "uilogin",
+                "lenovoid.realm":      _LMSA_REALM,
+                "lenovoid.ctx":        "null",
+                "lenovoid.lang":       "en_US",
+                "lenovoid.uinfo":      "null",
+                "lenovoid.cb":         cb_url,
+                "lenovoid.vb":         "null",
+                "lenovoid.display":    "null",
+                "lenovoid.idp":        "null",
+                "lenovoid.source":     _LMSA_REALM,
+                "lenovoid.sdk":        "null",
+                "lenovoid.prompt":     "null",
+                "bid":                 "",
+                "gt":                  "",
+                "password":            hashed,
+                "lenovoid.hidesocial": "null",
+                "crossRealmDomains":   "null",
+                "path":                "/glbwebauthnv6",
+                "areacode":            "",
+                "username":            email,
+                "loginfinish":         "1",
+                "autoLoginState":      "1",
+            }
+            _log("[LenovoID] curl_cffi: POST /userLogin…")
+            r_login = sess.post(
+                f"{PASSPORT_BASE}/glbwebauthnv6/userLogin",
+                data=post_data,
+                headers={
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;"
+                        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+                    ),
+                    "Cache-Control": "max-age=0",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-User": "?1",
+                    "Sec-Fetch-Dest": "document",
+                    "Origin": "https://passport.lenovo.com",
+                    "Referer": login_url,
+                },
+                timeout=60,
+                allow_redirects=True,
+            )
+            _log(
+                f"[LenovoID] curl_cffi: /userLogin HTTP {r_login.status_code} "
+                f"final_url={r_login.url[:80]}"
+            )
+
+            # ── Step 4: Extract WUST ─────────────────────────────────────
+            # (a) WUST in final redirect URL (ideal path).
+            wust = _find_wust(r_login.url)
+            if wust:
+                _log("[LenovoID] ✓ WUST found in redirect URL")
+                return wust
+
+            # (b) WUST in ``var gateway = '...?lenovoid.wust=TOKEN'`` JS.
+            # HAR shows POST /userLogin returns 200 with HTML body containing:
+            #   var gateway = 'https://lsa.lenovo.com/.../lenovoIdSuccess.html
+            #                  ?lenovoid.wust=TOKEN';
+            #   window.location.href = gateway;
+            gw_m = _re.search(r"var\s+gateway\s*=\s*'([^']+)'", r_login.text)
+            if gw_m:
+                gw_url = gw_m.group(1).replace("\\/", "/")
+                _log(f"[LenovoID] curl_cffi: gateway URL={gw_url[:120]}")
+                wust = _find_wust(gw_url)
+                if wust:
+                    _log("[LenovoID] ✓ WUST extracted from gateway JS variable")
+                    return wust
+
+            # (c) WUST anywhere in response body (fallback regex scan).
+            wust = _find_wust(r_login.text)
+            if wust:
+                _log("[LenovoID] ✓ WUST found in response body")
+                return wust
+
+            # Diagnose failure.
+            if r_login.status_code == 504:
+                _log(
+                    "[LenovoID] curl_cffi: 504 from /userLogin — "
+                    "Akamai TLS fingerprint not accepted (try Hero backend)"
+                )
+            elif "incorrect" in r_login.text.lower() or "invalid" in r_login.text.lower():
+                _log("[LenovoID] curl_cffi: invalid credentials")
+            else:
+                _log(
+                    f"[LenovoID] curl_cffi: no WUST in response "
+                    f"(HTTP {r_login.status_code})"
+                )
+            return None
+
+        except Exception as exc:
+            # curl_cffi raises CurlError (a subclass of RequestsError) for
+            # curl errors.  HTTP/2 INTERNAL_ERROR (curl code 92) means Akamai
+            # RST the stream — the session needs more trust signals (AKA_A2).
+            msg = str(exc)
+            if "92" in msg or "INTERNAL_ERROR" in msg:
+                _log(
+                    "[LenovoID] curl_cffi: Akamai HTTP/2 RST_STREAM on "
+                    "/userLogin — session needs AKA_A2 cookie trust signal"
+                )
+            else:
+                _log(f"[LenovoID] curl_cffi: exception: {exc}")
+            return None
 
     def _obtain_wust_hero(
         self, email: str, password: str, login_url: str,
