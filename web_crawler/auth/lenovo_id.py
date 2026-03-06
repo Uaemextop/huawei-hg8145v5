@@ -307,7 +307,19 @@ class LenovoIDAuth:
             )
             return None
 
-        wust = self._obtain_wust(email, password)
+        # Try Hero first — it may return JWT+GUID directly, skipping the
+        # separate WUST→JWT exchange step.
+        if _HERO_AVAILABLE:
+            hero_result = self._obtain_wust_hero(email, password,
+                                                 self._get_login_url())
+            if isinstance(hero_result, LMSASession):
+                return hero_result
+            if isinstance(hero_result, str):
+                # Got a WUST only — exchange it for JWT.
+                return self._exchange_wust_for_jwt(hero_result)
+            _log("[LenovoID] Hero login failed – trying other backends")
+
+        wust = self._obtain_wust(email, password, skip_hero=True)
         if not wust:
             return None
 
@@ -325,7 +337,8 @@ class LenovoIDAuth:
     # Step 1+2: Lenovo ID OAuth → WUST token
     # ------------------------------------------------------------------
 
-    def _obtain_wust(self, email: str, password: str) -> Optional[str]:
+    def _obtain_wust(self, email: str, password: str,
+                     skip_hero: bool = False) -> Optional[str]:
         """Run the Lenovo ID login form flow and return the WUST token.
 
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
@@ -340,11 +353,16 @@ class LenovoIDAuth:
         """
         login_url = self._get_login_url()
 
-        if _HERO_AVAILABLE:
-            wust = self._obtain_wust_hero(email, password, login_url)
-            if wust:
-                return wust
-            _log("[LenovoID] Hero login failed – trying zendriver fallback")
+        if not skip_hero and _HERO_AVAILABLE:
+            result = self._obtain_wust_hero(email, password, login_url)
+            if isinstance(result, str):
+                return result
+            if isinstance(result, LMSASession):
+                # Caller expects a WUST string; log that we got a session
+                _log("[LenovoID] Hero returned full session — "
+                     "use login() for full JWT flow")
+            if result is None:
+                _log("[LenovoID] Hero login failed – trying zendriver fallback")
 
         if _ZENDRIVER_AVAILABLE:
             wust = self._obtain_wust_zendriver(email, password, login_url)
@@ -366,7 +384,7 @@ class LenovoIDAuth:
 
     def _obtain_wust_hero(
         self, email: str, password: str, login_url: str,
-    ) -> Optional[str]:
+    ):
         """Use Ulixee Hero to complete the Lenovo ID OAuth.
 
         Hero is a Node.js headless browser built specifically for web
@@ -377,8 +395,19 @@ class LenovoIDAuth:
 
         The login flow is delegated to ``hero_login.mjs`` (a Node.js
         script shipped alongside this module).  Communication happens
-        via stdout/stderr: a successful login prints ``WUST=<token>``
-        to stdout.
+        via stdout/stderr.  On success the script prints::
+
+            WUST=<token>
+            JWT=<token>              (optional — if lenovoIdLogin succeeded)
+            GUID=<uuid>              (optional — only when JWT is present)
+            FORM_DATA={...}          (JSON form fields for server-side POST)
+            COOKIES=<cookie-string>  (browser cookies for replay)
+            FORM_ACTION=<url>        (form action URL)
+
+        Returns:
+            - An :class:`LMSASession` if JWT+GUID were obtained.
+            - A WUST ``str`` if only the WUST was obtained.
+            - ``None`` on failure.
 
         Requires ``node`` on PATH and ``@ulixee/hero-playground``
         installed (``npm i @ulixee/hero-playground`` in the package
@@ -394,33 +423,151 @@ class LenovoIDAuth:
                 input=stdin_data,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=180,
                 cwd=str(_HERO_SCRIPT.parent),
             )
         except FileNotFoundError:
             _log("[LenovoID] Hero: 'node' not found on PATH")
             return None
         except subprocess.TimeoutExpired:
-            _log("[LenovoID] Hero: subprocess timed out (120 s)")
+            _log("[LenovoID] Hero: subprocess timed out (180 s)")
             return None
 
         # Forward Hero diagnostic output to our log.
         for line in (result.stderr or "").splitlines():
             _log(f"  {line}")
 
-        if result.returncode != 0:
-            _log(f"[LenovoID] Hero: exited with code {result.returncode}")
-            return None
-
-        # Parse stdout for WUST=<token>.
+        # Parse stdout for all output tokens.
+        wust = ""
+        jwt = ""
+        guid = ""
+        form_data_raw = ""
+        cookies_raw = ""
+        form_action = ""
         for line in (result.stdout or "").splitlines():
             if line.startswith("WUST="):
                 wust = line[5:].strip()
-                if wust:
-                    _log("[LenovoID] ✓ WUST obtained via Ulixee Hero")
-                    return wust
+            elif line.startswith("JWT="):
+                jwt = line[4:].strip()
+            elif line.startswith("GUID="):
+                guid = line[5:].strip()
+            elif line.startswith("FORM_DATA="):
+                form_data_raw = line[10:].strip()
+            elif line.startswith("COOKIES="):
+                cookies_raw = line[8:].strip()
+            elif line.startswith("FORM_ACTION="):
+                form_action = line[12:].strip()
 
-        _log("[LenovoID] Hero: no WUST in stdout")
+        # If Hero obtained a WUST directly (form.submit() worked):
+        if wust:
+            _log("[LenovoID] ✓ WUST obtained via Ulixee Hero")
+            if jwt and guid:
+                _log(f"[LenovoID] ✓ JWT+GUID obtained via Hero "
+                     f"(GUID: {guid[:8]}…)")
+                session = LMSASession(
+                    base_url=self._lmsa_base,
+                    guid=guid,
+                )
+                session._jwt_token = jwt
+                session._session.headers["Authorization"] = f"Bearer {jwt}"
+                _log("[LenovoID] ✓ Full LMSASession built from Hero output")
+                return session
+            return wust
+
+        # If Hero extracted session data, try server-side login POST.
+        if form_data_raw and cookies_raw:
+            _log("[LenovoID] Hero provided session data — attempting "
+                 "server-side login POST…")
+            wust = self._hero_server_side_login(
+                form_data_raw, cookies_raw, form_action,
+            )
+            if wust:
+                _log("[LenovoID] ✓ WUST obtained via Hero + server-side POST")
+                return wust
+
+        if result.returncode != 0:
+            _log(f"[LenovoID] Hero: exited with code {result.returncode}")
+        else:
+            _log("[LenovoID] Hero: no WUST obtained")
+        return None
+
+    def _hero_server_side_login(
+        self, form_data_json: str, cookies_str: str, form_action: str,
+    ) -> Optional[str]:
+        """Submit the Lenovo ID login form from Python using cookies
+        extracted from Hero's browser session.
+
+        Hero validates Akamai's ``_abck`` cookie through real browser
+        emulation but cannot submit the login form directly (Akamai
+        blocks XHR/form POSTs with body data → 504).  This method
+        replays the Akamai-validated cookies via Python ``requests``
+        to complete the login server-side.
+        """
+        try:
+            form_data = _json.loads(form_data_json)
+        except (ValueError, TypeError) as exc:
+            _log(f"[LenovoID] Hero form data parse error: {exc}")
+            return None
+
+        if not form_action:
+            form_action = f"{PASSPORT_BASE}{_USERLOGIN_PATH}"
+
+        # Build cookie dict from "key=value; key2=value2" string.
+        cookie_dict: dict[str, str] = {}
+        for pair in cookies_str.split(";"):
+            pair = pair.strip()
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                cookie_dict[k.strip()] = v.strip()
+
+        _log(f"[LenovoID] Server-side POST to {form_action[:80]}")
+        _log(f"[LenovoID] Cookies: {', '.join(cookie_dict.keys())}")
+        _log(f"[LenovoID] Form fields: {', '.join(form_data.keys())}")
+
+        try:
+            r = requests.post(
+                form_action,
+                data=form_data,
+                cookies=cookie_dict,
+                headers={
+                    "User-Agent": _BROWSER_UA,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;"
+                        "q=0.9,*/*;q=0.8"
+                    ),
+                    "Accept-Language": "es-419,es;q=0.9",
+                    "Referer": f"{PASSPORT_BASE}{_PRELOGIN_PATH}",
+                },
+                allow_redirects=True,
+                timeout=30,
+                verify=self._verify_ssl,
+            )
+        except requests.RequestException as exc:
+            _log(f"[LenovoID] Server-side POST failed: {exc}")
+            return None
+
+        _log(f"[LenovoID] Server-side POST → HTTP {r.status_code}, "
+             f"URL: {r.url[:80]}")
+
+        # Check final URL for WUST (after redirects).
+        wust = _find_wust(r.url)
+        if wust:
+            return wust
+
+        # Check response body.
+        wust = _find_wust(r.text)
+        if wust:
+            return wust
+
+        # Check cookies for LPSWUST.
+        lpswust = r.cookies.get("LPSWUST")
+        if lpswust:
+            _log(f"[LenovoID] Found LPSWUST cookie: {lpswust[:30]}…")
+            return lpswust
+
+        _log(f"[LenovoID] Server-side POST: no WUST found in response "
+             f"(body: {r.text[:200]})")
         return None
 
     # ------------------------------------------------------------------

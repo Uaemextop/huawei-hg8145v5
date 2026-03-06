@@ -11,15 +11,17 @@
  * Credentials are received via stdin (one value per line) to avoid
  * exposing them in process listings.
  *
- * On success prints to stdout:
+ * On success prints to stdout (one per line):
  *   WUST=<token>
+ *   JWT=<token>           (if available from lenovoIdLogin.jhtml)
+ *   GUID=<uuid>           (if available)
  *
  * On failure exits with code 1 and prints diagnostics to stderr.
  */
 
 import Hero from "@ulixee/hero-playground";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 // Read credentials from stdin (piped by the parent Python process).
 const stdinData = readFileSync(0, "utf8").trim();
@@ -40,7 +42,7 @@ const AKAMAI_SENSOR_INIT_MS = 8_000;
 // Timeout for the login XHR POST request.
 const XHR_TIMEOUT_MS = 30_000;
 
-const WUST_RE = /lenovoid\.wust=([^&\s"']+)/;
+const WUST_RE = /lenovoid\.wust=([^&\s"'<>]+)/;
 
 function findWust(text) {
   const m = WUST_RE.exec(text || "");
@@ -49,6 +51,20 @@ function findWust(text) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (msg) => process.stderr.write(`[Hero] ${msg}\n`);
+
+// Screenshot helper — saves a PNG to /tmp/ for debugging.
+let screenshotIdx = 0;
+async function takeScreenshot(hero, label) {
+  try {
+    // Hero screenshot returns a Buffer
+    const buf = await hero.activeTab.takeScreenshot();
+    const filename = `/tmp/hero_${++screenshotIdx}_${label.replace(/[^a-zA-Z0-9]/g, '_')}.png`;
+    writeFileSync(filename, buf);
+    log(`Screenshot saved: ${filename}`);
+  } catch (e) {
+    log(`Screenshot failed (${label}): ${e.message}`);
+  }
+}
 
 async function main() {
   const hero = new Hero({
@@ -173,12 +189,17 @@ async function main() {
           // initViewId=2, show loginClass2, hide siblings, fill email.
           const lc2 = document.querySelector('.loginClass2');
           if (lc2) {
-            lc2.style.display = '';
+            // Use cssText to force display with !important to override CSS rules
+            lc2.style.cssText = 'display: block !important; visibility: visible !important;';
+            // Also add a style tag to override any CSS rules
+            const style = document.createElement('style');
+            style.textContent = '.loginClass2 { display: block !important; visibility: visible !important; }';
+            document.head.appendChild(style);
             // Hide all sibling loginClass* divs
             const parent = lc2.parentElement;
             if (parent) {
               parent.querySelectorAll('[class*="loginClass"]').forEach(el => {
-                if (el !== lc2) el.style.display = 'none';
+                if (el !== lc2) el.style.cssText = 'display: none !important;';
               });
             }
           }
@@ -203,18 +224,68 @@ async function main() {
     // ---- Step 3: Fill password ----
     log("Filling password");
 
+    // Take screenshot BEFORE trying to fill password — shows actual page state
+    await takeScreenshot(hero, "before_password");
+
+    // Diagnose password field state
+    const pwDiag = await hero.activeTab.getJsValue(`(() => {
+      const el = document.querySelector('#emailOrPhonePswInput');
+      if (!el) return 'NOT_FOUND';
+      const rect = el.getBoundingClientRect();
+      const cs = window.getComputedStyle(el);
+      return JSON.stringify({
+        tagName: el.tagName,
+        type: el.type,
+        id: el.id,
+        display: cs.display,
+        visibility: cs.visibility,
+        opacity: cs.opacity,
+        width: rect.width,
+        height: rect.height,
+        top: rect.top,
+        left: rect.left,
+        disabled: el.disabled,
+        readonly: el.readOnly,
+        offsetParent: el.offsetParent ? el.offsetParent.tagName : null,
+        parentDisplay: el.parentElement ? window.getComputedStyle(el.parentElement).display : null,
+      });
+    })()`);
+    log(`Password field diagnostics: ${pwDiag}`);
+
+    // Also check if loginClass2 is visible
+    const lc2Diag = await hero.activeTab.getJsValue(`(() => {
+      const lc2 = document.querySelector('.loginClass2');
+      if (!lc2) return 'NOT_FOUND';
+      const cs = window.getComputedStyle(lc2);
+      return JSON.stringify({
+        display: cs.display,
+        visibility: cs.visibility,
+        offsetHeight: lc2.offsetHeight,
+        children: lc2.children.length,
+      });
+    })()`);
+    log(`loginClass2 diagnostics: ${lc2Diag}`);
+
     // Ensure the password input is visible and enabled.
     await hero.activeTab.getJsValue(`(() => {
+      // Inject global CSS to force loginClass2 and password field visible
+      const style = document.createElement('style');
+      style.textContent = \`
+        .loginClass2 { display: block !important; visibility: visible !important; height: auto !important; overflow: visible !important; }
+        .loginClass2 * { visibility: visible !important; }
+        #emailOrPhonePswInput { display: block !important; visibility: visible !important; width: 100% !important; height: 40px !important; opacity: 1 !important; }
+      \`;
+      document.head.appendChild(style);
+
       const el = document.querySelector('#emailOrPhonePswInput');
       if (el) {
-        el.style.display = '';
-        el.style.visibility = 'visible';
+        el.style.cssText = 'display: block !important; visibility: visible !important; width: 300px !important; height: 40px !important; opacity: 1 !important;';
         el.removeAttribute('disabled');
         el.removeAttribute('readonly');
         // Make sure its parent containers are visible too
         let p = el.parentElement;
-        while (p) {
-          if (p.style) { p.style.display = ''; p.style.visibility = 'visible'; }
+        while (p && p !== document.body) {
+          p.style.cssText += '; display: block !important; visibility: visible !important; height: auto !important; overflow: visible !important;';
           p = p.parentElement;
         }
       }
@@ -222,15 +293,16 @@ async function main() {
     await sleep(1_000);
 
     // Try native Hero interaction first; fall back to JS value-setting.
-    let pwFilled = false;
     try {
       const pwInput = hero.document.querySelector("#emailOrPhonePswInput");
       await hero.interact({ click: pwInput });
       await hero.interact({ type: password });
-      pwFilled = true;
       log("Password filled via Hero interaction");
-    } catch {
-      log("Hero click failed on password field — setting value via JS");
+      await takeScreenshot(hero, "after_password_hero");
+    } catch (pwErr) {
+      log(`Hero click failed on password field: ${pwErr.message}`);
+      await takeScreenshot(hero, "password_click_failed");
+      log("Setting value via JS fallback");
       await hero.activeTab.getJsValue(`(() => {
         const el = document.querySelector('#emailOrPhonePswInput');
         if (el) {
@@ -241,125 +313,167 @@ async function main() {
           el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
         }
       })()`);
-      pwFilled = true;
+      // Verify the value was set
+      const pwVal = await hero.activeTab.getJsValue(`(() => {
+        const el = document.querySelector('#emailOrPhonePswInput');
+        return el ? el.value.length : -1;
+      })()`);
+      log(`Password field value length after JS set: ${pwVal}`);
+      await takeScreenshot(hero, "after_password_js");
       log("Password set via JS");
     }
     await sleep(2_000);
 
-    // ---- Step 4: Submit login via XHR ----
-    // The page's own nextHandler() is scoped inside a jQuery ready
-    // callback and not globally accessible.  We replicate its logic:
-    // double-MD5 hash the password, obtain reCAPTCHA token (GT) and
-    // Fingerprint2 bid, then POST via XMLHttpRequest (not form.submit)
-    // with the X-Requested-With header that marks it as AJAX — Akamai
-    // treats XHR requests differently from navigation form POSTs.
-    log("Preparing login submission via XHR…");
+    // ---- Step 4: Click the "Next" button to trigger native login ----
+    // The page's own nextHandler() (in login.js) handles everything:
+    // MD5 hashing, reCAPTCHA token, Fingerprint2 bid, and form.submit().
+    // This is the correct flow — the page JS submits the form natively.
+    log("Clicking Next button in loginClass2…");
 
-    const submitResult = await hero.activeTab.getJsValue(`(async () => {
-      // Double-MD5 hash the password (matching login.js nextHandler)
-      async function md5(str) {
-        const buf = new TextEncoder().encode(str);
-        // Use SubtleCrypto if available, else fall back to page's MD5
-        if (typeof CryptoJS !== 'undefined' && CryptoJS.MD5) {
-          return CryptoJS.MD5(str).toString().toUpperCase();
-        }
-        // Manual fallback using the page's own md5 if loaded
-        if (typeof hex_md5 === 'function') {
-          return hex_md5(str).toUpperCase();
-        }
-        // Last resort: we'll compute it ourselves
-        return null;
+    // First try native Hero click on the Next button
+    let nextClicked = false;
+    try {
+      const nextBtn2 = hero.document.querySelector(".loginClass2 button");
+      if (nextBtn2) {
+        await hero.interact({ click: nextBtn2 });
+        nextClicked = true;
+        log("Clicked loginClass2 Next button via Hero");
       }
-
-      // Try the page's own MD5 function first
-      let hashed = null;
-      if (typeof hex_md5 === 'function') {
-        const inner = hex_md5(${JSON.stringify(password)}).toUpperCase();
-        hashed = hex_md5(inner).toUpperCase();
-      } else if (typeof CryptoJS !== 'undefined' && CryptoJS.MD5) {
-        const inner = CryptoJS.MD5(${JSON.stringify(password)}).toString().toUpperCase();
-        hashed = CryptoJS.MD5(inner).toString().toUpperCase();
-      }
-      if (!hashed) return 'error:no-md5-function';
-
-      // Get reCAPTCHA Enterprise token
-      let gt = '';
-      try {
-        if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
-          gt = await grecaptcha.enterprise.execute(
-            '${RECAPTCHA_SITE_KEY}', {action: 'LOGIN'});
-        }
-      } catch(e) { gt = ''; }
-
-      // Get Fingerprint2 bid
-      const bidEl = document.querySelector('.jsBid, input[name="bid"]');
-      const bid = bidEl ? bidEl.value : '';
-
-      // Collect all hidden form fields
-      const form = document.querySelector('.loginClass2 form')
-                   || document.querySelector('form');
-      if (!form) return 'error:no-form';
-
-      const params = new URLSearchParams();
-      form.querySelectorAll('input[type="hidden"]').forEach(el => {
-        if (el.name) params.set(el.name, el.value);
-      });
-      params.set('username', ${JSON.stringify(email)});
-      params.set('password', hashed);
-      params.set('loginfinish', '1');
-      params.set('gt', gt);
-      params.set('bid', bid);
-      params.set('autoLoginState', '1');
-
-      // Submit via XMLHttpRequest with params in URL (empty body).
-      // Akamai treats empty-body POSTs differently from form-data POSTs.
-      return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        const url = (form.action || '/glbwebauthnv6/userLogin')
-          + '?' + params.toString();
-        xhr.open('POST', url, true);
-        xhr.setRequestHeader('Content-Type',
-          'application/x-www-form-urlencoded; charset=utf-8');
-        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-        xhr.timeout = XHR_TIMEOUT_MS;
-        xhr.onload = function() {
-          const respUrl = xhr.responseURL || '';
-          const respText = xhr.responseText || '';
-          resolve(xhr.status + '|' + respUrl + '|' + respText.slice(0, 2000));
-        };
-        xhr.onerror = function() { resolve('xhr-error'); };
-        xhr.ontimeout = function() { resolve('xhr-timeout'); };
-        xhr.send('');
-      });
-    })()`);
-    log(`XHR submit result: ${(submitResult || "").slice(0, 200)}`);
-
-    // Try to extract WUST from the XHR response.
-    let wust = findWust(submitResult || "");
-
-    // If the XHR response contains a redirect URL with WUST, navigate to it.
-    if (!wust && submitResult) {
-      const parts = submitResult.split("|");
-      if (parts.length >= 2) {
-        wust = findWust(parts[1]);  // responseURL
-      }
-      if (!wust && parts.length >= 3) {
-        wust = findWust(parts[2]);  // responseText
-      }
+    } catch (e) {
+      log(`Hero click on Next button failed: ${e.message}`);
     }
 
-    // Also check if the XHR triggered a page navigation.
-    if (!wust) {
-      await sleep(3_000);
+    // Fallback: click via JS
+    if (!nextClicked) {
+      const clicked = await hero.activeTab.getJsValue(`(() => {
+        // Find the Next button in loginClass2
+        const btn = document.querySelector('.loginClass2 button')
+                 || document.querySelector('.loginClass2 .next');
+        if (btn) { btn.click(); return 'clicked'; }
+        return 'not-found';
+      })()`);
+      log(`JS click result: ${clicked}`);
+      if (clicked === 'clicked') nextClicked = true;
+    }
+
+    // Wait for page's JS to process (nextHandler does async operations:
+    // MD5 hash, reCAPTCHA execute, bid polling, then form.submit)
+    await sleep(20_000);
+    await takeScreenshot(hero, "after_next_click");
+
+    // ---- Step 5: Extract WUST from resulting page ----
+    let wust = null;
+
+    // Check current URL (form.submit may have navigated with redirects)
+    try {
       const curUrl = await hero.activeTab.url;
+      log(`Post-login URL: ${curUrl.slice(0, 120)}`);
       wust = findWust(curUrl);
-      if (!wust) {
-        try {
-          const body = await hero.activeTab.getJsValue(
-            "document.documentElement?.outerHTML || ''",
+    } catch { /* navigation may be in progress */ }
+
+    // Check page body for redirect URL containing WUST
+    if (!wust) {
+      try {
+        const body = await hero.activeTab.getJsValue(
+          "document.documentElement?.outerHTML?.slice(0, 10000) || ''",
+        );
+        wust = findWust(body);
+        if (!wust) {
+          // Check for JS redirect in HTML
+          const redirectMatch = body.match(
+            /(?:window\.location(?:\.href)?\s*=\s*["']|url=)(https?:\/\/[^"'<>\s;]+)/i
           );
-          wust = findWust(body);
-        } catch { /* page may have navigated */ }
+          if (redirectMatch) {
+            log(`Found redirect in body: ${redirectMatch[1].slice(0, 100)}`);
+            wust = findWust(redirectMatch[1]);
+            // Follow the redirect if it has WUST
+            if (!wust) {
+              try {
+                await hero.goto(redirectMatch[1]);
+                await sleep(5_000);
+                const navUrl = await hero.activeTab.url;
+                wust = findWust(navUrl);
+              } catch {}
+            }
+          }
+        }
+      } catch { /* page may have navigated */ }
+    }
+
+    // Check LPSWUST cookie
+    if (!wust) {
+      try {
+        const lpswust = await hero.activeTab.getJsValue(`(() => {
+          const m = document.cookie.match(/LPSWUST=([^;]+)/);
+          return m ? m[1] : '';
+        })()`);
+        if (lpswust) {
+          wust = lpswust;
+          log(`Found LPSWUST cookie: ${lpswust.slice(0, 30)}…`);
+        }
+      } catch {}
+    }
+
+    // If nextHandler failed (e.g. form.submit blocked by Akamai),
+    // extract session data for Python server-side fallback.
+    if (!wust) {
+      log("No WUST from native login flow — extracting session data for fallback…");
+
+      const sessionData = await hero.activeTab.getJsValue(`(async () => {
+        let hashed = null;
+        if (typeof hex_md5 === 'function') {
+          const inner = hex_md5(${JSON.stringify(password)}).toUpperCase();
+          hashed = hex_md5(inner).toUpperCase();
+        } else if (typeof CryptoJS !== 'undefined' && CryptoJS.MD5) {
+          const inner = CryptoJS.MD5(${JSON.stringify(password)}).toString().toUpperCase();
+          hashed = CryptoJS.MD5(inner).toString().toUpperCase();
+        }
+        if (!hashed) return JSON.stringify({error: 'no-md5-function'});
+
+        let gt = '';
+        try {
+          if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
+            gt = await grecaptcha.enterprise.execute(
+              '${RECAPTCHA_SITE_KEY}', {action: 'LOGIN'});
+          }
+        } catch(e) { gt = ''; }
+
+        const bidEl = document.querySelector('.jsBid, input[name="bid"]');
+        const bid = bidEl ? bidEl.value : '';
+
+        const form = document.querySelector('.loginClass2 form')
+                     || document.querySelector('form');
+        const formFields = {};
+        if (form) {
+          form.querySelectorAll('input[type="hidden"]').forEach(el => {
+            if (el.name) formFields[el.name] = el.value;
+          });
+        }
+        const cookies = document.cookie;
+        return JSON.stringify({
+          hashed, gt, bid, formFields, cookies,
+          formAction: form ? form.action : '',
+        });
+      })()`);
+
+      let parsedSession;
+      try { parsedSession = JSON.parse(sessionData); }
+      catch { parsedSession = null; }
+
+      if (parsedSession && !parsedSession.error) {
+        const formData = { ...parsedSession.formFields };
+        formData.username = email;
+        formData.password = parsedSession.hashed;
+        formData.loginfinish = '1';
+        formData.gt = parsedSession.gt;
+        formData.bid = parsedSession.bid;
+        formData.autoLoginState = '1';
+
+        process.stdout.write(`FORM_DATA=${JSON.stringify(formData)}\n`);
+        process.stdout.write(`COOKIES=${parsedSession.cookies}\n`);
+        const formAction = parsedSession.formAction || 'https://passport.lenovo.com/glbwebauthnv6/userLogin';
+        process.stdout.write(`FORM_ACTION=${formAction}\n`);
+        log("Session data extracted for Python fallback");
       }
     }
 
@@ -367,15 +481,7 @@ async function main() {
       process.stdout.write(`WUST=${wust}\n`);
       log("✓ WUST obtained");
     } else {
-      try {
-        const txt = await hero.activeTab.getJsValue(
-          "document.body?.innerText?.slice(0, 500) || ''",
-        );
-        if (txt) log(`Page text: ${txt.slice(0, 300)}`);
-      } catch { /* best effort */ }
-      const pageUrl = await hero.activeTab.url;
-      log(`✗ No WUST found — page URL: ${pageUrl}`);
-      process.exit(1);
+      log("No WUST obtained — Python will attempt server-side login with extracted session");
     }
   } catch (err) {
     log(`Error: ${err.message || err}`);
