@@ -32,6 +32,7 @@ Security notes
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json as _json
 import random as _rnd
@@ -69,6 +70,17 @@ try:
     _STEALTH_AVAILABLE = True
 except ImportError:
     _STEALTH_AVAILABLE = False
+
+# Optional zendriver import — a CDP-based "driverless" browser that achieves
+# significantly better Akamai Bot Manager bypass rates than Playwright or
+# Selenium because it communicates directly via Chrome DevTools Protocol
+# without exposing any WebDriver fingerprints.
+# Ref: https://pypi.org/project/zendriver/
+try:
+    import zendriver as _zendriver
+    _ZENDRIVER_AVAILABLE = True
+except ImportError:
+    _ZENDRIVER_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -303,10 +315,20 @@ class LenovoIDAuth:
         """Run the Lenovo ID login form flow and return the WUST token.
 
         Fetches the real login URL from the LMSA API first (getApiInfo.jhtml),
-        then tries Playwright browser automation (bypasses Akamai Bot Manager),
-        falling back to plain HTTP requests when Playwright is not installed.
+        then tries browser automation backends in order of Akamai bypass
+        effectiveness:
+        1. **zendriver** (CDP-based, best Akamai bypass — loads bmak sensor,
+           reCAPTCHA, and bid without WebDriver fingerprints).
+        2. **Playwright** (traditional, with stealth patches).
+        3. **Plain HTTP** requests (no Akamai bypass).
         """
         login_url = self._get_login_url()
+
+        if _ZENDRIVER_AVAILABLE:
+            wust = self._obtain_wust_zendriver(email, password, login_url)
+            if wust:
+                return wust
+            _log("[LenovoID] Zendriver login failed – trying Playwright fallback")
 
         if _PLAYWRIGHT_AVAILABLE:
             wust = self._obtain_wust_browser(email, password, login_url)
@@ -315,6 +337,199 @@ class LenovoIDAuth:
             _log("[LenovoID] Browser login failed – trying plain HTTP fallback")
 
         return self._obtain_wust_requests(email, password, login_url)
+
+    # ------------------------------------------------------------------
+    # Zendriver (CDP-based) browser backend
+    # ------------------------------------------------------------------
+
+    def _obtain_wust_zendriver(
+        self, email: str, password: str, login_url: str,
+    ) -> Optional[str]:
+        """Use zendriver (CDP-based) to complete the Lenovo ID OAuth.
+
+        Zendriver communicates with the browser directly via Chrome DevTools
+        Protocol without any WebDriver binary, which avoids the automation
+        fingerprints that Akamai Bot Manager detects.  In benchmark tests
+        zendriver successfully bypasses Akamai where Playwright and Selenium
+        fail (see: baseline comparison by dimakynal on Medium).
+
+        The method loads the Akamai-protected login page, waits for the
+        ``bmak`` sensor, reCAPTCHA Enterprise token (GT), and Fingerprint2
+        browser ID (bid) to initialise, then performs the two-step SPA login
+        flow (email → password → submit → WUST redirect).
+        """
+        _log("[LenovoID] Launching zendriver (CDP) for Akamai-protected login…")
+
+        async def _run() -> Optional[str]:
+            captured: list[str] = []
+            hashed = _hash_password(password)
+
+            browser = await _zendriver.start(
+                headless=True,
+                sandbox=False,
+                browser_connection_timeout=2.0,
+                browser_connection_max_tries=30,
+            )
+            try:
+                page = await browser.get(login_url)
+
+                # Wait for Akamai sensor + reCAPTCHA + page JS to initialise.
+                await asyncio.sleep(15)
+
+                # Wait for global-loader overlay to disappear.
+                loader_vis = await page.evaluate(
+                    "(() => { const l = document.getElementById('global-loader');"
+                    " return l ? l.offsetParent !== null : false; })()"
+                )
+                if loader_vis:
+                    for _i in range(30):
+                        await asyncio.sleep(1)
+                        hidden = await page.evaluate(
+                            "!document.getElementById('global-loader')"
+                            " || document.getElementById('global-loader')"
+                            ".offsetParent === null"
+                        )
+                        if hidden:
+                            break
+                    else:
+                        await page.evaluate(
+                            "document.getElementById('global-loader')?.remove()"
+                        )
+
+                await asyncio.sleep(2)
+
+                # --- Fill email ---
+                el = await page.select("#emailOrPhoneInput")
+                if el:
+                    await el.click()
+                    await asyncio.sleep(0.3)
+                    await el.send_keys(email)
+                else:
+                    _log("[LenovoID] zendriver: email field not found")
+                    return None
+
+                await asyncio.sleep(1)
+
+                # --- Click Next ---
+                btn = await page.select("div.loginClass1 button")
+                if btn:
+                    await btn.click()
+                else:
+                    await page.evaluate(
+                        "document.querySelector('div.loginClass1 button')?.click()"
+                    )
+
+                # --- Wait for password field ---
+                await asyncio.sleep(5)
+                pw_appeared = False
+                for _i in range(15):
+                    vis = await page.evaluate(
+                        "(() => { const e = document.querySelector("
+                        "'#emailOrPhonePswInput');"
+                        " return e && e.offsetParent !== null; })()"
+                    )
+                    if vis:
+                        pw_appeared = True
+                        break
+                    await asyncio.sleep(1)
+
+                if pw_appeared:
+                    # --- SPA flow: fill password ---
+                    _log("[LenovoID] zendriver: password step appeared (SPA OK)")
+                    pwd_el = await page.select("#emailOrPhonePswInput")
+                    if pwd_el:
+                        await pwd_el.click()
+                        await asyncio.sleep(0.2)
+                        for ch in password:
+                            await pwd_el.send_keys(ch)
+                            await asyncio.sleep(_rnd.uniform(0.05, 0.12))
+
+                    await asyncio.sleep(5)
+
+                    # Click submit
+                    sub = await page.select("button.loadingBtnHide")
+                    if sub:
+                        await sub.click()
+                    else:
+                        await page.evaluate(
+                            "document.querySelector("
+                            "'div.loginClass2 button')?.click()"
+                        )
+
+                    # Wait for WUST redirect
+                    for _i in range(25):
+                        url = page.url or ""
+                        if "lenovoid.wust" in url or "lenovoIdSuccess" in url:
+                            break
+                        await asyncio.sleep(1)
+                else:
+                    # --- Direct form submission fallback ---
+                    _log("[LenovoID] zendriver: SPA blocked, direct form submit")
+                    gt = (await page.evaluate(
+                        "(async () => {"
+                        " if (typeof grecaptcha !== 'undefined'"
+                        " && grecaptcha.enterprise) {"
+                        "  try { return await grecaptcha.enterprise.execute("
+                        "   '6Ld_eBkmAAAAAKGzqykvtH0laOzfRdELmh-YBxub',"
+                        "   {action: 'LOGIN'});"
+                        "  } catch(e) { return ''; }"
+                        " } return '';"
+                        "})()"
+                    )) or ""
+                    bid = (await page.evaluate(
+                        "document.querySelector('.jsBid')?.value || ''"
+                    )) or ""
+
+                    await page.evaluate(
+                        """(args => {
+                        const f = document.querySelector('.loginClass2 form');
+                        if (!f) return;
+                        f.querySelectorAll('input[name="username"]')
+                            .forEach(e => e.value = args[0]);
+                        f.querySelectorAll('.emailAddressInput')
+                            .forEach(e => e.value = args[0]);
+                        f.querySelectorAll('input[name="password"]')
+                            .forEach(e => e.value = args[1]);
+                        f.querySelectorAll('input[name="loginfinish"]')
+                            .forEach(e => e.value = '1');
+                        let g = f.querySelector('input[name="gt"]');
+                        if (!g) {
+                            g = document.createElement('input');
+                            g.type = 'hidden'; g.name = 'gt';
+                            f.appendChild(g);
+                        }
+                        g.value = args[2];
+                        f.submit();
+                        })"""
+                        + f"(['{email}', '{hashed}', '{gt}'])"
+                    )
+                    await asyncio.sleep(10)
+
+                # --- Extract WUST ---
+                wust = _find_wust(page.url or "")
+                if not wust:
+                    body = await page.evaluate(
+                        "document.documentElement?.outerHTML || ''"
+                    )
+                    wust = _find_wust(body)
+
+                if wust:
+                    _log("[LenovoID] ✓ WUST obtained via zendriver")
+                return wust
+            except Exception as exc:
+                _log(f"[LenovoID] zendriver error: {exc}")
+                return None
+            finally:
+                try:
+                    browser.stop()
+                except Exception:
+                    pass
+
+        try:
+            return asyncio.run(_run())
+        except Exception as exc:
+            _log(f"[LenovoID] zendriver asyncio error: {exc}")
+            return None
 
     def _obtain_wust_browser(
         self, email: str, password: str, login_url: str
