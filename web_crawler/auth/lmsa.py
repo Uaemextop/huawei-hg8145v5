@@ -415,7 +415,7 @@ class LMSASession:
 
         try:
             return resp.json()
-        except ValueError:
+        except json.JSONDecodeError:
             _log(f"[LMSA] POST {endpoint} → non-JSON response: {resp.text[:200]}")
             return None
 
@@ -507,8 +507,8 @@ class LMSASession:
             _log("[LMSA] ✓ Token initialised successfully")
             return True
 
-        _log("[LMSA] Warning: initToken succeeded but no JWT in response headers")
-        return True
+        _log("[LMSA] Error: initToken succeeded but no JWT in response headers")
+        return False
 
     def get_firmware(
         self,

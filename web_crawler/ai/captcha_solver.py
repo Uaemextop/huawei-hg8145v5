@@ -190,6 +190,10 @@ class AICaptchaSolver:
         ctype = captcha_type or self._captcha_type
         log.info("[AI-CAPTCHA] Opening login page: %s", url)
 
+        if not _PLAYWRIGHT_AVAILABLE:
+            log.error("[AI-CAPTCHA] Playwright not available")
+            return None
+
         with sync_playwright() as pw:
             # Try Firefox first — its TLS fingerprint is less likely to
             # be flagged by bot-detection systems like Akamai.
