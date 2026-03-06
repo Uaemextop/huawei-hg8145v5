@@ -415,7 +415,7 @@ class LMSASession:
 
         try:
             return resp.json()
-        except (ValueError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             _log(f"[LMSA] POST {endpoint} → non-JSON response: {resp.text[:200]}")
             return None
 
