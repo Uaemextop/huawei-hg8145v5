@@ -1,0 +1,13 @@
+# Motorola Firmware Downloader Dependencies
+
+# HTTP requests and sessions
+requests>=2.31.0
+
+# Cryptography for encryption and JWT
+cryptography>=41.0.0
+
+# Progress bars for downloads (optional but recommended)
+tqdm>=4.66.0
+
+# Colored terminal output (optional)
+colorama>=0.4.6
