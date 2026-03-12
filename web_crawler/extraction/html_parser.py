@@ -10,6 +10,7 @@ import warnings
 from web_crawler.utils.url import normalise_url
 from web_crawler.extraction.css import extract_css_urls
 from web_crawler.extraction.javascript import extract_js_paths
+from web_crawler.extraction.json_extract import extract_json_paths
 
 try:
     import lxml  # noqa: F401
@@ -180,9 +181,21 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                 found |= extract_js_paths(decoded_js, page_url, base)
                 # Try to extract JSON config objects (``var X = {...};``)
                 # that contain absolute URLs as string values.
-                from web_crawler.extraction.json_extract import extract_json_paths
-                for json_m in re.finditer(r'\{[^{}]{10,}\}', decoded_js):
-                    found |= extract_json_paths(json_m.group(0), page_url, base)
+                # Use brace-counting to locate the outermost ``{…}``
+                # so nested objects are included in the JSON parse.
+                start = decoded_js.find("{")
+                if start != -1:
+                    depth = 0
+                    for i in range(start, len(decoded_js)):
+                        if decoded_js[i] == "{":
+                            depth += 1
+                        elif decoded_js[i] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                found |= extract_json_paths(
+                                    decoded_js[start:i + 1], page_url, base,
+                                )
+                                break
 
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.
