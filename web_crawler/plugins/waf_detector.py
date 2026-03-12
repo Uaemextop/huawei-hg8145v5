@@ -106,7 +106,7 @@ class WAFDetectorPlugin(CrawlerPlugin):
         headers_str = " ".join(
             f"{k}: {v}" for k, v in headers.items()
         ).lower()
-        body_lower = body[:30_000].lower()
+        body_lower = body[:50_000].lower()
 
         # Check header-based signatures
         for waf_name, patterns in _WAF_HEADER_SIGNATURES.items():
