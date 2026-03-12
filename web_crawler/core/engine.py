@@ -220,9 +220,16 @@ class Crawler:
 
         # Discovered external download URLs (Google Drive, OneDrive, Mega …).
         # Populated by _discover_download_links() when AJAX endpoints return
-        # cloud-storage URLs.  Written to download_urls.txt at crawl end.
-        self._external_download_urls: list[tuple[str, str, str]] = []
-        # ^-- list of (page_url, ajax_endpoint, download_url)
+        # cloud-storage URLs.  Written to download_urls.md at crawl end.
+        self._external_download_urls: list[tuple[str, str, str, str]] = []
+        # ^-- list of (page_url, ajax_endpoint, download_url, firmware_name)
+
+        # Numeric-ID enumeration state.  Tracks seen (endpoint, param_name)
+        # patterns and their numeric values so the crawler can probe the
+        # full range of IDs (e.g. firmwares.php?firm=1…N).
+        self._enum_patterns: dict[tuple[str, str], set[int]] = {}
+        # ^-- key: (path_prefix, param_name) → set of seen numeric values
+        self._enum_done: set[tuple[str, str]] = set()
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -2171,7 +2178,10 @@ class Crawler:
             new_links |= self._resolve_ajax_params(new_links, url)
             # Follow resolved AJAX endpoints to discover external download
             # URLs (Google Drive, OneDrive, Mega, etc.) and record them.
-            self._discover_download_links(new_links, url)
+            self._discover_download_links(new_links, url, text)
+            # Enumerate numeric IDs: when we see firmwares.php?firm=123,
+            # probe the full min…max range to discover unlisted pages.
+            self._enumerate_numeric_ids(new_links, url, depth)
             # Also scan for links to target download extensions
             if self.download_extensions:
                 new_links |= self._extract_extension_links(
@@ -2263,11 +2273,95 @@ class Crawler:
         return extra
 
     # ------------------------------------------------------------------
+    # Numeric ID enumeration
+    # ------------------------------------------------------------------
+
+    _ENUM_MIN_IDS = 3          # need at least 3 distinct IDs before probing
+    _ENUM_MAX_RANGE = 500      # never probe more than 500 consecutive IDs
+
+    def _enumerate_numeric_ids(
+        self, links: set[str], page_url: str, depth: int,
+    ) -> None:
+        """Discover unlisted pages by enumerating numeric query-param IDs.
+
+        Many sites (e.g. ``firmwares.php?firm=28450``) only link to a
+        small subset of pages from the sidebar.  This method collects
+        every numeric parameter value the crawler sees for a given
+        ``(path, param_name)`` pair and, once enough samples are
+        gathered, enqueues the full ``min … max`` range so every page
+        is visited.
+        """
+        page_parsed = urllib.parse.urlparse(page_url)
+        page_qs = urllib.parse.parse_qs(page_parsed.query)
+        for param, vals in page_qs.items():
+            if not vals or not vals[0].isdigit():
+                continue
+            val = int(vals[0])
+            path_prefix = page_parsed.path
+            key = (path_prefix, param)
+            with self._lock:
+                self._enum_patterns.setdefault(key, set()).add(val)
+
+        # Also collect IDs from same-host links on the page
+        for link in links:
+            lp = urllib.parse.urlparse(link)
+            if lp.netloc and lp.netloc != self.allowed_host:
+                continue
+            lqs = urllib.parse.parse_qs(lp.query)
+            for param, vals in lqs.items():
+                if not vals or not vals[0].isdigit():
+                    continue
+                val = int(vals[0])
+                path_prefix = lp.path
+                key = (path_prefix, param)
+                with self._lock:
+                    self._enum_patterns.setdefault(key, set()).add(val)
+
+        # Check if any pattern is ready for enumeration
+        with self._lock:
+            ready = [
+                (k, ids) for k, ids in self._enum_patterns.items()
+                if len(ids) >= self._ENUM_MIN_IDS and k not in self._enum_done
+            ]
+
+        for key, ids in ready:
+            path_prefix, param = key
+            lo, hi = min(ids), max(ids)
+            span = hi - lo + 1
+            if span > self._ENUM_MAX_RANGE or span <= len(ids):
+                # Range too large or we already know all of them
+                with self._lock:
+                    self._enum_done.add(key)
+                continue
+            # Enumerate the full range
+            enqueued = 0
+            for n in range(lo, hi + 1):
+                enum_url = urllib.parse.urlunparse((
+                    page_parsed.scheme, self.allowed_host,
+                    path_prefix, "",
+                    urllib.parse.urlencode({param: str(n)}), "",
+                ))
+                k = url_key(enum_url)
+                with self._lock:
+                    if k in self._visited:
+                        continue
+                self._enqueue(enum_url, depth, priority=True)
+                enqueued += 1
+            with self._lock:
+                self._enum_done.add(key)
+            if enqueued:
+                log.info(
+                    "[ENUM] %s?%s=%d…%d  → %d new URL(s) enqueued",
+                    path_prefix, param, lo, hi, enqueued,
+                )
+
+    # ------------------------------------------------------------------
     # AJAX download-link discovery (Google Drive, OneDrive, Mega, …)
     # ------------------------------------------------------------------
 
     def _discover_download_links(
         self, links: set[str], page_url: str,
+        page_html: str | None = None,
     ) -> None:
         """Follow AJAX endpoints that return cloud-storage download URLs.
 
@@ -2282,8 +2376,17 @@ class Crawler:
            URLs whose path suggests a download handler).
         2. GETs each endpoint with the crawler's session.
         3. If the response is a cloud-storage URL, records it in
-           ``download_urls.txt`` with a ready-to-use direct link.
+           ``download_urls.md`` with the firmware name and direct link.
         """
+        # Extract firmware name from the page <title> when available.
+        firmware_name = ""
+        if page_html:
+            m = re.search(r"<title>(.*?)</title>", page_html,
+                          re.I | re.DOTALL)
+            if m:
+                # Title format: "FirmwareName.zip | Firmware Download | …"
+                firmware_name = re.split(r"\s*\|\s*", m.group(1))[0].strip()
+
         # Heuristic: AJAX download endpoints are same-host PHP/ASP URLs
         # whose path or query suggests a download handler.
         _AJAX_HINT_RE = re.compile(
@@ -2361,13 +2464,13 @@ class Crawler:
             )
             with self._lock:
                 self._external_download_urls.append(
-                    (page_url, link, download_url)
+                    (page_url, link, download_url, firmware_name)
                 )
 
-            # Also write to download_links.txt immediately (with curl cmd)
+            # Write to download_urls.md immediately
             with self._lock:
                 self._record_external_download(
-                    page_url, download_url, direct_url,
+                    page_url, download_url, direct_url, firmware_name,
                 )
 
     @staticmethod
@@ -2415,46 +2518,51 @@ class Crawler:
 
     def _record_external_download(
         self, page_url: str, sharing_url: str, direct_url: str,
+        firmware_name: str = "",
     ) -> None:
-        """Append an external download link to ``download_urls.txt``.
+        """Append an external download entry to ``download_urls.md``.
 
-        Each entry contains:
-        * The source page URL
-        * The cloud-storage sharing URL (as returned by the AJAX endpoint)
-        * A direct-download URL (with provider-specific bypass)
-        * Ready-to-run ``curl`` and ``wget`` commands
+        Writes a Markdown table row incrementally.  The file is fully
+        rewritten with a clean table by ``_write_download_url_list``
+        at the end of the crawl.
 
         Must be called while ``self._lock`` is held.
         """
-        dl_path = self.output_dir / "download_urls.txt"
+        dl_path = self.output_dir / "download_urls.md"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        name = firmware_name or "download"
         with dl_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"# Source page: {page_url}\n")
-            fh.write(f"# Sharing URL: {sharing_url}\n")
-            fh.write(f"{direct_url}\n")
-            fh.write(f"curl -L -o download_file '{direct_url}'\n")
-            fh.write(f"wget -O download_file '{direct_url}'\n")
-            fh.write("# " + "─" * 60 + "\n\n")
+            fh.write(f"- **{name}** — [Download]({direct_url})\n")
 
     def _write_download_url_list(self) -> None:
-        """Write all discovered external download URLs to ``download_urls.txt``.
+        """Write the final ``download_urls.md`` Markdown table.
 
-        This is called at the end of the crawl.  If individual entries
-        were already written during crawl (by ``_record_external_download``),
-        this method also writes a summary section at the end.
+        This is called at the end of the crawl.  Individual entries are
+        already appended by ``_record_external_download`` during the
+        crawl; this method rewrites the whole file to ensure a clean,
+        sorted table with a summary footer.
         """
         if not self._external_download_urls:
             return
-        dl_path = self.output_dir / "download_urls.txt"
+        dl_path = self.output_dir / "download_urls.md"
         dl_path.parent.mkdir(parents=True, exist_ok=True)
-        with dl_path.open("a", encoding="utf-8") as fh:
-            fh.write("\n# " + "═" * 60 + "\n")
-            fh.write(f"# SUMMARY: {len(self._external_download_urls)}"
-                      " download URL(s) discovered\n")
-            fh.write("# " + "═" * 60 + "\n\n")
-            for page_url, ajax_ep, download_url in self._external_download_urls:
+        with dl_path.open("w", encoding="utf-8") as fh:
+            fh.write("# Download URLs\n\n")
+            n = len(self._external_download_urls)
+            fh.write(f"> **{n}** download link(s) discovered\n\n")
+            fh.write("| # | File | Download | Source |\n")
+            fh.write("|---|------|----------|--------|\n")
+            for i, (page_url, _ajax_ep, download_url, fw_name) in enumerate(
+                self._external_download_urls, 1,
+            ):
                 direct = self._build_direct_download_url(download_url)
-                fh.write(f"{direct}\n")
+                name = fw_name or "download"
+                fh.write(
+                    f"| {i} "
+                    f"| {name} "
+                    f"| [Download]({direct}) "
+                    f"| [Source]({page_url}) |\n"
+                )
         log.info(
             "Download URLs: %d URL(s) → %s",
             len(self._external_download_urls), dl_path,
