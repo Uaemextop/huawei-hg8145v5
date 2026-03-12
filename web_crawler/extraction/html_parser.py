@@ -117,6 +117,21 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         if not script_el.get("src"):
             found |= extract_js_paths(script_el.get_text(), page_url, base)
 
+    # Inline event-handler attributes (onclick, onmouseover, onsubmit, …)
+    # contain JavaScript snippets that may navigate via window.location,
+    # window.open(), or fetch().  Run JS extraction on every handler value.
+    _EVENT_ATTRS = frozenset({
+        "onclick", "ondblclick", "onmousedown", "onmouseup", "onmouseover",
+        "onchange", "onsubmit", "onfocus", "onblur", "onload", "onerror",
+    })
+    for el in soup.find_all(attrs=lambda attrs: attrs and any(
+        a in _EVENT_ATTRS for a in attrs
+    )):
+        for attr_name in _EVENT_ATTRS:
+            handler = el.get(attr_name)
+            if handler:
+                found |= extract_js_paths(handler, page_url, base)
+
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.
     # Both camelCase (Schema.org canonical) and lowercase variants are

@@ -2170,6 +2170,13 @@ class Crawler:
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
+            # Resolve parameterised AJAX endpoints whose query value
+            # can be inferred from the current page URL.  For example,
+            # fetch('ajax_url.php?firmid=' + id) is extracted as the
+            # bare endpoint 'ajax_url.php?firmid='; we fill in the
+            # value from a matching query parameter on the page URL
+            # (e.g. firmwares.php?firm=27162 → firmid=27162).
+            new_links |= self._resolve_ajax_params(new_links, url)
             # Also scan for links to target download extensions
             if self.download_extensions:
                 new_links |= self._extract_extension_links(
@@ -2199,6 +2206,66 @@ class Crawler:
                 log.debug("  +%d new URLs enqueued", added)
 
         time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # AJAX parameter resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_ajax_params(
+        links: set[str], page_url: str,
+    ) -> set[str]:
+        """Expand AJAX endpoints whose query string has empty values.
+
+        When the JS extractor finds ``fetch('ajax_url.php?firmid=' + var)``
+        it produces a bare URL like ``…/ajax_url.php?firmid=``.  If the
+        page URL contains a query parameter whose name partially matches
+        (e.g. ``firm=27162`` matches ``firmid``), fill in the value so the
+        crawler can actually fetch the endpoint.
+        """
+        page_qs = urllib.parse.parse_qs(
+            urllib.parse.urlparse(page_url).query, keep_blank_values=True,
+        )
+        if not page_qs:
+            return set()
+        extra: set[str] = set()
+        for link in list(links):
+            link_parsed = urllib.parse.urlparse(link)
+            link_qs = urllib.parse.parse_qs(
+                link_parsed.query, keep_blank_values=True,
+            )
+            if not link_qs:
+                continue
+            filled = False
+            new_params: dict[str, str] = {}
+            for param, vals in link_qs.items():
+                val = vals[0] if vals else ""
+                if val:
+                    new_params[param] = val
+                    continue
+                # Try to match against page URL params (substring match)
+                for pname, pvals in page_qs.items():
+                    if not pvals or not pvals[0]:
+                        continue
+                    # Match: "firmid" contains "firm", or "firm" contains
+                    # "firmid", or exact match.
+                    pname_l = pname.lower()
+                    param_l = param.lower()
+                    if (pname_l in param_l or param_l in pname_l
+                            or pname_l == param_l):
+                        new_params[param] = pvals[0]
+                        filled = True
+                        break
+                else:
+                    new_params[param] = val
+            if filled:
+                new_query = urllib.parse.urlencode(new_params)
+                resolved = urllib.parse.urlunparse((
+                    link_parsed.scheme, link_parsed.netloc,
+                    link_parsed.path, "", new_query, "",
+                ))
+                extra.add(resolved)
+        return extra
 
     # ------------------------------------------------------------------
     # CDN media download
