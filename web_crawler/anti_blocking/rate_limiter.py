@@ -27,9 +27,11 @@ class RateLimiter:
             now = time.monotonic()
             elapsed = now - self._last_request
             delay = self._current_delay
-            if elapsed < delay:
-                time.sleep(delay - elapsed + random.uniform(0, 0.1))
-            self._last_request = time.monotonic()
+            sleep_time = (delay - elapsed + random.uniform(0, 0.1)) if elapsed < delay else 0.0
+            self._last_request = time.monotonic() + max(sleep_time, 0.0)
+
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     def report_success(self) -> None:
         """Signal a successful request to reduce delay."""
