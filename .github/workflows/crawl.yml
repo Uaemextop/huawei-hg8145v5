@@ -328,6 +328,11 @@ jobs:
               LINK_COUNT=$(grep -c '^curl ' downloaded_site/download_links.txt 2>/dev/null || echo 0)
               echo "🔗 download_links.txt: $LINK_COUNT ready-to-run curl commands"
             fi
+            if [ -f downloaded_site/download_urls.md ]; then
+              DL_COUNT=$(grep -c '^|' downloaded_site/download_urls.md 2>/dev/null || echo 0)
+              DL_COUNT=$((DL_COUNT > 2 ? DL_COUNT - 2 : 0))  # subtract header rows
+              echo "📥 download_urls.md: $DL_COUNT firmware download link(s)"
+            fi
             echo ""
             echo "Binary/firmware files:"
             find downloaded_site -type f -not -path '*/\.git/*' \
@@ -373,7 +378,7 @@ jobs:
               [ "${{ inputs.debug }}" = "true" ] && FIND_ARGS+=("-o" "-iname" "*.${ext}.headers")
             done
             # Always include manifest/link files
-            FIND_ARGS+=("-o" "-name" "download_links.txt")
+            FIND_ARGS+=("-o" "-name" "download_links.txt" "-o" "-name" "download_urls.md" "-o" "-name" "video_urls.txt")
             find . -not -path './.git/*' \( "${FIND_ARGS[@]}" \) -exec git add {} + 2>/dev/null || true
           else
             if [ "${{ inputs.debug }}" = "true" ]; then
