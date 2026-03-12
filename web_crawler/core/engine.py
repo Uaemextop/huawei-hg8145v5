@@ -2055,6 +2055,17 @@ class Crawler:
         else:
             content = resp.content
 
+        # Defensive Brotli decompression: if the server returned
+        # Content-Encoding: br but urllib3 could not decompress it
+        # (e.g. brotli package was missing at session-creation time),
+        # attempt manual decompression so the bytes are usable.
+        if resp.headers.get("Content-Encoding", "").strip().lower() == "br":
+            try:
+                import brotli
+                content = brotli.decompress(content)
+            except Exception:
+                pass
+
         log.debug(
             "  ← HTTP %s  CT: %s  %d bytes",
             resp.status_code, content_type, len(content),

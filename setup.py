@@ -13,6 +13,7 @@ setup(
         "beautifulsoup4>=4.12.0",
         "lxml>=5.0.0",
         "urllib3>=2.0.0",
+        "brotli>=1.1.0,<1.2.0",
     ],
     extras_require={
         "ui": [
