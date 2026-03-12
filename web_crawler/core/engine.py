@@ -224,12 +224,10 @@ class Crawler:
         self._external_download_urls: list[tuple[str, str, str, str]] = []
         # ^-- list of (page_url, ajax_endpoint, download_url, firmware_name)
 
-        # Numeric-ID enumeration state.  Tracks seen (endpoint, param_name)
-        # patterns and their numeric values so the crawler can probe the
-        # full range of IDs (e.g. firmwares.php?firm=1…N).
-        self._enum_patterns: dict[tuple[str, str], set[int]] = {}
-        # ^-- key: (path_prefix, param_name) → set of seen numeric values
-        self._enum_done: set[tuple[str, str]] = set()
+        # AJAX download-endpoint enumeration state.
+        # When the first AJAX download is discovered, the crawler probes
+        # IDs 1…50 000 against the same endpoint to find every download.
+        self._ajax_enum_done: set[str] = set()  # endpoint paths already scanned
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -2179,9 +2177,6 @@ class Crawler:
             # Follow resolved AJAX endpoints to discover external download
             # URLs (Google Drive, OneDrive, Mega, etc.) and record them.
             self._discover_download_links(new_links, url, text)
-            # Enumerate numeric IDs: when we see firmwares.php?firm=123,
-            # probe the full min…max range to discover unlisted pages.
-            self._enumerate_numeric_ids(new_links, url, depth)
             # Also scan for links to target download extensions
             if self.download_extensions:
                 new_links |= self._extract_extension_links(
@@ -2273,87 +2268,167 @@ class Crawler:
         return extra
 
     # ------------------------------------------------------------------
-    # Numeric ID enumeration
+    # Full-range AJAX download enumeration (IDs 1 … 50 000)
     # ------------------------------------------------------------------
 
-    _ENUM_MIN_IDS = 3          # need at least 3 distinct IDs before probing
-    _ENUM_MAX_RANGE = 500      # never probe more than 500 consecutive IDs
+    _ENUM_AJAX_MAX_ID = 50_000   # upper bound for ID probing
+    _ENUM_AJAX_WORKERS = 10      # concurrent probe/title-fetch workers
 
-    def _enumerate_numeric_ids(
-        self, links: set[str], page_url: str, depth: int,
+    def _enumerate_ajax_downloads(
+        self,
+        ajax_path: str,
+        ajax_param: str,
+        page_path: str | None,
+        page_param: str | None,
     ) -> None:
-        """Discover unlisted pages by enumerating numeric query-param IDs.
+        """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
 
-        Many sites (e.g. ``firmwares.php?firm=28450``) only link to a
-        small subset of pages from the sidebar.  This method collects
-        every numeric parameter value the crawler sees for a given
-        ``(path, param_name)`` pair and, once enough samples are
-        gathered, enqueues the full ``min … max`` range so every page
-        is visited.
+        Runs once per unique AJAX endpoint.  Three phases:
+
+        1. **Probe** — GET ``ajax_path?ajax_param=N`` for every N in
+           ``1 … _ENUM_AJAX_MAX_ID``.  Valid responses (cloud-storage
+           URLs) are collected.  Invalid / empty responses are discarded.
+        2. **Titles** — For each valid ID, stream the first 8 KB of the
+           corresponding firmware page to extract the ``<title>`` tag
+           (the firmware file name).
+        3. **Record** — All downloads are appended to
+           ``_external_download_urls`` and the Markdown file.
         """
-        page_parsed = urllib.parse.urlparse(page_url)
-        page_qs = urllib.parse.parse_qs(page_parsed.query)
-        for param, vals in page_qs.items():
-            if not vals or not vals[0].isdigit():
-                continue
-            val = int(vals[0])
-            path_prefix = page_parsed.path
-            key = (path_prefix, param)
-            with self._lock:
-                self._enum_patterns.setdefault(key, set()).add(val)
-
-        # Also collect IDs from same-host links on the page
-        for link in links:
-            lp = urllib.parse.urlparse(link)
-            if lp.netloc and lp.netloc != self.allowed_host:
-                continue
-            lqs = urllib.parse.parse_qs(lp.query)
-            for param, vals in lqs.items():
-                if not vals or not vals[0].isdigit():
-                    continue
-                val = int(vals[0])
-                path_prefix = lp.path
-                key = (path_prefix, param)
-                with self._lock:
-                    self._enum_patterns.setdefault(key, set()).add(val)
-
-        # Check if any pattern is ready for enumeration
+        enum_key = f"{ajax_path}?{ajax_param}"
         with self._lock:
-            ready = [
-                (k, ids) for k, ids in self._enum_patterns.items()
-                if len(ids) >= self._ENUM_MIN_IDS and k not in self._enum_done
-            ]
+            if enum_key in self._ajax_enum_done:
+                return
+            self._ajax_enum_done.add(enum_key)
 
-        for key, ids in ready:
-            path_prefix, param = key
-            lo, hi = min(ids), max(ids)
-            span = hi - lo + 1
-            if span > self._ENUM_MAX_RANGE or span <= len(ids):
-                # Range too large or we already know all of them
-                with self._lock:
-                    self._enum_done.add(key)
-                continue
-            # Enumerate the full range
-            enqueued = 0
-            for n in range(lo, hi + 1):
-                enum_url = urllib.parse.urlunparse((
-                    page_parsed.scheme, self.allowed_host,
-                    path_prefix, "",
-                    urllib.parse.urlencode({param: str(n)}), "",
-                ))
-                k = url_key(enum_url)
-                with self._lock:
-                    if k in self._visited:
-                        continue
-                self._enqueue(enum_url, depth, priority=True)
-                enqueued += 1
+        max_id = self._ENUM_AJAX_MAX_ID
+        base = self.base  # e.g. "https://getwayrom.com"
+        log.info("[ENUM] Scanning %s?%s=1…%d for download links …",
+                 ajax_path, ajax_param, max_id)
+
+        # ── Phase 1: probe AJAX endpoint for every ID ───────────────
+        valid: list[tuple[int, str]] = []  # (id, download_url)
+
+        def _probe(n: int) -> tuple[int, str] | None:
+            url = (f"{base}{ajax_path}"
+                   f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
             with self._lock:
-                self._enum_done.add(key)
-            if enqueued:
-                log.info(
-                    "[ENUM] %s?%s=%d…%d  → %d new URL(s) enqueued",
-                    path_prefix, param, lo, hi, enqueued,
+                if url in self._download_links_seen:
+                    return None
+            try:
+                resp = self.session.get(
+                    url, timeout=REQUEST_TIMEOUT, allow_redirects=False,
+                    headers={"X-Requested-With": "XMLHttpRequest"},
                 )
+            except _NETWORK_ERRORS:
+                return None
+            if resp.status_code == 429:
+                time.sleep(2)
+                return None
+            if not resp.ok:
+                return None
+            body = resp.text.strip()
+            if not body or len(body) > 2000:
+                return None
+            if not body.startswith(("http://", "https://")):
+                return None
+            dp = urllib.parse.urlparse(body)
+            is_cloud = dp.netloc in CLOUD_STORAGE_HOSTS
+            if not is_cloud:
+                for h in CLOUD_STORAGE_HOSTS:
+                    if dp.netloc.endswith("." + h):
+                        is_cloud = True
+                        break
+            if not is_cloud:
+                return None
+            return (n, body)
+
+        checked = 0
+        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
+            for result in pool.map(_probe, range(1, max_id + 1)):
+                checked += 1
+                if result:
+                    valid.append(result)
+                if checked % 5000 == 0:
+                    log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
+                             checked, max_id, len(valid))
+
+        if not valid:
+            log.info("[ENUM] Scan complete — 0 downloads in %d IDs", max_id)
+            return
+
+        log.info("[ENUM] Found %d download(s). Fetching file names …",
+                 len(valid))
+
+        # ── Phase 2: stream firmware-page titles for valid IDs ──────
+        titles: dict[int, str] = {}
+
+        if page_path and page_param:
+            def _title(n: int) -> tuple[int, str]:
+                url = (f"{base}{page_path}"
+                       f"?{urllib.parse.urlencode({page_param: str(n)})}")
+                try:
+                    resp = self.session.get(
+                        url, timeout=REQUEST_TIMEOUT, stream=True,
+                    )
+                    if not resp.ok:
+                        resp.close()
+                        return (n, "")
+                    head = b""
+                    for chunk in resp.iter_content(chunk_size=2048):
+                        head += chunk
+                        if len(head) >= 8192:
+                            break
+                    resp.close()
+                    text = head.decode("utf-8", errors="replace")
+                    m = re.search(
+                        r"<title>(.*?)</title>", text, re.I | re.DOTALL,
+                    )
+                    if m:
+                        raw = re.split(r"\s*\|\s*", m.group(1))[0].strip()
+                        if raw:
+                            return (n, raw)
+                except _NETWORK_ERRORS:
+                    pass
+                return (n, "")
+
+            fetched = 0
+            with ThreadPoolExecutor(
+                max_workers=self._ENUM_AJAX_WORKERS,
+            ) as pool:
+                for n, title in pool.map(
+                    _title, [n for n, _ in valid],
+                ):
+                    titles[n] = title
+                    fetched += 1
+                    if fetched % 2000 == 0:
+                        log.info("[ENUM]   … fetched %d/%d titles",
+                                 fetched, len(valid))
+
+        # ── Phase 3: record all downloads ───────────────────────────
+        valid.sort()
+        new_count = 0
+        for n, download_url in valid:
+            ajax_url = (f"{base}{ajax_path}"
+                        f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
+            fw_page = ""
+            if page_path and page_param:
+                fw_page = (f"{base}{page_path}"
+                           f"?{urllib.parse.urlencode({page_param: str(n)})}")
+            fw_name = titles.get(n, "") or f"firmware_{n}"
+            direct = self._build_direct_download_url(download_url)
+
+            with self._lock:
+                if ajax_url in self._download_links_seen:
+                    continue
+                self._download_links_seen.add(ajax_url)
+                self._external_download_urls.append(
+                    (fw_page, ajax_url, download_url, fw_name),
+                )
+                new_count += 1
+
+        log.info("[ENUM] Enumeration complete — %d new download(s) recorded "
+                 "(%d total)", new_count,
+                 len(self._external_download_urls))
 
     # ------------------------------------------------------------------
     # AJAX download-link discovery (Google Drive, OneDrive, Mega, …)
@@ -2472,6 +2547,36 @@ class Crawler:
                 self._record_external_download(
                     page_url, download_url, direct_url, firmware_name,
                 )
+
+            # Trigger full-range AJAX enumeration (runs once per endpoint).
+            # Derive the page-URL pattern so titles can be fetched later.
+            page_parsed = urllib.parse.urlparse(page_url)
+            page_qs = urllib.parse.parse_qs(page_parsed.query)
+            ajax_qs = urllib.parse.parse_qs(parsed.query)
+
+            for a_param, a_vals in ajax_qs.items():
+                if not a_vals or not a_vals[0].isdigit():
+                    continue
+                # Match the AJAX param value to a page-URL param
+                p_param = None
+                for pn, pv in page_qs.items():
+                    if pv and pv[0] == a_vals[0]:
+                        p_param = pn
+                        break
+                if p_param is None:
+                    # Fallback: substring matching (firm ↔ firmid)
+                    al = a_param.lower()
+                    for pn in page_qs:
+                        pl = pn.lower()
+                        if pl in al or al in pl:
+                            p_param = pn
+                            break
+                self._enumerate_ajax_downloads(
+                    parsed.path, a_param,
+                    page_parsed.path if p_param else None,
+                    p_param,
+                )
+                break  # one enumeration per endpoint
 
     @staticmethod
     def _build_direct_download_url(url: str) -> str:

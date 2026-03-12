@@ -23,6 +23,12 @@ try:
 except ImportError:
     BeautifulSoup = None  # type: ignore[misc,assignment]
 
+try:
+    from bs4 import MarkupResemblesLocatorWarning
+    warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
+except ImportError:
+    pass  # older bs4 versions don't have this warning
+
 
 # Open Graph and Twitter Card properties that contain media URLs
 _OG_MEDIA_PROPS = frozenset({
