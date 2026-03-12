@@ -1321,6 +1321,16 @@ class Crawler:
             self._parse_local_file(local_path, url)
         return count
 
+    # Maximum URL path depth (number of ``/`` segments).  Deeper paths
+    # are almost always caused by relative-link resolution loops where
+    # ``assets/js/vendor/`` keeps getting prepended to itself, creating
+    # an ever-growing URL like ``/a/b/a/b/a/b/page``.
+    _MAX_PATH_DEPTH = 15
+
+    # Regex that detects a path segment appearing 3+ times — a strong
+    # signal that relative-URL resolution is looping.
+    _REPEATING_SEGMENT_RE = re.compile(r"(/[^/]+(?:/[^/]+){0,2})\1{2,}")
+
     def _enqueue(self, url: str, depth: int, *, priority: bool = False) -> None:
         """Add *url* to the queue if not yet visited and within scope.
 
@@ -1342,6 +1352,16 @@ class Crawler:
             # <script type="speculationrules"> exclusion lists).
             # '*' is not a valid character in an HTTP request path.
             if "*" in parsed.path:
+                return
+            # ── Path-explosion guard ────────────────────────────────
+            # Relative-link resolution can create infinitely nested paths
+            # (e.g. /a/b/a/b/a/b/page).  Reject URLs whose path has too
+            # many segments or contains a repeating sub-path.
+            if parsed.path.count("/") > self._MAX_PATH_DEPTH:
+                return
+            if self._REPEATING_SEGMENT_RE.search(parsed.path):
+                return
+            if len(url) > 2000:
                 return
             # Skip extensions that SiteGround's WAF always blocks with 403.
             # Probing these wastes requests and inflates error counters.
@@ -2423,6 +2443,9 @@ class Crawler:
                 self._download_links_seen.add(ajax_url)
                 self._external_download_urls.append(
                     (fw_page, ajax_url, download_url, fw_name),
+                )
+                self._record_external_download(
+                    fw_page, download_url, direct, fw_name,
                 )
                 new_count += 1
 
