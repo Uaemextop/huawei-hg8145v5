@@ -1,5 +1,5 @@
 """
-Generic BFS web crawler.
+Generic BFS web crawler with plugin-based architecture.
 
 Crawls a target website starting from a seed URL, downloading ALL reachable
 pages and static assets with NO page limit.  Supports:
@@ -13,6 +13,8 @@ pages and static assets with NO page limit.  Supports:
 * User-Agent rotation and header-rotation retry on 403/402
 * Cloudflare / WAF / CAPTCHA detection
 * Exponential backoff on 429 (rate limiting)
+* Plugin-based technology detection and crawl strategies
+* Modular processing pipeline
 * Saves ALL file types (html, php, asp, js, css, json, xml, txt, images, …)
 * Saves HTTP response headers alongside each downloaded file
 """
@@ -33,6 +35,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from web_crawler.auth.lmsa import LMSASession
+    from web_crawler.plugins.registry import PluginRegistry
 
 import requests
 
@@ -117,6 +120,9 @@ class Crawler:
     """
     Generic BFS web crawler.  Downloads every reachable page and asset
     from a target website with NO page limit.
+
+    Supports a plugin-based architecture via :class:`PluginRegistry` for
+    technology detection, crawl strategies, and data processing.
     """
 
     def __init__(
@@ -140,6 +146,7 @@ class Crawler:
         skip_download_exts: frozenset[str] | None = None,
         lmsa_session: "Optional[LMSASession]" = None,
         extra_seed_urls: list[str] | None = None,
+        plugin_registry: "Optional[PluginRegistry]" = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -181,6 +188,9 @@ class Crawler:
 
         # Pre-seeded URLs added before crawl starts (e.g. LMSA firmware scan).
         self._extra_seed_urls: list[str] = list(extra_seed_urls or [])
+
+        # Plugin registry for extensible detection / strategies / processing.
+        self._plugin_registry = plugin_registry
 
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
@@ -1179,6 +1189,41 @@ class Crawler:
             if any(s in combined for s in sigs):
                 detected.append(name)
         return detected
+
+    def run_detection_plugins(
+        self, headers: dict[str, str], body: str, url: str = "",
+    ) -> dict[str, list]:
+        """Run all registered detector plugins and return aggregated results.
+
+        Returns dict with ``technologies`` and ``protections`` lists.
+        """
+        if self._plugin_registry is None:
+            return {"technologies": [], "protections": []}
+
+        context = {
+            "headers": headers,
+            "body": body,
+            "url": url,
+            "cookies": [c.name for c in self.session.cookies],
+            "scripts": [],  # populated from body
+        }
+
+        # Extract script src URLs from the body for tech detection
+        import re as _re
+        for m in _re.finditer(r'<script[^>]+src=["\']([^"\']+)', body[:32768], _re.I):
+            context["scripts"].append(m.group(1))
+
+        all_techs: list[dict[str, str]] = []
+        all_protections: list[str] = []
+        for det in self._plugin_registry.get_plugins("detector"):
+            try:
+                result = det.run(context)
+                all_techs.extend(result.get("technologies", []))
+                all_protections.extend(result.get("protections", []))
+            except Exception:
+                log.debug("Detector plugin %s failed", det.name, exc_info=True)
+
+        return {"technologies": all_techs, "protections": all_protections}
 
     # ------------------------------------------------------------------
     # Header-rotation retry for 403 / 402

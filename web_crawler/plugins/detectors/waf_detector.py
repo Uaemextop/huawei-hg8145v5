@@ -25,20 +25,19 @@ class WAFDetectorPlugin(BasePlugin):
         Returns dict with ``protections`` key listing detected names.
         """
         headers = context.get("headers", {})
-        body = context.get("body", "")[:8192].lower()
-        detected: list[str] = []
+        body = context.get("body", "")[:8192]
 
+        # Build a single searchable string from headers + body, matching
+        # the approach used by the existing Crawler.detect_protection().
+        filtered = {k: v for k, v in headers.items()
+                    if k.lower() != "permissions-policy"}
+        combined = " ".join(f"{k}: {v}" for k, v in filtered.items()).lower()
+        combined += " " + body.lower()
+
+        detected: list[str] = []
         for waf_name, sigs in WAF_SIGNATURES.items():
-            header_sigs = sigs.get("headers", {})
-            body_sigs = sigs.get("body", [])
-            for hdr, pattern in header_sigs.items():
-                val = headers.get(hdr, "")
-                if val and pattern.lower() in val.lower():
-                    detected.append(waf_name)
-                    break
-            else:
-                if any(sig.lower() in body for sig in body_sigs):
-                    detected.append(waf_name)
+            if any(s in combined for s in sigs):
+                detected.append(waf_name)
 
         return {"protections": detected}
 
