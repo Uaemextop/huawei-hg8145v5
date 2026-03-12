@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from web_crawler.auth.lmsa import LMSASession
+    from web_crawler.plugins.registry import PluginRegistry
 
 import requests
 
@@ -140,6 +141,7 @@ class Crawler:
         skip_download_exts: frozenset[str] | None = None,
         lmsa_session: "Optional[LMSASession]" = None,
         extra_seed_urls: list[str] | None = None,
+        plugin_registry: "Optional[PluginRegistry]" = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -181,6 +183,28 @@ class Crawler:
 
         # Pre-seeded URLs added before crawl starts (e.g. LMSA firmware scan).
         self._extra_seed_urls: list[str] = list(extra_seed_urls or [])
+
+        # Plugin registry for modular detection and extraction.
+        self._plugin_registry = plugin_registry
+
+        # Crawling pipeline (set up with plugin-backed stages).
+        self._pipeline = None
+        if plugin_registry is not None:
+            from web_crawler.pipeline import (
+                CrawlingPipeline,
+                DiscoveryStage,
+                TechnologyDetectionStage,
+                ProtectionDetectionStage,
+                LinkExtractionStage,
+                ContentProcessingStage,
+            )
+            self._pipeline = CrawlingPipeline([
+                DiscoveryStage(),
+                TechnologyDetectionStage(plugin_registry),
+                ProtectionDetectionStage(plugin_registry),
+                LinkExtractionStage(plugin_registry),
+                ContentProcessingStage(),
+            ])
 
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
@@ -2183,6 +2207,20 @@ class Crawler:
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
+
+            # Run the crawling pipeline for plugin-based detection and extraction.
+            if self._pipeline is not None:
+                ctx = self._pipeline.execute({
+                    "url": url,
+                    "response": resp,
+                    "body": content,
+                    "headers": dict(resp.headers),
+                    "content_type": ct,
+                    "links": set(),
+                    "skip": False,
+                })
+                # Merge links discovered by plugins.
+                new_links |= ctx.get("links", set())
             # Resolve parameterised AJAX endpoints whose query value
             # can be inferred from the current page URL.  For example,
             # fetch('ajax_url.php?firmid=' + id) is extracted as the
