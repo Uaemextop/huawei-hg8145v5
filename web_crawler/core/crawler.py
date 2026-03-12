@@ -484,6 +484,30 @@ class Crawler:
             fh.write(f"# wget alternative:\n# {wget_cmd}\n\n")
             fh.write("# ─" * 40 + "\n\n")
 
+    def _collect_download_links(self, html: str, page_url: str) -> None:
+        """Scan an HTML page for download links and record them.
+
+        Detects two kinds of download links:
+
+        1. **CMS download-action URLs** – PHP query-string patterns like
+           ``?a=downloads&b=file&c=download&id=NNN`` used by JSOFTDownload
+           and similar PHP portals.
+        2. **External cloud-storage URLs** – Google Drive, OneDrive, Mega,
+           MediaFire, Dropbox and other file-hosting services.
+
+        All discovered URLs are appended to ``download_links.txt`` with
+        ready-to-run ``curl`` / ``wget`` commands.
+        """
+        dl_links = extract_download_action_links(html, page_url, self.base)
+        dl_links |= extract_external_download_links(html, page_url, self.base)
+
+        if dl_links:
+            with self._lock:
+                for link in dl_links:
+                    self._record_download_link(link)
+            log.info("  [DOWNLOAD] Recorded %d download link(s) from %s",
+                     len(dl_links), page_url)
+
     @staticmethod
     def _merge_video_meta(
         existing: dict[str, str],
@@ -2181,6 +2205,13 @@ class Crawler:
             # Extract page & video metadata for discovered video URLs
             if text is not None:
                 self._populate_video_meta(text, new_links)
+
+            # Record download links from HTML pages: CMS download-action
+            # URLs (e.g. ?c=download&id=NNN) and external cloud-storage
+            # links (Google Drive, Mega, MediaFire, OneDrive, etc.).
+            if text is not None:
+                self._collect_download_links(text, url)
+
             added = 0
             for link in new_links:
                 # Register external hosts from media URLs as CDN hosts
