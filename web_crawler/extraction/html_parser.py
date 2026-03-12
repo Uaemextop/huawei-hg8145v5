@@ -60,7 +60,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     attr_map = {
         "a":       ["href"],
         "link":    ["href"],
-        "script":  ["src"],
+        "script":  ["src", "data-src"],
         "img":     ["src", "data-src", "data-lazy-src"],
         "source":  ["src", "srcset", "data-src", "data-video-src"],
         "iframe":  ["src"],
@@ -114,8 +114,31 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         found |= extract_css_urls(style_el.get_text(), page_url, base)
 
     for script_el in soup.find_all("script"):
-        if not script_el.get("src"):
+        if not script_el.get("src") and not script_el.get("data-src"):
             found |= extract_js_paths(script_el.get_text(), page_url, base)
+
+    # Percent-encoded inline JavaScript in data-src attributes.
+    # WordPress performance plugins (e.g. FlyingPress) defer JS execution
+    # by moving content into ``data-src="data:text/javascript,…"``
+    # attributes.  The encoded payload may contain API URLs, REST
+    # endpoints, and other references.
+    import urllib.parse as _urlparse
+    for script_el in soup.find_all("script", attrs={"data-src": True}):
+        ds = script_el["data-src"]
+        if ds.startswith("data:text/javascript,"):
+            decoded = _urlparse.unquote(ds[len("data:text/javascript,"):])
+            found |= extract_js_paths(decoded, page_url, base)
+
+    # Speculation Rules – Chromium prefetch/prerender hints embedded as
+    # <script type="speculationrules">.  The ``href_matches`` patterns
+    # (e.g. "/*") are not full URLs, but the ``urls`` array (when present)
+    # contains concrete URL paths that should be enqueued.
+    for spec_el in soup.find_all("script", type="speculationrules"):
+        try:
+            spec_data = json.loads(spec_el.get_text())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        _extract_speculation_urls(spec_data, _add)
 
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.
@@ -152,6 +175,31 @@ def _extract_jsonld_urls(
     elif isinstance(obj, list):
         for item in obj:
             _extract_jsonld_urls(item, keys, add_fn)
+
+
+def _extract_speculation_urls(
+    spec: object,
+    add_fn,
+) -> None:
+    """Extract concrete URLs from a Speculation Rules JSON object.
+
+    Chromium Speculation Rules (``<script type="speculationrules">``)
+    can contain ``"urls"`` arrays with explicit paths to prefetch or
+    prerender.  This function extracts those paths.
+    """
+    if isinstance(spec, dict):
+        for action in ("prefetch", "prerender"):
+            rules = spec.get(action, [])
+            if isinstance(rules, list):
+                for rule in rules:
+                    if isinstance(rule, dict):
+                        urls = rule.get("urls", [])
+                        if isinstance(urls, list):
+                            for u in urls:
+                                if isinstance(u, str) and u.startswith(
+                                    ("http://", "https://", "/")
+                                ):
+                                    add_fn(u)
 
 
 # ------------------------------------------------------------------

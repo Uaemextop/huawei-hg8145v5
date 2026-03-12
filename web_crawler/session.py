@@ -59,7 +59,7 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -103,7 +103,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
             "es-MX,es;q=0.9,en;q=0.8",
             "en-GB,en;q=0.9",
         ]),
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": random.choice(["no-cache", "no-store", "max-age=0"]),
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",

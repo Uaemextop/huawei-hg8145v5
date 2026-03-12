@@ -966,6 +966,8 @@ class Crawler:
 
         # Discover media file URLs (images, ZIPs) via REST API
         self._discover_wp_media()
+        # Discover custom post types (e.g. Magisk modules, products, etc.)
+        self._discover_wp_custom_post_types()
         # Discover WooCommerce product pages and any linked files
         self._discover_wc_products()
 
@@ -1001,6 +1003,81 @@ class Crawler:
         if total:
             log.debug("  [WP-MEDIA] Discovered %d media files via REST API",
                      total)
+
+    def _discover_wp_custom_post_types(self) -> None:
+        """Discover custom post types via the WP REST API ``/wp/v2/types``
+        endpoint and enumerate all their published items.
+
+        WordPress sites often register custom post types for domain-specific
+        content (e.g. Magisk modules, firmware entries, products) that live
+        under non-standard URL paths.  The built-in ``posts`` and ``pages``
+        are already covered by :data:`WP_DISCOVERY_PATHS`; this method
+        handles all *additional* types exposed by the REST API.
+        """
+        # Standard types already covered by WP_DISCOVERY_PATHS
+        _SKIP_TYPES = frozenset({
+            "post", "page", "attachment", "nav_menu_item",
+            "wp_block", "wp_template", "wp_template_part",
+            "wp_global_styles", "wp_navigation", "wp_font_family",
+            "wp_font_face",
+        })
+        types_url = f"{self.base}/wp-json/wp/v2/types"
+        try:
+            resp = self.session.get(types_url, timeout=REQUEST_TIMEOUT)
+        except _NETWORK_ERRORS:
+            return
+        if resp.status_code != 200:
+            return
+        try:
+            types_data = resp.json()
+        except ValueError:
+            return
+        if not isinstance(types_data, dict):
+            return
+
+        for slug, info in types_data.items():
+            if slug in _SKIP_TYPES:
+                continue
+            rest_base = info.get("rest_base", "")
+            type_name = info.get("name", slug)
+            if not rest_base:
+                continue
+            # Enumerate all published items for this custom post type
+            page_num = 1
+            item_total = 0
+            while page_num <= 50:
+                api_url = (
+                    f"{self.base}/wp-json/wp/v2/{rest_base}"
+                    f"?per_page=100&page={page_num}"
+                )
+                try:
+                    items_resp = self.session.get(
+                        api_url, timeout=REQUEST_TIMEOUT,
+                    )
+                except _NETWORK_ERRORS:
+                    break
+                if items_resp.status_code != 200:
+                    break
+                try:
+                    items = items_resp.json()
+                except ValueError:
+                    break
+                if not isinstance(items, list) or not items:
+                    break
+                for item in items:
+                    link = item.get("link", "")
+                    if link and self.allowed_host in link:
+                        self._enqueue(link, 1)
+                        item_total += 1
+                if len(items) < 100:
+                    break
+                page_num += 1
+                time.sleep(self.delay)
+            if item_total:
+                log.info(
+                    "[WP-CPT] Discovered %d '%s' items via REST API",
+                    item_total, type_name,
+                )
 
     def _discover_wc_products(self) -> None:
         """Enumerate WooCommerce products via the Store API and enqueue:
