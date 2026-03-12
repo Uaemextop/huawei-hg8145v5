@@ -33,6 +33,33 @@ _OG_MEDIA_PROPS = frozenset({
 _TW_MEDIA_PROPS = frozenset({"twitter:image", "twitter:player"})
 
 
+def _parse_srcset(srcset: str) -> list[str]:
+    """Extract individual URLs from an ``srcset`` or ``imagesrcset`` value.
+
+    Each entry in srcset looks like ``url 1x`` or ``url 300w``.  This
+    function splits by comma, strips descriptors and returns raw URLs.
+    """
+    urls: list[str] = []
+    for entry in srcset.split(","):
+        parts = entry.strip().split()
+        if parts:
+            urls.append(parts[0])
+    return urls
+
+
+# data-* attributes that commonly carry navigable/crawlable URLs across
+# many platforms (XenForo, WordPress, generic JS frameworks).
+# Values containing unresolved template placeholders (``{…}``) are skipped.
+_DATA_URL_ATTRS = (
+    "data-href",
+    "data-url",
+    "data-preview-url",
+    "data-page-url",
+    "data-acurl",
+    "data-xf-href",
+)
+
+
 def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     """
     Extract every resource URL from HTML/ASP content using BeautifulSoup.
@@ -57,12 +84,18 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     # Tags whose media attributes may reference external CDNs
     _MEDIA_TAGS = {"video", "source", "audio", "track"}
 
+    # Attributes whose values use the srcset multi-URL format
+    _SRCSET_ATTRS = {"srcset", "imagesrcset"}
+
     attr_map = {
         "a":       ["href"],
-        "link":    ["href"],
+        "link":    ["href", "imagesrcset"],
         "script":  ["src"],
-        "img":     ["src", "data-src", "data-lazy-src"],
-        "source":  ["src", "srcset", "data-src", "data-video-src"],
+        "img":     ["src", "srcset", "data-src", "data-lazy-src",
+                    "data-srcset"],
+        "picture": [],
+        "source":  ["src", "srcset", "data-src", "data-video-src",
+                    "data-srcset"],
         "iframe":  ["src"],
         "frame":   ["src"],
         "form":    ["action"],
@@ -75,14 +108,21 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         "video":   ["src", "poster", "data-src", "data-lazy-src",
                     "data-video-src", "data-video-url"],
         "track":   ["src"],
+        "use":     ["href", "xlink:href"],
     }
     for tag, attrs in attr_map.items():
         is_media = tag in _MEDIA_TAGS
         for el in soup.find_all(tag):
             for attr in attrs:
                 val = el.get(attr)
-                if val:
+                if not val:
+                    continue
+                if attr in _SRCSET_ATTRS:
+                    for src_url in _parse_srcset(val):
+                        _add(src_url, allow_external=is_media)
+                else:
                     _add(val, allow_external=is_media)
+
             if tag == "meta":
                 content = el.get("content", "")
                 m = re.search(r"url=([^\s;\"']+)", content, re.I)
@@ -109,6 +149,24 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                 ):
                     if og_prop in _OG_MEDIA_PROPS or tw_name in _TW_MEDIA_PROPS:
                         _add(content, allow_external=True)
+
+            # XenForo / generic: <picture data-variations='{"default":{"1":"/path",...}}'>
+            if tag == "picture":
+                variations_raw = el.get("data-variations", "")
+                if variations_raw:
+                    _extract_variations_urls(variations_raw, _add)
+
+    # ------------------------------------------------------------------
+    # Generic data-* URL attributes (XenForo data-href, data-preview-url,
+    # data-page-url, data-acurl, data-xf-href, data-url, etc.)
+    # Scans ALL tags because these attributes are not tag-specific.
+    # Skips values with unresolved template placeholders like {url}.
+    # ------------------------------------------------------------------
+    for attr_name in _DATA_URL_ATTRS:
+        for el in soup.find_all(attrs={attr_name: True}):
+            val = el.get(attr_name, "")
+            if val and "{" not in val:
+                _add(val)
 
     for style_el in soup.find_all("style"):
         found |= extract_css_urls(style_el.get_text(), page_url, base)
@@ -152,6 +210,171 @@ def _extract_jsonld_urls(
     elif isinstance(obj, list):
         for item in obj:
             _extract_jsonld_urls(item, keys, add_fn)
+
+
+def _extract_variations_urls(raw: str, add_fn) -> None:
+    """Extract image URLs from a XenForo ``data-variations`` JSON attribute.
+
+    The value is HTML-entity-encoded JSON, e.g.::
+
+        {"default":{"1":"/data/assets/logo_default/xenforo.jpg","2":null},
+         "alternate":{"1":"/data/assets/logo_alternate/xenforo.jpg","2":null}}
+
+    Each string value that looks like a path is passed to *add_fn*.
+    """
+    try:
+        import html as _html
+        data = json.loads(_html.unescape(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return
+    _walk_variations(data, add_fn)
+
+
+def _walk_variations(obj: object, add_fn) -> None:
+    """Recursively walk a data-variations structure for URL strings."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _walk_variations(v, add_fn)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_variations(item, add_fn)
+    elif isinstance(obj, str) and obj.startswith(("http://", "https://", "/")):
+        add_fn(obj)
+
+
+# ------------------------------------------------------------------
+# Download-link extraction (XenForo XFRM, attachments, file-hosting)
+# ------------------------------------------------------------------
+
+# Regex matching XenForo Resource Manager download endpoints.
+_XFRM_DOWNLOAD_RE = re.compile(
+    r"/resources/[^\"'<>\s]+/download",
+    re.I,
+)
+
+# Regex matching XenForo attachment URLs.
+_XF_ATTACHMENT_RE = re.compile(
+    r"/attachments/[^\"'<>\s]+",
+    re.I,
+)
+
+
+def extract_download_links(
+    html: str,
+    page_url: str,
+    base: str,
+) -> set[str]:
+    """Extract download-worthy URLs from HTML content.
+
+    This includes:
+
+    * XenForo XFRM ``/resources/{slug}/download`` endpoints (even when
+      they 303-redirect for guests — VIP users can follow them).
+    * XenForo attachment URLs (``/attachments/{name}.{id}/``).
+    * URLs pointing to known file-hosting services (Google Drive, Mega,
+      Dropbox, Mediafire, OneDrive, etc.) found in ``href``, ``data-url``,
+      ``data-href``, and bbCode unfurl blocks.
+    * Direct links to common downloadable file extensions (``.zip``,
+      ``.rar``, ``.7z``, ``.exe``, ``.bin``, ``.pac``, ``.scatter``,
+      ``.img``, ``.tar.gz``, etc.).
+
+    Returns a set of absolute, normalised URLs.
+    """
+    from web_crawler.config import is_file_hosting_url
+
+    found: set[str] = set()
+
+    def _add(raw: str) -> None:
+        url = normalise_url(raw.strip(), page_url, base,
+                            allow_external=True)
+        if url:
+            found.add(url)
+
+    # --- 1. Raw regex scan (catches URLs in JS, inline text, etc.) ---
+    # XFRM download endpoints
+    for m in _XFRM_DOWNLOAD_RE.finditer(html):
+        _add(m.group())
+
+    # XenForo attachments
+    for m in _XF_ATTACHMENT_RE.finditer(html):
+        _add(m.group())
+
+    # --- 2. BeautifulSoup structured scan ---
+    if BeautifulSoup is None:
+        return found
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return found
+
+    # Collect candidate URLs from link-bearing attributes.
+    _LINK_ATTRS = ("href", "src", "data-src", "data-url", "data-href",
+                   "data-xf-href")
+
+    for tag in soup.find_all(True):
+        for attr in _LINK_ATTRS:
+            val = tag.get(attr)
+            if not val or not isinstance(val, str):
+                continue
+            # Skip template placeholders like {url}
+            if "{" in val:
+                continue
+            abs_url = normalise_url(val.strip(), page_url, base,
+                                    allow_external=True)
+            if not abs_url:
+                continue
+
+            # File-hosting domain?
+            if is_file_hosting_url(abs_url):
+                found.add(abs_url)
+                continue
+
+            # XFRM download?
+            if _XFRM_DOWNLOAD_RE.search(abs_url):
+                found.add(abs_url)
+                continue
+
+            # XF attachment?
+            if _XF_ATTACHMENT_RE.search(abs_url):
+                found.add(abs_url)
+                continue
+
+            # Downloadable file extension?
+            if _has_download_extension(abs_url):
+                found.add(abs_url)
+
+    # --- 3. bbCode unfurl blocks: <… class="bbCodeBlock--unfurl" data-url="…"> ---
+    for el in soup.find_all(
+        attrs={"class": re.compile(r"bbCodeBlock--unfurl")},
+    ):
+        data_url = el.get("data-url", "")
+        if data_url:
+            _add(data_url)
+
+    return found
+
+
+# Common downloadable file extensions.
+_DOWNLOAD_EXTENSIONS = frozenset({
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz",
+    ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".apk", ".aab",
+    ".bin", ".img", ".iso",
+    ".pac", ".scatter", ".ops", ".pit", ".kdz", ".tot", ".ozip",
+    ".dat", ".md5", ".ta",
+    ".rom", ".fw", ".efs", ".nvram", ".persist", ".dump",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+})
+
+
+def _has_download_extension(url: str) -> bool:
+    """Return ``True`` if *url* ends with a known downloadable extension."""
+    from urllib.parse import urlparse
+    path = urlparse(url).path.lower().rstrip("/")
+    for ext in _DOWNLOAD_EXTENSIONS:
+        if path.endswith(ext):
+            return True
+    return False
 
 
 # ------------------------------------------------------------------
