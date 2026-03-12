@@ -133,6 +133,12 @@ def parse_args() -> argparse.Namespace:
              "Use 'all' to skip downloading every binary file and only record "
              "their links.",
     )
+    parser.add_argument(
+        "--download-only", action="store_true", default=False,
+        help="Skip the full site crawl. Only fetch the start page, discover "
+             "AJAX download endpoints, and enumerate all firmware download "
+             "links (1–50,000 IDs).  Outputs download_urls.md directly.",
+    )
     return parser.parse_args()
 
 
@@ -237,6 +243,7 @@ def main() -> None:
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
         skip_download_exts=skip_dl_exts,
+        download_only=args.download_only,
     )
 
     t0 = time.monotonic()
