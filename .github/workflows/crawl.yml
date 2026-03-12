@@ -28,7 +28,7 @@ on:
         default: true
         type: boolean
       no_verify_ssl:
-        description: "Disable TLS certificate verification (recommended for LMSA)"
+        description: "Disable TLS certificate verification"
         required: false
         default: true
         type: boolean
@@ -62,21 +62,6 @@ on:
         required: false
         default: true
         type: boolean
-      lmsa_jwt:
-        description: "Pre-obtained LMSA JWT from a HAR/proxy capture, in GUID:JWT_TOKEN format. Skips Lenovo ID OAuth entirely — the captured token is used directly Obtain from HTTPToolkit/Charles by capturing the LMSA app traffic. Example 98e2895b-...:Ek6TINIruEV6..."
-        required: false
-        default: ""
-        type: string
-      lmsa_wust:
-        description: "Pre-obtained LMSA WUST token (skips Lenovo ID OAuth, goes straight to JWT exchange). Use when you have a valid WUST from a previous session."
-        required: false
-        default: ""
-        type: string
-      lmsa_country:
-        description: "Limit LMSA firmware scan to specific countries (comma-separated, e.g. Mexico,China,US,Brazil). Leave empty to scan ALL built-in regions (~20 countries). Only applies when URL is rsddownload-secure.lenovo.com."
-        required: false
-        default: ""
-        type: string
       ai_captcha:
         description: "Enable AI-powered CAPTCHA solving using GitHub Models vision API. Requires the AI_TOKEN secret to be configured in the repository."
         required: false
@@ -169,16 +154,10 @@ jobs:
           pip install -r requirements.txt
           # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
           pip install curl_cffi
-          # Playwright – headless browser for OAuth/CAPTCHA flows
+          # Playwright – headless browser for CAPTCHA flows
           pip install playwright
           playwright install --with-deps chromium firefox
-          # pycryptodome – RSA/AES for LMSA token initialisation
-          pip install pycryptodome
-          # zendriver – CDP-based driverless browser for Akamai bypass
-          pip install zendriver
-          # Flask – OpenCaptchaWorld web app
-          pip install flask
-          # Git LFS – for large binary firmware files
+          # Git LFS – for large binary files
           git lfs install
 
       - name: Generate normalized repo name
@@ -295,7 +274,6 @@ jobs:
           | Upload extensions | ${{ inputs.upload_extensions }} |
           | Concurrency | ${{ inputs.concurrency }} workers |
           | Skip media files | ${{ inputs.skip_media_files }} |
-          | LMSA country | ${{ inputs.lmsa_country || '(all regions)' }} |
           | Run | #${{ github.run_number }} |
           | Status | 🔄 Crawling in progress… |
           EOF
@@ -310,10 +288,6 @@ jobs:
         env:
           ONT_TOKEN:       ${{ secrets.ONT }}
           GITHUB_TOKEN:    ${{ secrets.AI_TOKEN }}
-          LMSA_JWT:        ${{ inputs.lmsa_jwt }}
-          LMSA_WUST:       ${{ inputs.lmsa_wust }}
-          LMSA_EMAIL:    ${{ secrets.LMSA_EMAIL }}
-          LMSA_PASSWORD: ${{ secrets.LMSA_PASSWORD }}
         run: |
           # Re-apply git credentials if repo was created
           if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
@@ -342,18 +316,6 @@ jobs:
             EXTRA_ARGS="$EXTRA_ARGS --cf-clearance '${{ inputs.cf_clearance }}'"
           [ -n "${{ inputs.log_file }}" ] && \
             EXTRA_ARGS="$EXTRA_ARGS --log-file '${{ inputs.log_file }}'"
-
-          # ── LMSA auth (prefer jwt > wust > email/password) ──────────────
-          # Secrets are passed via env vars to avoid leaking in logs.
-          if [ -n "$LMSA_JWT" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --lmsa-jwt \"$LMSA_JWT\""
-          elif [ -n "$LMSA_WUST" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --lmsa-wust \"$LMSA_WUST\""
-          elif [ -n "$LMSA_EMAIL" ] && [ -n "$LMSA_PASSWORD" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --lmsa-email \"$LMSA_EMAIL\" --lmsa-password \"$LMSA_PASSWORD\""
-          fi
-          [ -n "${{ inputs.lmsa_country }}" ] && \
-            EXTRA_ARGS="$EXTRA_ARGS --lmsa-country '${{ inputs.lmsa_country }}'"
 
           # ── AI CAPTCHA solver ────────────────────────────────────────────
           # GITHUB_TOKEN is set via env from secrets.AI_TOKEN above;
@@ -402,10 +364,6 @@ jobs:
               LINK_COUNT=$(grep -c '^curl ' downloaded_site/download_links.txt 2>/dev/null || echo 0)
               echo "🔗 download_links.txt: $LINK_COUNT ready-to-run curl commands"
             fi
-            if [ -f downloaded_site/lmsa_firmware_urls.txt ]; then
-              FW_COUNT=$(wc -l < downloaded_site/lmsa_firmware_urls.txt)
-              echo "📦 lmsa_firmware_urls.txt: $FW_COUNT firmware URLs"
-            fi
             echo ""
             echo "Binary/firmware files:"
             find downloaded_site -type f -not -path '*/\.git/*' \
@@ -451,7 +409,7 @@ jobs:
               [ "${{ inputs.debug }}" = "true" ] && FIND_ARGS+=("-o" "-iname" "*.${ext}.headers")
             done
             # Always include manifest/link files
-            FIND_ARGS+=("-o" "-name" "download_links.txt" "-o" "-name" "lmsa_firmware_urls.txt")
+            FIND_ARGS+=("-o" "-name" "download_links.txt")
             find . -not -path './.git/*' \( "${FIND_ARGS[@]}" \) -exec git add {} + 2>/dev/null || true
           else
             if [ "${{ inputs.debug }}" = "true" ]; then
@@ -515,16 +473,12 @@ jobs:
             | **Concurrency** | ${{ inputs.concurrency }} workers |
             | **Skip media files** | ${{ inputs.skip_media_files }} |
             | **Skip CAPTCHA check** | ${{ inputs.skip_captcha }} |
-            | **AI CAPTCHA solver** | ${{ inputs.ai_captcha }} |
-            | **AI model** | ${{ inputs.ai_model }} |
-            | **LMSA country** | ${{ inputs.lmsa_country || '(all regions)' }} |
             | **Debug mode** | ${{ inputs.debug }} |
             | **Run** | #${{ github.run_number }} |
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('| **Live repo** | https://github.com/{0} |', steps.create_repo.outputs.repo_full) || '' }}
 
             ### Notes
             - `download_links.txt` — ready-to-run `curl`/`wget` commands for skipped files (incl. auth headers)
-            - `lmsa_firmware_urls.txt` — full LMSA firmware URL manifest (pre-signed S3 + public CDN)
           files: |
             crawl-${{ steps.reponame.outputs.name }}.zip
             videos-${{ steps.reponame.outputs.name }}.zip

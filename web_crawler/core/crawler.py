@@ -29,10 +29,7 @@ import urllib.robotparser
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from web_crawler.auth.lmsa import LMSASession
+from typing import Optional
 
 import requests
 
@@ -138,8 +135,6 @@ class Crawler:
         allow_external: bool = True,
         skip_media_files: bool = False,
         skip_download_exts: frozenset[str] | None = None,
-        lmsa_session: "Optional[LMSASession]" = None,
-        extra_seed_urls: list[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -174,13 +169,6 @@ class Crawler:
         self.session = build_session(verify_ssl=verify_ssl)
         if cf_clearance:
             inject_cf_clearance(self.session, parsed.netloc, cf_clearance)
-        # Inject LMSA auth headers when an authenticated session is provided.
-        if lmsa_session is not None and lmsa_session.is_authenticated:
-            lmsa_session.inject_into_requests_session(self.session, parsed.netloc)
-            log.info("[LMSA] Auth headers injected into crawler session")
-
-        # Pre-seeded URLs added before crawl starts (e.g. LMSA firmware scan).
-        self._extra_seed_urls: list[str] = list(extra_seed_urls or [])
 
         self._lock = threading.Lock()     # protects shared state in concurrent mode
 
@@ -192,17 +180,7 @@ class Crawler:
         self._probe_403_count: int = 0       # consecutive 403s from probe URLs
         self._probe_404_count: int = 0       # consecutive 404s from probe URLs
         self._probe_dir_failures: dict[str, int] = {}  # per-directory probe failure count
-        # Pre-disable probing for known private S3 buckets — _probe_hidden_files
-        # is called before the HTTP response arrives, so without this guard the
-        # queue would be flooded with ~340 probe URLs that all return 403 before
-        # the reactive S3-AccessDenied detection can fire.
-        _is_s3_host = parsed.netloc == "rsddownload-secure.lenovo.com"
-        self._probing_disabled: bool = _is_s3_host
-        if _is_s3_host:
-            log.info(
-                "[LMSA] Probing pre-disabled for private S3 bucket (%s)",
-                parsed.netloc,
-            )
+        self._probing_disabled: bool = False
         self._sg_captcha_solves: int = 0     # how many inline captchas solved
         self._sg_solve_lock = threading.Lock()  # serialize concurrent CAPTCHA solves
         self._url_retries: dict[str, int] = {}  # per-URL retry count for transient errors
@@ -302,26 +280,6 @@ class Crawler:
 
         # Seed the queue
         self._enqueue(self.start_url, 0)
-
-        # Add extra seed URLs from LMSA firmware scan (pre-signed S3 URLs).
-        if self._extra_seed_urls:
-            # When skip_download_exts is set, record S3 URLs matching the
-            # skip list directly (without making a HEAD request) since they
-            # are pre-signed direct-download links, then only enqueue the rest.
-            skip_recorded = 0
-            for seed_url in self._extra_seed_urls:
-                seed_ext = urllib.parse.urlparse(seed_url).path.rsplit(".", 1)[-1].lower()
-                if self.skip_download_exts and seed_ext in self.skip_download_exts:
-                    self._record_download_link(seed_url)
-                    skip_recorded += 1
-                else:
-                    self._enqueue(seed_url, 0, priority=True)
-            enqueued = len(self._extra_seed_urls) - skip_recorded
-            log.info(
-                "[LMSA] Seeding crawler with %d firmware download URLs "
-                "(%d enqueued, %d recorded in download_links.txt)",
-                len(self._extra_seed_urls), enqueued, skip_recorded,
-            )
 
         log.info("Crawl started. Dynamic discovery begins.")
 
@@ -1660,15 +1618,8 @@ class Crawler:
 
         # Rotate User-Agent per request (skip for curl_cffi which
         # manages its own UA via TLS impersonation).
-        # For rsddownload-secure.lenovo.com (S3 bucket), use the exact UA that
-        # the LMSA HttpDownload.OpenRequest() uses (GlobalVar.UserAgent = IE8).
         if not self._cf_bypass_done:
-            parsed_host = urllib.parse.urlparse(url).netloc.lower()
-            if "rsddownload" in parsed_host and "lenovo.com" in parsed_host:
-                from web_crawler.auth.lmsa import DOWNLOAD_USER_AGENT as _S3_UA
-                self.session.headers["User-Agent"] = _S3_UA
-            else:
-                self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
+            self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
 
         # Build conditional request headers from cached ETag / Last-Modified
         _conditional: dict[str, str] = {}

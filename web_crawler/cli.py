@@ -115,38 +115,6 @@ def parse_args() -> argparse.Namespace:
              "when Playwright is not available.",
     )
     parser.add_argument(
-        "--lmsa-email", default="", metavar="EMAIL",
-        help="Lenovo ID email for LMSA authentication.  Also readable from "
-             "the LMSA_EMAIL environment variable.  Used to obtain a WUST "
-             "token from passport.lenovo.com and a JWT for the LMSA API.",
-    )
-    parser.add_argument(
-        "--lmsa-password", default="", metavar="PASSWORD",
-        help="Lenovo ID password for LMSA authentication.  Also readable "
-             "from the LMSA_PASSWORD environment variable.",
-    )
-    parser.add_argument(
-        "--lmsa-wust", default="", metavar="TOKEN",
-        help="Pre-obtained LMSA WUST token.  Skips the Lenovo ID OAuth step "
-             "and goes directly to JWT exchange.  Use this when you already "
-             "have a valid WUST from a previous session.",
-    )
-    parser.add_argument(
-        "--lmsa-jwt", default="", metavar="GUID:JWT",
-        help="Pre-obtained LMSA JWT and GUID from a HAR/proxy capture, "
-             "separated by ':'.  Format: GUID:JWT_TOKEN.  Skips OAuth and "
-             "token exchange entirely — the captured token is used directly.  "
-             "Also readable from the LMSA_JWT environment variable "
-             "(same GUID:JWT format).  Example: "
-             "--lmsa-jwt 98e2895b-...:Ek6TINIruEV6...",
-    )
-    parser.add_argument(
-        "--lmsa-country", default="", metavar="COUNTRY",
-        help="Limit LMSA firmware scan to a single country (e.g. 'Mexico').  "
-             "When omitted, all built-in regions are scanned.  Only used "
-             "when the target URL is rsddownload-secure.lenovo.com.",
-    )
-    parser.add_argument(
         "--no-external", dest="allow_external", action="store_false",
         default=True,
         help="Disable downloading media files from external CDN hosts "
@@ -164,8 +132,7 @@ def parse_args() -> argparse.Namespace:
              "curl command (including all auth headers) is written to "
              "download_links.txt in the output directory.  "
              "Use 'all' to skip downloading every binary file and only record "
-             "their links.  Pre-signed LMSA S3 URLs matching this list are "
-             "also recorded directly without queuing.",
+             "their links.",
     )
     # ── AI CAPTCHA solver options ────────────────────────────────────
     parser.add_argument(
@@ -270,137 +237,6 @@ def main() -> None:
             log.info("Upload filter: only %s extensions pushed to git",
                      ", ".join(sorted(upload_exts)))
 
-    # ------------------------------------------------------------------ #
-    # LMSA authentication (optional)
-    # ------------------------------------------------------------------ #
-    lmsa_session = None
-    lmsa_email    = args.lmsa_email    or os.environ.get("LMSA_EMAIL", "")
-    lmsa_password = args.lmsa_password or os.environ.get("LMSA_PASSWORD", "")
-    lmsa_wust     = args.lmsa_wust     or os.environ.get("LMSA_WUST", "")
-    lmsa_jwt_raw  = args.lmsa_jwt      or os.environ.get("LMSA_JWT", "")
-
-    if lmsa_jwt_raw:
-        # Direct JWT injection from HAR/proxy capture: GUID:JWT_TOKEN
-        try:
-            from web_crawler.auth.lmsa import LMSASession
-            if ":" not in lmsa_jwt_raw:
-                raise ValueError(
-                    "--lmsa-jwt value must contain ':' separator "
-                    "(format: GUID:JWT_TOKEN)"
-                )
-            sep = lmsa_jwt_raw.index(":")
-            jwt_guid = lmsa_jwt_raw[:sep]
-            jwt_token = lmsa_jwt_raw[sep + 1:]
-            lmsa_session = LMSASession.from_jwt(
-                jwt=jwt_token, guid=jwt_guid, verify_ssl=args.verify_ssl
-            )
-            log.info(
-                "[LMSA] ✓ Session initialised from injected JWT "
-                "(GUID: %s…)", jwt_guid[:8]
-            )
-        except (ValueError, Exception) as exc:
-            log.warning(
-                "[LMSA] --lmsa-jwt parse error (expected GUID:JWT format): %s",
-                exc,
-            )
-
-    elif lmsa_wust or lmsa_email:
-        try:
-            from web_crawler.auth.lenovo_id import LenovoIDAuth
-            auth_client = LenovoIDAuth(verify_ssl=args.verify_ssl)
-            if lmsa_wust:
-                log.info("[LMSA] Using pre-obtained WUST token")
-                lmsa_session = auth_client.login_with_wust(lmsa_wust)
-            elif lmsa_email and lmsa_password:
-                log.info("[LMSA] Authenticating with Lenovo ID: %s", lmsa_email)
-                lmsa_session = auth_client.login(lmsa_email, lmsa_password)
-            else:
-                log.warning(
-                    "[LMSA] --lmsa-email provided but --lmsa-password missing "
-                    "(also check LMSA_PASSWORD env var)"
-                )
-            if lmsa_session and lmsa_session.is_authenticated:
-                log.info("[LMSA] ✓ Authentication successful — JWT active")
-            elif lmsa_session is not None:
-                log.warning("[LMSA] Session obtained but not authenticated "
-                            "(no JWT) — crawl continues without auth")
-        except Exception as exc:
-            log.warning("[LMSA] Auth error (continuing without auth): %s", exc)
-
-    # ------------------------------------------------------------------ #
-    # LMSA firmware scan (when target is rsddownload-secure.lenovo.com)
-    # ------------------------------------------------------------------ #
-    extra_seed_urls: list[str] = []
-    _LMSA_S3_HOST = "rsddownload-secure.lenovo.com"
-    if (
-        lmsa_session is not None
-        and lmsa_session.is_authenticated
-        and _LMSA_S3_HOST in target_url
-    ):
-        log.info(
-            "[LMSA] Target is LMSA S3 bucket — scanning firmware API to "
-            "discover pre-signed download URLs …"
-        )
-        try:
-            from web_crawler.auth.lmsa import _FIRMWARE_COUNTRIES
-            country_filter = getattr(args, "lmsa_country", "")
-            if country_filter:
-                # Support comma-separated countries, e.g. "Mexico,China"
-                scan_countries = tuple(
-                    c.strip() for c in country_filter.split(",") if c.strip()
-                )
-                log.info(
-                    "[LMSA] Firmware scan limited to %d country/countries: %s",
-                    len(scan_countries), ", ".join(scan_countries),
-                )
-            else:
-                scan_countries = _FIRMWARE_COUNTRIES
-            resources = lmsa_session.scan_all_firmware(countries=scan_countries)
-            url_pairs  = lmsa_session.collect_download_urls(resources)
-            log.info(
-                "[LMSA] Firmware scan found %d unique download URLs (%d resources)",
-                len(url_pairs), len(resources),
-            )
-            # Also collect plugin/toolbox URLs.
-            plugin_pairs = lmsa_session.get_plugin_urls()
-            if plugin_pairs:
-                log.info("[LMSA] Plugin/tool URLs: %d", len(plugin_pairs))
-
-            # Write typed URL manifest files (rom, tool, other).
-            typed = lmsa_session.collect_download_urls_by_type(resources)
-            for cat_name, cat_pairs in typed.items():
-                if cat_pairs:
-                    typed_path = output_dir / f"lmsa_{cat_name}_urls.txt"
-                    with typed_path.open("w", encoding="utf-8") as tf:
-                        for dl_url, dl_name in cat_pairs:
-                            tf.write(f"{dl_url}\t{dl_name}\n")
-                    log.info(
-                        "[LMSA] %s URL manifest: %s (%d URLs)",
-                        cat_name, typed_path, len(cat_pairs),
-                    )
-            # Write plugin URLs to a dedicated manifest file.
-            if plugin_pairs:
-                plugin_path = output_dir / "lmsa_plugin_urls.txt"
-                with plugin_path.open("w", encoding="utf-8") as pf:
-                    for dl_url, dl_name in plugin_pairs:
-                        pf.write(f"{dl_url}\t{dl_name}\n")
-                log.info(
-                    "[LMSA] Plugin URL manifest: %s (%d URLs)",
-                    plugin_path, len(plugin_pairs),
-                )
-
-            # Write combined manifest with all URLs (backward compatibility).
-            all_pairs = url_pairs + plugin_pairs
-            manifest_path = output_dir / "lmsa_firmware_urls.txt"
-            with manifest_path.open("w", encoding="utf-8") as mf:
-                for dl_url, dl_name in all_pairs:
-                    mf.write(f"{dl_url}\t{dl_name}\n")
-            log.info("[LMSA] Combined firmware URL manifest saved: %s", manifest_path)
-            # Collect pre-signed URLs as seeds for the crawler.
-            extra_seed_urls = [u for u, _ in all_pairs]
-        except Exception as exc:
-            log.warning("[LMSA] Firmware scan failed (continuing): %s", exc)
-
     # Parse skip_download_exts
     skip_dl_exts_raw = getattr(args, "skip_download_exts", "") or ""
     if skip_dl_exts_raw.strip().lower() == "all":
@@ -440,27 +276,6 @@ def main() -> None:
                     captcha_type=args.ai_captcha_type,
                 )
                 captcha_url = args.ai_captcha_url or target_url
-
-                # LMSA hosts (lsa.lenovo.com, rsddownload-secure.lenovo.com)
-                # require authentication via passport.lenovo.com — redirect
-                # the CAPTCHA solver to the actual login page.
-                _LMSA_CAPTCHA_HOSTS = {
-                    "lsa.lenovo.com",
-                    "rsddownload-secure.lenovo.com",
-                }
-                captcha_parsed = urllib.parse.urlparse(captcha_url)
-                if captcha_parsed.hostname in _LMSA_CAPTCHA_HOSTS:
-                    captcha_url = (
-                        "https://passport.lenovo.com/glbwebauthnv6/preLogin"
-                        "?lenovoid.action=uilogin"
-                        "&lenovoid.realm=lmsaclient"
-                        "&lenovoid.cb=https://lsa.lenovo.com"
-                        "/Tips/lenovoIdSuccess.html"
-                    )
-                    log.info(
-                        "[AI-CAPTCHA] LMSA target detected — redirecting "
-                        "CAPTCHA solver to passport.lenovo.com login"
-                    )
 
                 log.info(
                     "[AI-CAPTCHA] Solving CAPTCHA at %s (model=%s, type=%s)",
@@ -502,21 +317,14 @@ def main() -> None:
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
         skip_download_exts=skip_dl_exts,
-        lmsa_session=lmsa_session,
-        extra_seed_urls=extra_seed_urls,
     )
 
     # Inject cookies obtained by the AI CAPTCHA solver into the crawler
     # session so that subsequent requests carry the login cookies.
     if ai_cookies:
         parsed = urllib.parse.urlparse(target_url)
-        # Cookies from passport.lenovo.com need to be set on .lenovo.com
-        # for cross-subdomain access (lsa.lenovo.com, rsddownload-secure.lenovo.com).
         hostname = parsed.hostname or ""
-        if hostname.endswith(".lenovo.com"):
-            cookie_domain = ".lenovo.com"
-        else:
-            cookie_domain = hostname
+        cookie_domain = hostname
         for name, value in ai_cookies.items():
             crawler.session.cookies.set(name, value, domain=cookie_domain)
         log.info(
