@@ -314,9 +314,12 @@ class Crawler:
         """Skip the full crawl; fetch only the start page and enumerate downloads.
 
         This mode:
-        1. Fetches the start URL once to discover AJAX download endpoints.
-        2. Runs the AJAX ID enumeration (1 … 50 000) to find every download.
-        3. Writes ``download_urls.md`` with real firmware names.
+        1. Fetches the start URL to discover firmware-page links.
+        2. Visits a sample of firmware pages to discover AJAX download endpoints
+           (the ``fetch('ajax_url.php?firmid=' + …)`` patterns live on these
+           sub-pages, not on the home page).
+        3. Runs the AJAX ID enumeration (1 … 50 000) to find every download.
+        4. Writes ``download_urls.md`` with real firmware names.
 
         Much faster than a full crawl because it skips link following,
         asset downloads, and all other crawling stages.
@@ -337,15 +340,36 @@ class Crawler:
         page_html = resp.text
         page_url = resp.url  # may have been redirected
 
-        # Extract all links from the page (HTML + inline JS).
-        # extract_all() already calls resolve_ajax_urls() for HTML pages.
+        # Extract all links from the home page (HTML + inline JS).
         links = extract_all(page_html, "text/html", page_url, self.base)
 
-        log.info("Discovered %d link(s) on start page; probing for downloads …",
-                 len(links))
+        log.info("Discovered %d link(s) on start page", len(links))
 
-        # Run the normal download-link discovery logic on the collected links.
+        # Try the home-page links first (works if AJAX patterns are inline).
         self._discover_download_links(links, page_url, page_html)
+
+        # If no enumeration was triggered yet, the AJAX fetch() patterns are
+        # probably on individual sub-pages (e.g. firmwares.php?firm=28436),
+        # not on the home page.  Visit a sample of sub-pages that have
+        # numeric query params — those are likely firmware detail pages.
+        if not self._ajax_enum_done:
+            sub_pages = self._pick_firmware_subpages(links, max_pages=5)
+            if sub_pages:
+                log.info("Visiting %d sub-page(s) to discover AJAX patterns …",
+                         len(sub_pages))
+            for sp_url in sub_pages:
+                try:
+                    sp_resp = self.session.get(sp_url, timeout=REQUEST_TIMEOUT)
+                except _NETWORK_ERRORS:
+                    continue
+                if not sp_resp.ok:
+                    continue
+                sp_html = sp_resp.text
+                sp_links = extract_all(sp_html, "text/html", sp_url, self.base)
+                self._discover_download_links(sp_links, sp_url, sp_html)
+                # Stop once an enumeration has been triggered.
+                if self._ajax_enum_done:
+                    break
 
         # Write the final clean table.
         self._write_download_url_list()
@@ -356,6 +380,40 @@ class Crawler:
                      n, self.output_dir / "download_urls.md")
         else:
             log.warning("No download links found on %s", self.start_url)
+
+    def _pick_firmware_subpages(
+        self, links: set[str], *, max_pages: int = 5,
+    ) -> list[str]:
+        """Select a small sample of same-host links that look like firmware pages.
+
+        A firmware page typically has a numeric query parameter
+        (e.g. ``firmwares.php?firm=28436``).  We pick up to *max_pages*
+        such links, preferring those with the highest numeric values
+        (most likely to be valid / recently added).
+        """
+        candidates: list[tuple[int, str]] = []
+        for link in links:
+            parsed = urllib.parse.urlparse(link)
+            if parsed.netloc != self.allowed_host:
+                continue
+            if not parsed.query:
+                continue
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            for vals in qs.values():
+                for v in vals:
+                    if v.isdigit():
+                        candidates.append((int(v), link))
+                        break
+        # Deduplicate by URL.
+        seen: set[str] = set()
+        unique: list[tuple[int, str]] = []
+        for num, url in candidates:
+            if url not in seen:
+                seen.add(url)
+                unique.append((num, url))
+        # Highest numeric value first (most likely valid).
+        unique.sort(key=lambda t: t[0], reverse=True)
+        return [url for _, url in unique[:max_pages]]
 
     def _log_final_stats(self) -> None:
         """Print a summary table with final crawl statistics."""
