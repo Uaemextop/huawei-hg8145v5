@@ -231,6 +231,12 @@ class Crawler:
         # IDs 1…50 000 against the same endpoint to find every download.
         self._ajax_enum_done: set[str] = set()  # endpoint paths already scanned
 
+        # Hint IDs extracted from page links, keyed by query parameter name
+        # (e.g. {"firm": {28436, 28455, …}}).  Used to compute the scan
+        # range for AJAX enumeration so we don't waste time probing
+        # thousands of empty low-numbered IDs.
+        self._firmware_id_hints: dict[str, set[int]] = {}
+
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._respect_robots = respect_robots
@@ -345,6 +351,10 @@ class Crawler:
 
         log.info("Discovered %d link(s) on start page", len(links))
 
+        # Collect firmware ID hints from start-page links to narrow the
+        # enumeration range (e.g. firmwares.php?firm=28436 → hint 28436).
+        self._collect_firmware_id_hints(links)
+
         # Try the home-page links first (works if AJAX patterns are inline).
         self._discover_download_links(links, page_url, page_html)
 
@@ -418,6 +428,26 @@ class Crawler:
         # Highest numeric value first (most likely valid).
         unique.sort(key=lambda t: t[0], reverse=True)
         return [url for _, url in unique[:max_pages]]
+
+    def _collect_firmware_id_hints(self, links: set[str]) -> None:
+        """Extract numeric query-parameter values from same-host links.
+
+        Values are stored **per parameter name** so that
+        ``_enumerate_ajax_downloads`` can match them to the AJAX
+        parameter (e.g. ``firm`` hints → ``firmid`` AJAX param) and
+        ignore unrelated small numbers like page indices.
+        """
+        for link in links:
+            parsed = urllib.parse.urlparse(link)
+            if parsed.netloc != self.allowed_host:
+                continue
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            for param, vals in qs.items():
+                for v in vals:
+                    if v.isdigit():
+                        self._firmware_id_hints.setdefault(
+                            param, set(),
+                        ).add(int(v))
 
     def _log_final_stats(self) -> None:
         """Print a summary table with final crawl statistics."""
@@ -2414,6 +2444,7 @@ class Crawler:
     _ENUM_AJAX_WORKERS = 50      # concurrent probe workers
     _ENUM_PROBE_TIMEOUT = 10     # seconds – shorter than REQUEST_TIMEOUT for fast probes
     _ENUM_CONSECUTIVE_MISS_LIMIT = 2_000  # stop early after this many consecutive misses
+    _ENUM_RANGE_PADDING = 1_000  # IDs to pad below/above hint range
 
     def _enumerate_ajax_downloads(
         self,
@@ -2422,7 +2453,12 @@ class Crawler:
         page_path: str | None,
         page_param: str | None,
     ) -> None:
-        """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
+        """Probe a range of IDs against a discovered AJAX download endpoint.
+
+        Uses firmware ID hints from page links to scan only around the
+        range where valid IDs exist (±1 000 padding), instead of blindly
+        probing 1 … 50 000.  Falls back to the full range when no hints
+        are available.
 
         Runs once per unique AJAX endpoint.  Downloads are recorded
         **incrementally** as they are discovered so that partial results
@@ -2440,8 +2476,43 @@ class Crawler:
 
         max_id = self._ENUM_AJAX_MAX_ID
         base = self.base  # e.g. "https://getwayrom.com"
-        log.info("[ENUM] Scanning %s?%s=1…%d for download links …",
-                 ajax_path, ajax_param, max_id)
+
+        # Use firmware ID hints from page links to narrow the scan range.
+        # Without hints we'd scan 1…50 000 which wastes minutes on empty
+        # low-numbered IDs.  With hints (e.g. IDs around 28 000) we scan
+        # only ±_ENUM_RANGE_PADDING around the known range.
+        #
+        # Hints are keyed by param name; match them to the AJAX param so
+        # that e.g. page-link param "firm" maps to AJAX param "firmid".
+        # Use prefix matching (not arbitrary substring) to avoid false
+        # positives like "firm" ↔ "confirmation".
+        hint_ids: set[int] = set()
+        al = ajax_param.lower()
+        for pname, ids in self._firmware_id_hints.items():
+            pl = pname.lower()
+            if pl.startswith(al) or al.startswith(pl):
+                hint_ids.update(ids)
+        # Fallback: if no param-name match, use the largest hint set.
+        if not hint_ids and self._firmware_id_hints:
+            hint_ids = max(self._firmware_id_hints.values(), key=len)
+
+        padding = self._ENUM_RANGE_PADDING
+
+        if hint_ids:
+            min_hint = min(hint_ids)
+            max_hint = max(hint_ids)
+            start_id = max(1, min_hint - padding)
+            end_id = min(max_id, max_hint + padding)
+            log.info("[ENUM] %d hint ID(s) from page links (range %d–%d); "
+                     "scanning %s?%s=%d…%d",
+                     len(hint_ids), min_hint, max_hint,
+                     ajax_path, ajax_param, start_id, end_id)
+        else:
+            start_id = 1
+            end_id = max_id
+            log.info("[ENUM] No hint IDs found; scanning %s?%s=%d…%d",
+                     ajax_path, ajax_param, start_id, end_id)
+        scan_size = end_id - start_id + 1
 
         new_count = 0
         cancel = threading.Event()  # signal workers to stop on early termination
@@ -2537,7 +2608,7 @@ class Crawler:
         stopped_early = False
         with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
             for found in pool.map(
-                _probe_and_record, range(1, max_id + 1),
+                _probe_and_record, range(start_id, end_id + 1),
             ):
                 checked += 1
                 if found:
@@ -2547,7 +2618,7 @@ class Crawler:
                     consecutive_misses += 1
                 if checked % 1000 == 0:
                     log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
-                             checked, max_id, new_count)
+                             checked, scan_size, new_count)
                 # Early stop: if we've found at least some downloads and then
                 # hit a long stretch of consecutive misses, the remaining IDs
                 # are very likely unused.
@@ -2564,10 +2635,10 @@ class Crawler:
 
         if stopped_early:
             log.info("[ENUM] Stopped early at ID %d — %d download(s) found",
-                     checked, new_count)
+                     start_id + checked - 1, new_count)
         else:
             log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
-                     new_count, max_id)
+                     new_count, scan_size)
 
         log.info("[ENUM] Enumeration complete — %d download(s) total",
                  len(self._external_download_urls))
