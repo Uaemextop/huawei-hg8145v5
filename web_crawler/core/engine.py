@@ -2411,7 +2411,9 @@ class Crawler:
     # ------------------------------------------------------------------
 
     _ENUM_AJAX_MAX_ID = 50_000   # upper bound for ID probing
-    _ENUM_AJAX_WORKERS = 10      # concurrent probe/title-fetch workers
+    _ENUM_AJAX_WORKERS = 50      # concurrent probe workers
+    _ENUM_PROBE_TIMEOUT = 10     # seconds – shorter than REQUEST_TIMEOUT for fast probes
+    _ENUM_CONSECUTIVE_MISS_LIMIT = 2_000  # stop early after this many consecutive misses
 
     def _enumerate_ajax_downloads(
         self,
@@ -2442,9 +2444,12 @@ class Crawler:
                  ajax_path, ajax_param, max_id)
 
         new_count = 0
+        cancel = threading.Event()  # signal workers to stop on early termination
 
         def _probe_and_record(n: int) -> bool:
             """Probe a single ID; record and write to .md immediately."""
+            if cancel.is_set():
+                return False
             ajax_url = (f"{base}{ajax_path}"
                         f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
             with self._lock:
@@ -2452,7 +2457,7 @@ class Crawler:
                     return False
             try:
                 resp = self.session.get(
-                    ajax_url, timeout=REQUEST_TIMEOUT,
+                    ajax_url, timeout=self._ENUM_PROBE_TIMEOUT,
                     allow_redirects=False,
                     headers={"X-Requested-With": "XMLHttpRequest"},
                 )
@@ -2488,7 +2493,7 @@ class Crawler:
             if fw_page:
                 try:
                     tresp = self.session.get(
-                        fw_page, timeout=REQUEST_TIMEOUT, stream=True,
+                        fw_page, timeout=self._ENUM_PROBE_TIMEOUT, stream=True,
                     )
                     try:
                         if tresp.ok:
@@ -2527,6 +2532,9 @@ class Crawler:
             return True
 
         checked = 0
+        consecutive_misses = 0
+        miss_limit = self._ENUM_CONSECUTIVE_MISS_LIMIT
+        stopped_early = False
         with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
             for found in pool.map(
                 _probe_and_record, range(1, max_id + 1),
@@ -2534,12 +2542,32 @@ class Crawler:
                 checked += 1
                 if found:
                     new_count += 1
-                if checked % 5000 == 0:
+                    consecutive_misses = 0
+                else:
+                    consecutive_misses += 1
+                if checked % 1000 == 0:
                     log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
                              checked, max_id, new_count)
+                # Early stop: if we've found at least some downloads and then
+                # hit a long stretch of consecutive misses, the remaining IDs
+                # are very likely unused.
+                if (new_count > 0
+                        and consecutive_misses >= miss_limit):
+                    log.info(
+                        "[ENUM] %d consecutive misses after %d download(s) "
+                        "— stopping early at ID %d",
+                        consecutive_misses, new_count, checked,
+                    )
+                    stopped_early = True
+                    cancel.set()  # tell in-flight workers to bail out
+                    break
 
-        log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
-                 new_count, max_id)
+        if stopped_early:
+            log.info("[ENUM] Stopped early at ID %d — %d download(s) found",
+                     checked, new_count)
+        else:
+            log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
+                     new_count, max_id)
 
         log.info("[ENUM] Enumeration complete — %d download(s) total",
                  len(self._external_download_urls))
