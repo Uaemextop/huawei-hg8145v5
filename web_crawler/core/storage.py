@@ -9,6 +9,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Iterator
 
+from web_crawler.utils.url import _is_dynamic_path, _query_slug
+
 log = logging.getLogger("web-crawler")
 
 # Chunk size for streaming large binary files to disk (512 KiB)
@@ -225,5 +227,12 @@ def smart_local_path(
             }
             if ct in ext_map:
                 path += ext_map[ct]
+
+    # For dynamic scripts, embed a query hash in the filename so
+    # different parameter sets don't overwrite each other on disk.
+    if _is_dynamic_path(path) and parsed.query:
+        p = Path(path)
+        slug = _query_slug(parsed.query)
+        path = str(p.parent / f"{p.stem}{slug}{p.suffix}")
 
     return output_dir / Path(path)

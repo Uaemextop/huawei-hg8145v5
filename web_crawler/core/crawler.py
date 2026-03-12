@@ -108,6 +108,9 @@ from web_crawler.core.storage import (
     stream_to_file,
 )
 from web_crawler.extraction.links import extract_links
+from web_crawler.extraction.html_parser import (
+    extract_download_action_links, extract_external_download_links,
+)
 from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 

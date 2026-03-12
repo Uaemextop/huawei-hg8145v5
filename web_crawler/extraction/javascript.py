@@ -103,6 +103,20 @@ _OBJ_PROP_PATH_RE = re.compile(
     re.I,
 )
 
+# JS object property value – absolute URL (https://...) assigned in an
+# object literal:  {'key': 'https://example.com/path', ...}
+# This captures URLs from CMS config objects like jsoftData.system.
+_OBJ_PROP_URL_RE = re.compile(
+    r"""['"](?:\w+)['"]\s*:\s*['"`](https?://[^'"`\s\n]{5,300})['"`]""",
+    re.I,
+)
+
+# Property assignment:  obj.prop = 'https://...'  or  obj['prop'] = 'https://...'
+_PROP_ASSIGN_URL_RE = re.compile(
+    r"""\w+(?:\.\w+|\[['"][^'"]+['"]\])+\s*=\s*['"`](https?://[^'"`\s\n]{5,300})['"`]""",
+    re.I,
+)
+
 # Babel/webpack transpiler helper module names extracted as relative paths.
 # These look like  ./classExtractFieldDescriptor.js  or  ./setPrototypeOf.js
 # and are internal webpack chunk references, NOT real server files.
@@ -162,6 +176,14 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
     ):
         for m in pat.finditer(js):
             _add(m.group(1))
+
+    # Extract same-host absolute URLs from JS object properties and
+    # property assignments (e.g. jsoftData.system.userapi = 'https://...')
+    for pat in (_OBJ_PROP_URL_RE, _PROP_ASSIGN_URL_RE):
+        for m in pat.finditer(js):
+            raw = m.group(1)
+            if "${" not in raw:
+                _add(raw)
 
     for m in _DOC_WRITE_RE.finditer(js):
         snippet = m.group(1).replace("\\'", "'").replace('\\"', '"')

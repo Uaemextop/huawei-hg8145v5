@@ -135,6 +135,125 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     return found
 
 
+# ------------------------------------------------------------------
+# External cloud-storage download link extraction
+# ------------------------------------------------------------------
+
+# Domains for common cloud storage / file hosting services.
+# URLs on these hosts are always treated as external (allow_external=True)
+# so they can be recorded as download links even though they are off-site.
+_CLOUD_STORAGE_DOMAINS = frozenset({
+    "drive.google.com", "docs.google.com",
+    "storage.googleapis.com",
+    "onedrive.live.com", "1drv.ms",
+    "sharepoint.com",
+    "mega.nz", "mega.co.nz",
+    "mediafire.com", "www.mediafire.com",
+    "dropbox.com", "www.dropbox.com", "dl.dropboxusercontent.com",
+    "zippyshare.com",
+    "uploadhaven.com",
+    "files.catbox.moe", "catbox.moe",
+    "pixeldrain.com",
+    "anonfiles.com",
+    "gofile.io",
+    "krakenfiles.com",
+    "solidfiles.com",
+    "userscloud.com",
+    "bayfiles.com",
+    "up-load.io",
+    "send.cm",
+    "racaty.net",
+    "file.io",
+    "transfer.sh",
+    "wetransfer.com",
+    "we.tl",
+    "rapidgator.net",
+    "turbobit.net",
+    "hitfile.net",
+    "filejoker.net",
+    "katfile.com",
+    "clicknupload.org",
+})
+
+
+def extract_external_download_links(html: str, page_url: str,
+                                    base: str) -> set[str]:
+    """Extract URLs pointing to external cloud-storage / file-hosting services.
+
+    These links are often the *actual* download locations for files listed
+    on PHP download portals (Google Drive, Mega, MediaFire, OneDrive, etc.).
+    They are collected separately so the crawler can record them in
+    ``download_links.txt`` even though they are on external domains.
+    """
+    found: set[str] = set()
+    if BeautifulSoup is None:
+        return found
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return found
+
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        if not href.startswith(("http://", "https://")):
+            continue
+        import urllib.parse as _up
+        netloc = _up.urlparse(href).netloc.lower()
+        # Check exact match or suffix match (for subdomains)
+        for domain in _CLOUD_STORAGE_DOMAINS:
+            if netloc == domain or netloc.endswith("." + domain):
+                n = normalise_url(href, page_url, base,
+                                  allow_external=True)
+                if n:
+                    found.add(n)
+                break
+
+    return found
+
+
+# ------------------------------------------------------------------
+# PHP CMS download-action link extraction
+# ------------------------------------------------------------------
+
+# Common PHP CMS query parameters that indicate a download action.
+_DOWNLOAD_ACTION_RE = re.compile(
+    r"[?&](?:"
+    r"(?:a|action|act|do|task)=downloads?"
+    r"|c=download"
+    r"|(?:download|dl|get|descargar)="
+    r"|b=file&[^#]*c=download"
+    r")",
+    re.I,
+)
+
+
+def extract_download_action_links(html: str, page_url: str,
+                                  base: str) -> set[str]:
+    """Extract links that trigger a file download via PHP CMS query parameters.
+
+    Patterns like ``?a=downloads&b=file&c=download&id=NNN`` are common in
+    PHP-based download portals (JSOFTDownload, WP-Filebase, etc.).
+    """
+    found: set[str] = set()
+    if BeautifulSoup is None:
+        return found
+
+    try:
+        soup = BeautifulSoup(html, _BS4_PARSER)
+    except Exception:
+        return found
+
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        if _DOWNLOAD_ACTION_RE.search(href):
+            n = normalise_url(href, page_url, base)
+            if n:
+                found.add(n)
+
+    return found
+
+
 def _extract_jsonld_urls(
     obj: object,
     keys: frozenset[str],
