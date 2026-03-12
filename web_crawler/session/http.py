@@ -29,6 +29,14 @@ try:
 except ImportError:
     _CURL_CFFI_AVAILABLE = False
 
+try:
+    import brotli as _brotli  # noqa: F401
+    _BROTLI_AVAILABLE = True
+except ImportError:
+    _BROTLI_AVAILABLE = False
+
+_ACCEPT_ENCODING = "gzip, deflate, br" if _BROTLI_AVAILABLE else "gzip, deflate"
+
 # TLS impersonation profiles to try, in order of preference
 _CF_IMPERSONATE_PROFILES = ["chrome", "safari", "safari_ios"]
 
@@ -59,7 +67,7 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": _ACCEPT_ENCODING,
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -103,7 +111,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
             "es-MX,es;q=0.9,en;q=0.8",
             "en-GB,en;q=0.9",
         ]),
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": _ACCEPT_ENCODING,
         "Cache-Control": random.choice(["no-cache", "no-store", "max-age=0"]),
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",

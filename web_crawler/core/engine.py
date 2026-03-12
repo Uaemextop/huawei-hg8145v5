@@ -38,7 +38,9 @@ try:
 except ImportError:
     CfRequestException = None  # type: ignore[misc,assignment]
 
-# Network exception tuple that catches both requests and curl_cffi errors
+# Network exception tuple that catches both requests and curl_cffi errors.
+# ContentDecodingError is a subclass of RequestException so it is
+# implicitly covered; the specific catch lives in _fetch_and_process.
 _NETWORK_ERRORS: tuple[type[Exception], ...] = (requests.RequestException,)
 if CfRequestException is not None:
     _NETWORK_ERRORS = (requests.RequestException, CfRequestException)
@@ -135,6 +137,7 @@ class Crawler:
         allow_external: bool = True,
         skip_media_files: bool = False,
         skip_download_exts: frozenset[str] | None = None,
+        download_only: bool = False,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -148,6 +151,7 @@ class Crawler:
         self.git_push_every = git_push_every
         self.skip_captcha_check = skip_captcha_check
         self.skip_media_files = skip_media_files
+        self.download_only = download_only
         # Extensions for which we record the download link but skip the actual
         # download.  Links are written to download_links.txt with ready-to-run
         # curl commands including all required authentication headers.
@@ -218,9 +222,20 @@ class Crawler:
 
         # Discovered external download URLs (Google Drive, OneDrive, Mega …).
         # Populated by _discover_download_links() when AJAX endpoints return
-        # cloud-storage URLs.  Written to download_urls.txt at crawl end.
-        self._external_download_urls: list[tuple[str, str, str]] = []
-        # ^-- list of (page_url, ajax_endpoint, download_url)
+        # cloud-storage URLs.  Written to download_urls.md at crawl end.
+        self._external_download_urls: list[tuple[str, str, str, str]] = []
+        # ^-- list of (page_url, ajax_endpoint, download_url, firmware_name)
+
+        # AJAX download-endpoint enumeration state.
+        # When the first AJAX download is discovered, the crawler probes
+        # IDs 1…50 000 against the same endpoint to find every download.
+        self._ajax_enum_done: set[str] = set()  # endpoint paths already scanned
+
+        # Hint IDs extracted from page links, keyed by query parameter name
+        # (e.g. {"firm": {28436, 28455, …}}).  Used to compute the scan
+        # range for AJAX enumeration so we don't waste time probing
+        # thousands of empty low-numbered IDs.
+        self._firmware_id_hints: dict[str, set[int]] = {}
 
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
@@ -236,7 +251,10 @@ class Crawler:
         log.info("Output directory : %s", self.output_dir.resolve())
         log.info("Target URL       : %s", self.start_url)
         log.info("Allowed host     : %s", self.allowed_host)
-        log.info("Page limit       : NONE (exhaustive)")
+        if self.download_only:
+            log.info("Mode             : DOWNLOAD-ONLY (skip crawl, enumerate downloads)")
+        else:
+            log.info("Page limit       : NONE (exhaustive)")
         if self.max_depth:
             log.info("Max depth        : %d", self.max_depth)
         if self.download_extensions:
@@ -255,6 +273,10 @@ class Crawler:
             )
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         ci_endgroup()
+
+        if self.download_only:
+            self._run_download_only()
+            return
 
         # Pre-solve SiteGround CAPTCHA if the server uses it.
         # Must run before any other HTTP requests so the session cookie
@@ -293,6 +315,137 @@ class Crawler:
                 self._fetch_and_process(url, depth)
 
         self._log_final_stats()
+
+    def _run_download_only(self) -> None:
+        """Skip the full crawl; fetch only the start page and enumerate downloads.
+
+        This mode:
+        1. Fetches the start URL to discover firmware-page links.
+        2. Visits a sample of firmware pages to discover AJAX download endpoints
+           (the ``fetch('ajax_url.php?firmid=' + …)`` patterns live on these
+           sub-pages, not on the home page).
+        3. Runs the AJAX ID enumeration (1 … 50 000) to find every download.
+        4. Writes ``download_urls.md``.
+
+        Much faster than a full crawl because it skips link following,
+        asset downloads, and all other crawling stages.
+        """
+        from web_crawler.extraction import extract_all
+
+        log.info("Download-only mode: fetching start page …")
+        try:
+            resp = self.session.get(self.start_url, timeout=REQUEST_TIMEOUT)
+        except _NETWORK_ERRORS as exc:
+            log.error("Failed to fetch start URL: %s", exc)
+            return
+
+        if not resp.ok:
+            log.error("Start URL returned HTTP %d", resp.status_code)
+            return
+
+        page_html = resp.text
+        page_url = resp.url  # may have been redirected
+
+        # Extract all links from the home page (HTML + inline JS).
+        links = extract_all(page_html, "text/html", page_url, self.base)
+
+        log.info("Discovered %d link(s) on start page", len(links))
+
+        # Try the home-page links first (works if AJAX patterns are inline).
+        self._discover_download_links(links, page_url, page_html)
+
+        # If no enumeration was triggered yet, the AJAX fetch() patterns are
+        # probably on individual sub-pages (e.g. firmwares.php?firm=28436),
+        # not on the home page.  Visit a sample of sub-pages that have
+        # numeric query params — those are likely firmware detail pages.
+        if not self._ajax_enum_done:
+            sub_pages = self._pick_firmware_subpages(links, max_pages=5)
+            if sub_pages:
+                log.info("Visiting %d sub-page(s) to discover AJAX patterns …",
+                         len(sub_pages))
+            for sp_url in sub_pages:
+                try:
+                    sp_resp = self.session.get(sp_url, timeout=REQUEST_TIMEOUT)
+                except _NETWORK_ERRORS:
+                    continue
+                if not sp_resp.ok:
+                    continue
+                sp_html = sp_resp.text
+                sp_links = extract_all(sp_html, "text/html", sp_url, self.base)
+                self._discover_download_links(sp_links, sp_url, sp_html)
+                # Stop once an enumeration has been triggered.
+                if self._ajax_enum_done:
+                    break
+
+        # Write the final clean table.
+        self._write_download_url_list()
+
+        n = len(self._external_download_urls)
+        if n:
+            log.info("Done — %d download(s) written to %s",
+                     n, self.output_dir / "download_urls.md")
+            # Git-push the MD file so it appears in the crawl repository.
+            self._git_push_download_md()
+        else:
+            log.warning("No download links found on %s", self.start_url)
+
+    def _pick_firmware_subpages(
+        self, links: set[str], *, max_pages: int = 5,
+    ) -> list[str]:
+        """Select a small sample of same-host links that look like firmware pages.
+
+        A firmware page typically has a numeric query parameter
+        (e.g. ``firmwares.php?firm=28436``).  We pick up to *max_pages*
+        such links, preferring those with the highest numeric values
+        (most likely to be valid / recently added).
+        """
+        candidates: list[tuple[int, str]] = []
+        for link in links:
+            parsed = urllib.parse.urlparse(link)
+            if parsed.netloc != self.allowed_host:
+                continue
+            if not parsed.query:
+                continue
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            best = None
+            for vals in qs.values():
+                for v in vals:
+                    if v.isdigit():
+                        n = int(v)
+                        if best is None or n > best:
+                            best = n
+            if best is not None:
+                candidates.append((best, link))
+        # Deduplicate by URL.
+        seen: set[str] = set()
+        unique: list[tuple[int, str]] = []
+        for num, url in candidates:
+            if url not in seen:
+                seen.add(url)
+                unique.append((num, url))
+        # Highest numeric value first (most likely valid).
+        unique.sort(key=lambda t: t[0], reverse=True)
+        return [url for _, url in unique[:max_pages]]
+
+    def _collect_firmware_id_hints(self, links: set[str]) -> None:
+        """Extract numeric query-parameter values from same-host links.
+
+        Values are stored **per parameter name** so that
+        ``_enumerate_ajax_downloads`` can match them to the AJAX
+        parameter (e.g. ``firm`` hints → ``firmid`` AJAX param) and
+        ignore unrelated small numbers like page indices.
+        """
+        for link in links:
+            parsed = urllib.parse.urlparse(link)
+            if parsed.netloc != self.allowed_host:
+                continue
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            for param, vals in qs.items():
+                for v in vals:
+                    if v.isdigit():
+                        self._firmware_id_hints.setdefault(
+                            param, set(),
+                        ).add(int(v))
 
     def _log_final_stats(self) -> None:
         """Print a summary table with final crawl statistics."""
@@ -1314,6 +1467,17 @@ class Crawler:
             self._parse_local_file(local_path, url)
         return count
 
+    # Maximum URL path depth (number of ``/`` segments).  Deeper paths
+    # are almost always caused by relative-link resolution loops where
+    # ``assets/js/vendor/`` keeps getting prepended to itself, creating
+    # an ever-growing URL like ``/a/b/a/b/a/b/page``.
+    _MAX_PATH_DEPTH = 15
+
+    # Regex that detects a sub-path of 1–3 segments repeating 3+ times
+    # consecutively (e.g. ``/a/b/a/b/a/b``) — a strong signal that
+    # relative-URL resolution is looping.
+    _REPEATING_SEGMENT_RE = re.compile(r"(/[^/]+(?:/[^/]+){0,2})\1{2}")
+
     def _enqueue(self, url: str, depth: int, *, priority: bool = False) -> None:
         """Add *url* to the queue if not yet visited and within scope.
 
@@ -1335,6 +1499,16 @@ class Crawler:
             # <script type="speculationrules"> exclusion lists).
             # '*' is not a valid character in an HTTP request path.
             if "*" in parsed.path:
+                return
+            # ── Path-explosion guard ────────────────────────────────
+            # Relative-link resolution can create infinitely nested paths
+            # (e.g. /a/b/a/b/a/b/page).  Reject URLs whose path has too
+            # many segments or contains a repeating sub-path.
+            if parsed.path.count("/") > self._MAX_PATH_DEPTH:
+                return
+            if self._REPEATING_SEGMENT_RE.search(parsed.path):
+                return
+            if len(url) > 2000:
                 return
             # Skip extensions that SiteGround's WAF always blocks with 403.
             # Probing these wastes requests and inflates error counters.
@@ -1496,6 +1670,38 @@ class Crawler:
         except Exception as exc:
             log.warning("[GIT] Push error: %s", exc)
 
+    def _git_push_download_md(self) -> None:
+        """Commit and push ``download_urls.md`` so it appears in the crawl repo."""
+        md_path = self.output_dir / "download_urls.md"
+        if not md_path.exists():
+            return
+        cwd = str(self.output_dir.resolve())
+        # Check if git repo exists in output dir.
+        if not (self.output_dir / ".git").is_dir():
+            return
+        try:
+            subprocess.run(
+                ["git", "add", "--", "download_urls.md"],
+                cwd=cwd, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"download_urls.md — {len(self._external_download_urls)} firmware download(s)"],
+                cwd=cwd, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "push"],
+                cwd=cwd, check=True, capture_output=True, timeout=300,
+            )
+            log.info("[GIT] Pushed download_urls.md to crawl repo")
+        except subprocess.CalledProcessError as exc:
+            msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
+            log.warning("[GIT] Push download_urls.md failed: %s", msg)
+        except FileNotFoundError:
+            log.debug("[GIT] git not found — skipping download_urls.md push")
+        except Exception as exc:
+            log.warning("[GIT] Push error: %s", exc)
+
     @staticmethod
     def _dir_from_url(url: str) -> str:
         """Derive the directory path from a URL for probe tracking."""
@@ -1651,6 +1857,21 @@ class Crawler:
                 stream=_use_stream,
                 headers=_conditional if _conditional else None,
             )
+        except requests.exceptions.ContentDecodingError:
+            # Brotli / encoding failure – retry without br encoding
+            log.debug("ContentDecodingError on %s – retrying without br", url)
+            _no_br = _conditional.copy() if _conditional else {}
+            _no_br["Accept-Encoding"] = "gzip, deflate"
+            try:
+                resp = self.session.get(
+                    url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                    stream=_use_stream,
+                    headers=_no_br,
+                )
+            except _NETWORK_ERRORS as exc2:
+                log.warning("Request failed for %s – %s", url, exc2)
+                self._stats["err"] += 1
+                return
         except _NETWORK_ERRORS as exc:
             # Re-enqueue on transient network errors up to MAX_URL_RETRIES
             with self._lock:
@@ -2055,6 +2276,17 @@ class Crawler:
         else:
             content = resp.content
 
+        # Defensive Brotli decompression: if the server returned
+        # Content-Encoding: br but urllib3 could not decompress it
+        # (e.g. brotli package was missing at session-creation time),
+        # attempt manual decompression so the bytes are usable.
+        if resp.headers.get("Content-Encoding", "").strip().lower() == "br":
+            try:
+                import brotli
+                content = brotli.decompress(content)
+            except Exception:
+                pass
+
         log.debug(
             "  ← HTTP %s  CT: %s  %d bytes",
             resp.status_code, content_type, len(content),
@@ -2143,7 +2375,7 @@ class Crawler:
             new_links |= self._resolve_ajax_params(new_links, url)
             # Follow resolved AJAX endpoints to discover external download
             # URLs (Google Drive, OneDrive, Mega, etc.) and record them.
-            self._discover_download_links(new_links, url)
+            self._discover_download_links(new_links, url, text)
             # Also scan for links to target download extensions
             if self.download_extensions:
                 new_links |= self._extract_extension_links(
@@ -2235,11 +2467,208 @@ class Crawler:
         return extra
 
     # ------------------------------------------------------------------
+    # Full-range AJAX download enumeration (IDs 1 … 50 000)
+    # ------------------------------------------------------------------
+
+    _ENUM_AJAX_MAX_ID = 50_000   # upper bound for ID probing
+    _ENUM_AJAX_WORKERS = 200     # concurrent probe workers (high for fast scanning)
+    _ENUM_PROBE_TIMEOUT = 5      # seconds – short timeout for fast probes
+
+    def _enumerate_ajax_downloads(
+        self,
+        ajax_path: str,
+        ajax_param: str,
+        page_path: str | None,
+        page_param: str | None,
+    ) -> None:
+        """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
+
+        Always scans the full range because valid firmware IDs can be
+        distributed anywhere in the 1–50 000 space.  No early stopping
+        is used — with 200 workers most probes complete in under 5 min.
+
+        **Phase 1** — fast probe: 200 workers hit the AJAX endpoint for
+        every ID.  No title fetching, no extra HTTP requests.
+
+        **Phase 2** — batch title resolution: fetch the firmware-page
+        ``<title>`` for each discovered ID (200 workers in parallel) to
+        replace the placeholder ``#N`` with the real file name.
+
+        Downloads are recorded incrementally so partial results survive
+        interruptions.
+        """
+        enum_key = f"{ajax_path}?{ajax_param}"
+        with self._lock:
+            if enum_key in self._ajax_enum_done:
+                return
+            self._ajax_enum_done.add(enum_key)
+
+        max_id = self._ENUM_AJAX_MAX_ID
+        base = self.base  # e.g. "https://getwayrom.com"
+
+        # Always scan the full range — valid IDs can be anywhere.
+        start_id = 1
+        end_id = max_id
+        scan_size = end_id - start_id + 1
+        log.info("[ENUM] Phase 1 — probing %s?%s=%d…%d (%d workers, %ds timeout)",
+                 ajax_path, ajax_param, start_id, end_id,
+                 self._ENUM_AJAX_WORKERS, self._ENUM_PROBE_TIMEOUT)
+
+        new_count = 0
+        # Collect (index, n) pairs for phase-2 title resolution.
+        title_queue: list[tuple[int, int]] = []  # (list-index, firmware-id)
+
+        def _probe_and_record(n: int) -> bool:
+            """Probe a single ID; record download URL immediately."""
+            ajax_url = (f"{base}{ajax_path}"
+                        f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
+            with self._lock:
+                if ajax_url in self._download_links_seen:
+                    return False
+            try:
+                resp = self.session.get(
+                    ajax_url, timeout=self._ENUM_PROBE_TIMEOUT,
+                    allow_redirects=False,
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+            except _NETWORK_ERRORS:
+                return False
+            if resp.status_code == 429:
+                time.sleep(2)
+                return False
+            if not resp.ok:
+                return False
+            body = resp.text.strip()
+            if not body or len(body) > 2000:
+                return False
+            if not body.startswith(("http://", "https://")):
+                return False
+            dp = urllib.parse.urlparse(body)
+            is_cloud = dp.netloc in CLOUD_STORAGE_HOSTS
+            if not is_cloud:
+                for h in CLOUD_STORAGE_HOSTS:
+                    if dp.netloc.endswith("." + h):
+                        is_cloud = True
+                        break
+            if not is_cloud:
+                return False
+
+            download_url = body
+            fw_page = ""
+            if page_path and page_param:
+                fw_page = (f"{base}{page_path}"
+                           f"?{urllib.parse.urlencode({page_param: str(n)})}")
+            fw_name = f"#{n}"
+            direct = self._build_direct_download_url(download_url)
+
+            with self._lock:
+                if ajax_url in self._download_links_seen:
+                    return False
+                self._download_links_seen.add(ajax_url)
+                idx = len(self._external_download_urls)
+                self._external_download_urls.append(
+                    (fw_page, ajax_url, download_url, fw_name),
+                )
+                if fw_page:
+                    title_queue.append((idx, n))
+                self._record_external_download(
+                    fw_page, download_url, direct, fw_name,
+                )
+            return True
+
+        # ---- Phase 1: fast probe (no early stopping) ----
+        checked = 0
+        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
+            for found in pool.map(
+                _probe_and_record, range(start_id, end_id + 1),
+            ):
+                checked += 1
+                if found:
+                    new_count += 1
+                if checked % 5000 == 0:
+                    log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
+                             checked, scan_size, new_count)
+
+        log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
+                 new_count, scan_size)
+
+        # ---- Phase 2: batch title resolution ----
+        if title_queue:
+            log.info("[ENUM] Phase 2 — resolving titles for %d firmware(s) …",
+                     len(title_queue))
+            self._resolve_firmware_titles(title_queue)
+
+        log.info("[ENUM] Enumeration complete — %d download(s) total",
+                 len(self._external_download_urls))
+
+    def _resolve_firmware_titles(
+        self, title_queue: list[tuple[int, int]],
+    ) -> None:
+        """Fetch ``<title>`` for each firmware page and update the names.
+
+        Runs with ``_ENUM_AJAX_WORKERS`` parallelism so that title
+        resolution for thousands of hits takes seconds, not minutes.
+        """
+        resolved = 0
+
+        def _fetch_title(item: tuple[int, int]) -> None:
+            nonlocal resolved
+            idx, n = item
+            fw_page, ajax_url, download_url, old_name = (
+                self._external_download_urls[idx]
+            )
+            if not fw_page:
+                return
+            fw_name = ""
+            try:
+                tresp = self.session.get(
+                    fw_page, timeout=self._ENUM_PROBE_TIMEOUT, stream=True,
+                )
+                try:
+                    if tresp.ok:
+                        head = b""
+                        for chunk in tresp.iter_content(chunk_size=2048):
+                            head += chunk
+                            if len(head) >= 8192:
+                                break
+                        text = head.decode("utf-8", errors="replace")
+                        tm = re.search(
+                            r"<title>(.*?)</title>", text,
+                            re.I | re.DOTALL,
+                        )
+                        if tm:
+                            fw_name = re.split(
+                                r"\s*\|\s*", tm.group(1),
+                            )[0].strip()
+                finally:
+                    tresp.close()
+            except _NETWORK_ERRORS:
+                pass
+            if fw_name and fw_name != old_name:
+                with self._lock:
+                    self._external_download_urls[idx] = (
+                        fw_page, ajax_url, download_url, fw_name,
+                    )
+                    resolved += 1
+
+        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
+            done = 0
+            total = len(title_queue)
+            for _ in pool.map(_fetch_title, title_queue):
+                done += 1
+                if done % 5000 == 0:
+                    log.info("[ENUM]   … titles %d/%d resolved", done, total)
+
+        log.info("[ENUM] Resolved %d/%d firmware title(s)",
+                 resolved, len(title_queue))
+
+    # ------------------------------------------------------------------
     # AJAX download-link discovery (Google Drive, OneDrive, Mega, …)
     # ------------------------------------------------------------------
 
     def _discover_download_links(
         self, links: set[str], page_url: str,
+        page_html: str | None = None,
     ) -> None:
         """Follow AJAX endpoints that return cloud-storage download URLs.
 
@@ -2254,8 +2683,17 @@ class Crawler:
            URLs whose path suggests a download handler).
         2. GETs each endpoint with the crawler's session.
         3. If the response is a cloud-storage URL, records it in
-           ``download_urls.txt`` with a ready-to-use direct link.
+           ``download_urls.md`` with the firmware name and direct link.
         """
+        # Extract firmware name from the page <title> when available.
+        firmware_name = ""
+        if page_html:
+            m = re.search(r"<title>(.*?)</title>", page_html,
+                          re.I | re.DOTALL)
+            if m:
+                # Title format: "FirmwareName.zip | Firmware Download | …"
+                firmware_name = re.split(r"\s*\|\s*", m.group(1))[0].strip()
+
         # Heuristic: AJAX download endpoints are same-host PHP/ASP URLs
         # whose path or query suggests a download handler.
         _AJAX_HINT_RE = re.compile(
@@ -2333,14 +2771,44 @@ class Crawler:
             )
             with self._lock:
                 self._external_download_urls.append(
-                    (page_url, link, download_url)
+                    (page_url, link, download_url, firmware_name)
                 )
 
-            # Also write to download_links.txt immediately (with curl cmd)
+            # Write to download_urls.md immediately
             with self._lock:
                 self._record_external_download(
-                    page_url, download_url, direct_url,
+                    page_url, download_url, direct_url, firmware_name,
                 )
+
+            # Trigger full-range AJAX enumeration (runs once per endpoint).
+            # Derive the page-URL pattern so titles can be fetched later.
+            page_parsed = urllib.parse.urlparse(page_url)
+            page_qs = urllib.parse.parse_qs(page_parsed.query)
+            ajax_qs = urllib.parse.parse_qs(parsed.query)
+
+            for a_param, a_vals in ajax_qs.items():
+                if not a_vals or not a_vals[0].isdigit():
+                    continue
+                # Match the AJAX param value to a page-URL param
+                p_param = None
+                for pn, pv in page_qs.items():
+                    if pv and pv[0] == a_vals[0]:
+                        p_param = pn
+                        break
+                if p_param is None:
+                    # Fallback: substring matching (firm ↔ firmid)
+                    al = a_param.lower()
+                    for pn in page_qs:
+                        pl = pn.lower()
+                        if pl in al or al in pl:
+                            p_param = pn
+                            break
+                self._enumerate_ajax_downloads(
+                    parsed.path, a_param,
+                    page_parsed.path if p_param else None,
+                    p_param,
+                )
+                break  # one enumeration per endpoint
 
     @staticmethod
     def _build_direct_download_url(url: str) -> str:
@@ -2387,46 +2855,51 @@ class Crawler:
 
     def _record_external_download(
         self, page_url: str, sharing_url: str, direct_url: str,
+        firmware_name: str = "",
     ) -> None:
-        """Append an external download link to ``download_urls.txt``.
+        """Append an external download entry to ``download_urls.md``.
 
-        Each entry contains:
-        * The source page URL
-        * The cloud-storage sharing URL (as returned by the AJAX endpoint)
-        * A direct-download URL (with provider-specific bypass)
-        * Ready-to-run ``curl`` and ``wget`` commands
+        Writes a Markdown table row incrementally.  The file is fully
+        rewritten with a clean table by ``_write_download_url_list``
+        at the end of the crawl.
 
         Must be called while ``self._lock`` is held.
         """
-        dl_path = self.output_dir / "download_urls.txt"
+        dl_path = self.output_dir / "download_urls.md"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        name = firmware_name or "download"
         with dl_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"# Source page: {page_url}\n")
-            fh.write(f"# Sharing URL: {sharing_url}\n")
-            fh.write(f"{direct_url}\n")
-            fh.write(f"curl -L -o download_file '{direct_url}'\n")
-            fh.write(f"wget -O download_file '{direct_url}'\n")
-            fh.write("# " + "─" * 60 + "\n\n")
+            fh.write(f"- **{name}** — [Download]({direct_url})\n")
 
     def _write_download_url_list(self) -> None:
-        """Write all discovered external download URLs to ``download_urls.txt``.
+        """Write the final ``download_urls.md`` Markdown table.
 
-        This is called at the end of the crawl.  If individual entries
-        were already written during crawl (by ``_record_external_download``),
-        this method also writes a summary section at the end.
+        This is called at the end of the crawl.  Individual entries are
+        already appended by ``_record_external_download`` during the
+        crawl; this method rewrites the whole file to ensure a clean,
+        sorted table with a summary footer.
         """
         if not self._external_download_urls:
             return
-        dl_path = self.output_dir / "download_urls.txt"
+        dl_path = self.output_dir / "download_urls.md"
         dl_path.parent.mkdir(parents=True, exist_ok=True)
-        with dl_path.open("a", encoding="utf-8") as fh:
-            fh.write("\n# " + "═" * 60 + "\n")
-            fh.write(f"# SUMMARY: {len(self._external_download_urls)}"
-                      " download URL(s) discovered\n")
-            fh.write("# " + "═" * 60 + "\n\n")
-            for page_url, ajax_ep, download_url in self._external_download_urls:
+        with dl_path.open("w", encoding="utf-8") as fh:
+            fh.write("# Download URLs\n\n")
+            n = len(self._external_download_urls)
+            fh.write(f"> **{n}** download link(s) discovered\n\n")
+            fh.write("| # | File | Download | Source |\n")
+            fh.write("|---|------|----------|--------|\n")
+            for i, (page_url, _ajax_ep, download_url, fw_name) in enumerate(
+                self._external_download_urls, 1,
+            ):
                 direct = self._build_direct_download_url(download_url)
-                fh.write(f"{direct}\n")
+                name = fw_name or "download"
+                fh.write(
+                    f"| {i} "
+                    f"| {name} "
+                    f"| [Download]({direct}) "
+                    f"| [Source]({page_url}) |\n"
+                )
         log.info(
             "Download URLs: %d URL(s) → %s",
             len(self._external_download_urls), dl_path,
