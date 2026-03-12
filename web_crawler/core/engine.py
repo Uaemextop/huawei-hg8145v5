@@ -38,10 +38,19 @@ try:
 except ImportError:
     CfRequestException = None  # type: ignore[misc,assignment]
 
-# Network exception tuple that catches both requests and curl_cffi errors
-_NETWORK_ERRORS: tuple[type[Exception], ...] = (requests.RequestException,)
+# Network exception tuple that catches both requests and curl_cffi errors.
+# ContentDecodingError (e.g. brotli stream failures) is included so the
+# crawler retries with a fallback Accept-Encoding.
+_NETWORK_ERRORS: tuple[type[Exception], ...] = (
+    requests.RequestException,
+    requests.exceptions.ContentDecodingError,
+)
 if CfRequestException is not None:
-    _NETWORK_ERRORS = (requests.RequestException, CfRequestException)
+    _NETWORK_ERRORS = (
+        requests.RequestException,
+        requests.exceptions.ContentDecodingError,
+        CfRequestException,
+    )
 
 _VIDEO_EXTENSIONS = frozenset((
     ".mp4", ".webm", ".ogv", ".avi", ".mov", ".flv", ".mkv", ".wmv",
@@ -1651,6 +1660,21 @@ class Crawler:
                 stream=_use_stream,
                 headers=_conditional if _conditional else None,
             )
+        except requests.exceptions.ContentDecodingError:
+            # Brotli / encoding failure – retry without br encoding
+            log.debug("ContentDecodingError on %s – retrying without br", url)
+            _no_br = dict(_conditional) if _conditional else {}
+            _no_br["Accept-Encoding"] = "gzip, deflate"
+            try:
+                resp = self.session.get(
+                    url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                    stream=_use_stream,
+                    headers=_no_br,
+                )
+            except _NETWORK_ERRORS as exc2:
+                log.warning("Request failed for %s – %s", url, exc2)
+                self._stats["err"] += 1
+                return
         except _NETWORK_ERRORS as exc:
             # Re-enqueue on transient network errors up to MAX_URL_RETRIES
             with self._lock:

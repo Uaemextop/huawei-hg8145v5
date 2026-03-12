@@ -2,7 +2,7 @@
 
 from web_crawler.extraction.html import extract_html_attrs
 from web_crawler.extraction.css import extract_css_urls
-from web_crawler.extraction.javascript import extract_js_paths
+from web_crawler.extraction.javascript import extract_js_paths, resolve_ajax_urls
 from web_crawler.extraction.json_extract import extract_json_paths
 from web_crawler.extraction.google_drive import extract_cloud_links
 
@@ -12,7 +12,8 @@ import urllib.parse
 def extract_all(content, content_type, url, base):
     """Extract all links using all available extractors.
     
-    Also extracts cloud storage links (Google Drive, Mega, etc.).
+    Also extracts cloud storage links (Google Drive, Mega, etc.)
+    and resolves AJAX endpoints with dynamic parameters.
     """
     found = set()
     ct = content_type.split(";")[0].strip().lower()
@@ -30,6 +31,7 @@ def extract_all(content, content_type, url, base):
         found |= extract_html_attrs(content, url, base)
         found |= extract_js_paths(content, url, base)
         found |= extract_cloud_links(content)
+        found |= resolve_ajax_urls(content, content, url, base)
     elif ct in ("application/javascript", "text/javascript"):
         found |= extract_js_paths(content, url, base)
         found |= extract_cloud_links(content)

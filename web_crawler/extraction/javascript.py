@@ -30,10 +30,15 @@ _AJAX_URL_RE = re.compile(
     re.I,
 )
 
-# fetch('endpoint?param=' + var) / $.get('url?id=' + val)
-# Captures the static base URL from concatenated fetch/ajax calls so
-# that the crawler can discover the endpoint even when the dynamic part
-# cannot be resolved statically.
+# fetch('endpoint?param=' + var) – capture the query param name from the
+# static part of the URL so we can combine it with values found elsewhere
+# in the same page.
+_AJAX_PARAM_RE = re.compile(
+    r"""(?:fetch|axios\.(?:get|post)|(?:\$\.(?:get|post|ajax)))\s*\(\s*['"`]([^'"`\n?]+\?(\w+)=)['"`]\s*\+""",
+    re.I,
+)
+
+# Same pattern but only capture the static base URL (for the main loop).
 _AJAX_CONCAT_RE = re.compile(
     r"""(?:fetch|axios\.(?:get|post)|(?:\$\.(?:get|post|ajax)))\s*\(\s*['"`]([^'"`\n]+)['"`]\s*\+""",
     re.I,
@@ -199,6 +204,42 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
         if "${" not in raw:
             n = normalise_url(raw.strip(), page_url, base,
                               allow_external=True)
+            if n:
+                found.add(n)
+
+    return found
+
+
+def resolve_ajax_urls(js: str, page_html: str, page_url: str, base: str) -> set[str]:
+    """Resolve AJAX fetch endpoints that use dynamic parameter concatenation.
+
+    Looks for patterns like ``fetch('endpoint?param=' + var)`` in the JS,
+    then scans *page_html* for known parameter values (e.g. from ``<a>``
+    hrefs on the same page) and generates fully-qualified URLs for each
+    discovered value.  This allows the crawler to follow AJAX endpoints
+    that would otherwise require JavaScript execution.
+    """
+    found: set[str] = set()
+
+    for m in _AJAX_PARAM_RE.finditer(js):
+        ajax_base = m.group(1)        # e.g. "ajax_url.php?firmid="
+        param_name = m.group(2)        # e.g. "firmid"
+
+        # Collect numeric/alphanumeric values from hrefs whose query
+        # params share a similar name.  For example, firmid= matches
+        # firm= in  firmwares.php?firm=28436
+        # Use the shorter of the two names as substring match.
+        _param_variants = {param_name, param_name.rstrip("id"), param_name + "id"}
+        _val_re = re.compile(
+            r"""(?:""" + "|".join(re.escape(v) for v in _param_variants if v) +
+            r""")=([a-zA-Z0-9_-]+)""",
+            re.I,
+        )
+        values = set(_val_re.findall(page_html))
+
+        for val in values:
+            raw = ajax_base + val
+            n = normalise_url(raw.strip(), page_url, base)
             if n:
                 found.add(n)
 
