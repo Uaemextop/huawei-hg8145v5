@@ -4,11 +4,13 @@ HTML/ASP attribute extraction via BeautifulSoup.
 
 import json
 import re
+import urllib.parse
 import warnings
 
 from web_crawler.utils.url import normalise_url
 from web_crawler.extraction.css import extract_css_urls
 from web_crawler.extraction.javascript import extract_js_paths
+from web_crawler.extraction.json_extract import extract_json_paths
 
 try:
     import lxml  # noqa: F401
@@ -33,6 +35,41 @@ _OG_MEDIA_PROPS = frozenset({
 _TW_MEDIA_PROPS = frozenset({"twitter:image", "twitter:player"})
 
 
+def _parse_srcset(srcset_value: str) -> list[str]:
+    """Parse an ``srcset`` or ``imagesrcset`` attribute value and return
+    the individual image URLs.
+
+    The ``srcset`` format is a comma-separated list of entries where each
+    entry is ``<url> [<descriptor>]``.  Descriptors are optional width
+    (e.g. ``320w``) or pixel-density (e.g. ``2x``) tokens.  URLs may
+    contain commas inside percent-encoded sequences (``%2C``) so we
+    split carefully on commas that are followed by whitespace + a URL.
+    """
+    urls: list[str] = []
+    if not srcset_value or not srcset_value.strip():
+        return urls
+    # Skip data: URIs entirely – they may contain internal commas that
+    # would produce garbage entries when split.
+    if srcset_value.strip().startswith(("data:", "javascript:", "mailto:")):
+        return urls
+    # Split on commas that separate srcset entries.  Each entry is
+    # ``<url> [<descriptor>]`` where descriptor is ``\d+w`` or ``\d+(\.\d+)?x``.
+    for entry in srcset_value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        # The URL is everything up to the first whitespace; the rest
+        # is the optional width/density descriptor.
+        parts = entry.split(None, 1)
+        if parts:
+            url = parts[0].strip()
+            if url and not url.startswith(("data:", "javascript:", "mailto:")):
+                # Must look like a URL: starts with http(s), //, or /
+                if url.startswith(("http://", "https://", "//", "/")):
+                    urls.append(url)
+    return urls
+
+
 def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     """
     Extract every resource URL from HTML/ASP content using BeautifulSoup.
@@ -49,20 +86,30 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         if n:
             found.add(n)
 
+    def _add_srcset(val: str, *, allow_external: bool = False) -> None:
+        """Parse a ``srcset`` / ``imagesrcset`` value and add each URL."""
+        for url in _parse_srcset(val):
+            _add(url, allow_external=allow_external)
+
     try:
         soup = BeautifulSoup(html, _BS4_PARSER)
     except Exception:
         return found
 
-    # Tags whose media attributes may reference external CDNs
-    _MEDIA_TAGS = {"video", "source", "audio", "track"}
+    # Tags whose media attributes may reference external CDNs.
+    # <img> is included because CDN-hosted images (e.g. Cloudflare Image
+    # Delivery on cdn.androidacy.com) use external hosts for srcset URLs.
+    _MEDIA_TAGS = {"video", "source", "audio", "track", "img"}
+
+    # Attributes that use srcset format (comma-separated URL + descriptor)
+    _SRCSET_ATTRS = frozenset({"srcset", "imagesrcset"})
 
     attr_map = {
         "a":       ["href"],
-        "link":    ["href"],
+        "link":    ["href", "imagesrcset"],
         "script":  ["src"],
-        "img":     ["src", "data-src", "data-lazy-src"],
-        "source":  ["src", "srcset", "data-src", "data-video-src"],
+        "img":     ["src", "data-src", "data-lazy-src", "srcset"],
+        "source":  ["src", "data-src", "data-video-src", "srcset"],
         "iframe":  ["src"],
         "frame":   ["src"],
         "form":    ["action"],
@@ -82,7 +129,10 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
             for attr in attrs:
                 val = el.get(attr)
                 if val:
-                    _add(val, allow_external=is_media)
+                    if attr in _SRCSET_ATTRS:
+                        _add_srcset(val, allow_external=is_media)
+                    else:
+                        _add(val, allow_external=is_media)
             if tag == "meta":
                 content = el.get("content", "")
                 m = re.search(r"url=([^\s;\"']+)", content, re.I)
@@ -116,6 +166,36 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     for script_el in soup.find_all("script"):
         if not script_el.get("src"):
             found |= extract_js_paths(script_el.get_text(), page_url, base)
+        # Flying Press / lazy-loading: <script data-src="data:text/javascript,...">
+        # defers script execution by URL-encoding JS source into a data: URI
+        # stored in data-src.  The actual tag text is empty, so the standard
+        # path above misses the embedded URLs.  Decode and parse the JS.
+        # The decoded JS often contains JSON config objects (``var X = {...}``)
+        # with absolute URLs, so we also try JSON extraction on embedded
+        # object literals.
+        data_src = script_el.get("data-src") or ""
+        if data_src.startswith("data:text/javascript,"):
+            encoded_js = data_src[len("data:text/javascript,"):]
+            decoded_js = urllib.parse.unquote(encoded_js)
+            if decoded_js:
+                found |= extract_js_paths(decoded_js, page_url, base)
+                # Try to extract JSON config objects (``var X = {...};``)
+                # that contain absolute URLs as string values.
+                # Use brace-counting to locate the outermost ``{…}``
+                # so nested objects are included in the JSON parse.
+                start = decoded_js.find("{")
+                if start != -1:
+                    depth = 0
+                    for i in range(start, len(decoded_js)):
+                        if decoded_js[i] == "{":
+                            depth += 1
+                        elif decoded_js[i] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                found |= extract_json_paths(
+                                    decoded_js[start:i + 1], page_url, base,
+                                )
+                                break
 
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.

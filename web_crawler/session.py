@@ -342,6 +342,19 @@ def is_cf_managed_challenge(resp: requests.Response) -> bool:
     return False
 
 
+def is_flying_press_cached(resp: requests.Response) -> bool:
+    """Return ``True`` if *resp* was served from the Flying Press cache.
+
+    Flying Press is a WordPress speed/cache optimization plugin that adds
+    ``x-flying-press-cache`` and ``x-flying-press-source`` response
+    headers.  Recognizing these headers helps the crawler distinguish
+    between real server responses and cached copies, and avoids treating
+    Flying Press specific patterns (e.g. ``flying-press-lazy-bg``) as
+    anomalous.
+    """
+    return resp.headers.get("x-flying-press-cache", "").upper() == "HIT"
+
+
 def inject_cf_clearance(
     session: requests.Session,
     domain: str,
