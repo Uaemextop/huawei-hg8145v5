@@ -2473,7 +2473,6 @@ class Crawler:
     _ENUM_AJAX_MAX_ID = 50_000   # upper bound for ID probing
     _ENUM_AJAX_WORKERS = 200     # concurrent probe workers (high for fast scanning)
     _ENUM_PROBE_TIMEOUT = 5      # seconds – short timeout for fast probes
-    _ENUM_CONSECUTIVE_MISS_LIMIT = 5_000  # stop early after this many consecutive misses
 
     def _enumerate_ajax_downloads(
         self,
@@ -2485,14 +2484,15 @@ class Crawler:
         """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
 
         Always scans the full range because valid firmware IDs can be
-        distributed anywhere in the 1–50 000 space.
+        distributed anywhere in the 1–50 000 space.  No early stopping
+        is used — with 200 workers most probes complete in under 5 min.
 
         **Phase 1** — fast probe: 200 workers hit the AJAX endpoint for
         every ID.  No title fetching, no extra HTTP requests.
 
         **Phase 2** — batch title resolution: fetch the firmware-page
         ``<title>`` for each discovered ID (200 workers in parallel) to
-        replace the placeholder ``firmware_N`` with the real file name.
+        replace the placeholder ``#N`` with the real file name.
 
         Downloads are recorded incrementally so partial results survive
         interruptions.
@@ -2515,14 +2515,11 @@ class Crawler:
                  self._ENUM_AJAX_WORKERS, self._ENUM_PROBE_TIMEOUT)
 
         new_count = 0
-        cancel = threading.Event()
         # Collect (index, n) pairs for phase-2 title resolution.
         title_queue: list[tuple[int, int]] = []  # (list-index, firmware-id)
 
         def _probe_and_record(n: int) -> bool:
             """Probe a single ID; record download URL immediately."""
-            if cancel.is_set():
-                return False
             ajax_url = (f"{base}{ajax_path}"
                         f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
             with self._lock:
@@ -2561,7 +2558,7 @@ class Crawler:
             if page_path and page_param:
                 fw_page = (f"{base}{page_path}"
                            f"?{urllib.parse.urlencode({page_param: str(n)})}")
-            fw_name = f"firmware_{n}"
+            fw_name = f"#{n}"
             direct = self._build_direct_download_url(download_url)
 
             with self._lock:
@@ -2579,11 +2576,8 @@ class Crawler:
                 )
             return True
 
-        # ---- Phase 1: fast probe ----
+        # ---- Phase 1: fast probe (no early stopping) ----
         checked = 0
-        consecutive_misses = 0
-        miss_limit = self._ENUM_CONSECUTIVE_MISS_LIMIT
-        stopped_early = False
         with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
             for found in pool.map(
                 _probe_and_record, range(start_id, end_id + 1),
@@ -2591,29 +2585,12 @@ class Crawler:
                 checked += 1
                 if found:
                     new_count += 1
-                    consecutive_misses = 0
-                else:
-                    consecutive_misses += 1
                 if checked % 5000 == 0:
                     log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
                              checked, scan_size, new_count)
-                if (new_count > 0
-                        and consecutive_misses >= miss_limit):
-                    log.info(
-                        "[ENUM] %d consecutive misses after %d download(s) "
-                        "— stopping early at ID %d",
-                        consecutive_misses, new_count, checked,
-                    )
-                    stopped_early = True
-                    cancel.set()
-                    break
 
-        if stopped_early:
-            log.info("[ENUM] Stopped early at ID %d — %d download(s) found",
-                     checked, new_count)
-        else:
-            log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
-                     new_count, scan_size)
+        log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
+                 new_count, scan_size)
 
         # ---- Phase 2: batch title resolution ----
         if title_queue:
