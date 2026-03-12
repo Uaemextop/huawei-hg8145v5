@@ -7,7 +7,6 @@ import logging
 import os
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 
 from web_crawler.config import (
@@ -134,37 +133,6 @@ def parse_args() -> argparse.Namespace:
              "Use 'all' to skip downloading every binary file and only record "
              "their links.",
     )
-    # ── AI CAPTCHA solver options ────────────────────────────────────
-    parser.add_argument(
-        "--ai-captcha", action="store_true", default=False,
-        help="Enable AI-powered CAPTCHA solving on login pages using the "
-             "GitHub Models vision API (requires GITHUB_TOKEN env var and "
-             "Playwright).  Adapted from Auto_CAPTCHA_with_LLM.",
-    )
-    parser.add_argument(
-        "--ai-captcha-url", default="", metavar="URL",
-        help="Login page URL where the AI CAPTCHA solver should run.  "
-             "If omitted, the crawl target URL is used.",
-    )
-    parser.add_argument(
-        "--ai-captcha-type", default="auto",
-        choices=["auto", "numbersOnly", "lettersOnly"],
-        help="CAPTCHA type hint (default: auto).  'numbersOnly' for "
-             "digit-only CAPTCHAs, 'lettersOnly' for alphabetic CAPTCHAs.",
-    )
-    parser.add_argument(
-        "--ai-model", default="openai/gpt-4o", metavar="MODEL",
-        help="GitHub Models model to use for AI CAPTCHA solving and text "
-             "extraction (default: openai/gpt-4o).  Must support vision.",
-    )
-    parser.add_argument(
-        "--ai-login-user", default="", metavar="USER",
-        help="Username to fill on the login page before solving the CAPTCHA.",
-    )
-    parser.add_argument(
-        "--ai-login-pass", default="", metavar="PASS",
-        help="Password to fill on the login page before solving the CAPTCHA.",
-    )
     return parser.parse_args()
 
 
@@ -251,54 +219,6 @@ def main() -> None:
     else:
         skip_dl_exts = None
 
-    # ------------------------------------------------------------------ #
-    # AI-powered CAPTCHA solver (optional)
-    # ------------------------------------------------------------------ #
-    ai_cookies: dict[str, str] = {}
-    if args.ai_captcha:
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        if not github_token:
-            log.warning(
-                "[AI-CAPTCHA] GITHUB_TOKEN env var not set — "
-                "AI CAPTCHA solver disabled"
-            )
-        else:
-            try:
-                from web_crawler.ai.github_models import GitHubModelsClient
-                from web_crawler.ai.captcha_solver import AICaptchaSolver
-
-                ai_client = GitHubModelsClient(
-                    token=github_token,
-                    model=args.ai_model,
-                )
-                solver = AICaptchaSolver(
-                    ai_client=ai_client,
-                    captcha_type=args.ai_captcha_type,
-                )
-                captcha_url = args.ai_captcha_url or target_url
-
-                log.info(
-                    "[AI-CAPTCHA] Solving CAPTCHA at %s (model=%s, type=%s)",
-                    captcha_url, args.ai_model, args.ai_captcha_type,
-                )
-                result = solver.solve_login_captcha(
-                    captcha_url,
-                    username=args.ai_login_user,
-                    password=args.ai_login_pass,
-                )
-                if result:
-                    ai_cookies = result
-                    log.info(
-                        "[AI-CAPTCHA] ✓ Obtained %d cookies from login",
-                        len(ai_cookies),
-                    )
-                else:
-                    log.warning("[AI-CAPTCHA] Failed to solve CAPTCHA")
-            except ImportError as exc:
-                log.warning("[AI-CAPTCHA] Missing dependency: %s", exc)
-            except Exception as exc:
-                log.warning("[AI-CAPTCHA] Error (continuing): %s", exc)
-
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -318,19 +238,6 @@ def main() -> None:
         skip_media_files=args.skip_media_files,
         skip_download_exts=skip_dl_exts,
     )
-
-    # Inject cookies obtained by the AI CAPTCHA solver into the crawler
-    # session so that subsequent requests carry the login cookies.
-    if ai_cookies:
-        parsed = urllib.parse.urlparse(target_url)
-        hostname = parsed.hostname or ""
-        cookie_domain = hostname
-        for name, value in ai_cookies.items():
-            crawler.session.cookies.set(name, value, domain=cookie_domain)
-        log.info(
-            "[AI-CAPTCHA] Injected %d cookies into crawler session "
-            "(domain=%s)", len(ai_cookies), cookie_domain,
-        )
 
     t0 = time.monotonic()
     crawler.run()

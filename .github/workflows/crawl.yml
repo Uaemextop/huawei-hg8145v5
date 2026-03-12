@@ -62,35 +62,6 @@ on:
         required: false
         default: true
         type: boolean
-      ai_captcha:
-        description: "Enable AI-powered CAPTCHA solving using GitHub Models vision API. Requires the AI_TOKEN secret to be configured in the repository."
-        required: false
-        default: true
-        type: boolean
-      ai_model:
-        description: "GitHub Models vision model for AI CAPTCHA solving"
-        required: false
-        default: "openai/gpt-4o"
-        type: choice
-        options:
-          - "openai/gpt-4o"
-          - "openai/gpt-4o-mini"
-          - "openai/gpt-4.1"
-          - "openai/gpt-4.1-mini"
-          - "openai/gpt-4.1-nano"
-          - "openai/o4-mini"
-          - "openai/o3"
-          - "openai/o3-mini"
-          - "openai/o1"
-          - "openai/o1-mini"
-          - "meta/llama-4-scout-17b-16e-instruct"
-          - "meta/llama-4-maverick-17b-128e-instruct"
-          - "meta/Llama-3.2-11B-Vision-Instruct"
-          - "meta/Llama-3.2-90B-Vision-Instruct"
-          - "microsoft/Phi-4-multimodal-instruct"
-          - "microsoft/Phi-3.5-vision-instruct"
-          - "mistral/pixtral-large-2411"
-          - "mistral/mistral-small-2503"
       cf_clearance:
         description: "Cloudflare cf_clearance cookie from a browser session. Use to bypass Cloudflare Managed Challenges."
         required: false
@@ -154,9 +125,6 @@ jobs:
           pip install -r requirements.txt
           # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
           pip install curl_cffi
-          # Playwright – headless browser for CAPTCHA flows
-          pip install playwright
-          playwright install --with-deps chromium firefox
           # Git LFS – for large binary files
           git lfs install
 
@@ -287,7 +255,6 @@ jobs:
       - name: Run web crawler
         env:
           ONT_TOKEN:       ${{ secrets.ONT }}
-          GITHUB_TOKEN:    ${{ secrets.AI_TOKEN }}
         run: |
           # Re-apply git credentials if repo was created
           if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ]; then
@@ -316,16 +283,6 @@ jobs:
             EXTRA_ARGS="$EXTRA_ARGS --cf-clearance '${{ inputs.cf_clearance }}'"
           [ -n "${{ inputs.log_file }}" ] && \
             EXTRA_ARGS="$EXTRA_ARGS --log-file '${{ inputs.log_file }}'"
-
-          # ── AI CAPTCHA solver ────────────────────────────────────────────
-          # GITHUB_TOKEN is set via env from secrets.AI_TOKEN above;
-          # the AI module reads it automatically from the environment.
-          if [ "${{ inputs.ai_captcha }}" = "true" ] && [ -n "$GITHUB_TOKEN" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --ai-captcha --ai-model '${{ inputs.ai_model }}'"
-            echo "🤖 AI CAPTCHA solving enabled (model: ${{ inputs.ai_model }})"
-          elif [ "${{ inputs.ai_captcha }}" = "true" ]; then
-            echo "::warning::AI CAPTCHA enabled but AI_TOKEN secret is not set — AI solver will be skipped"
-          fi
 
           # ── git push ────────────────────────────────────────────────────
           GIT_PUSH_ARG=""
