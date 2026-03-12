@@ -92,6 +92,11 @@ on:
         required: false
         default: false
         type: boolean
+      download_only:
+        description: "Skip full site crawl — only discover AJAX download endpoints and enumerate all firmware download links. Generates download_urls.md directly."
+        required: false
+        default: false
+        type: boolean
       debug:
         description: "Verbose logging + save HTTP response headers (.headers files) to repo"
         required: false
@@ -242,6 +247,7 @@ jobs:
           | Upload extensions | ${{ inputs.upload_extensions }} |
           | Concurrency | ${{ inputs.concurrency }} workers |
           | Skip media files | ${{ inputs.skip_media_files }} |
+          | Download only | ${{ inputs.download_only }} |
           | Run | #${{ github.run_number }} |
           | Status | 🔄 Crawling in progress… |
           EOF
@@ -272,6 +278,7 @@ jobs:
           [ "${{ inputs.skip_captcha }}"  = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-check-captcha"
           [ "${{ inputs.skip_media_files }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --skip-media-files"
           [ "${{ inputs.allow_external_urls }}" = "false" ] && EXTRA_ARGS="$EXTRA_ARGS --no-external"
+          [ "${{ inputs.download_only }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --download-only"
 
           # ── Optional string flags ───────────────────────────────────────
           [ -n "${{ inputs.skip_download_exts }}" ] && \
@@ -429,6 +436,7 @@ jobs:
             | **Upload extensions** | ${{ inputs.upload_extensions }} |
             | **Concurrency** | ${{ inputs.concurrency }} workers |
             | **Skip media files** | ${{ inputs.skip_media_files }} |
+            | **Download only** | ${{ inputs.download_only }} |
             | **Skip CAPTCHA check** | ${{ inputs.skip_captcha }} |
             | **Debug mode** | ${{ inputs.debug }} |
             | **Run** | #${{ github.run_number }} |
