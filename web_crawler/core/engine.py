@@ -325,7 +325,7 @@ class Crawler:
            (the ``fetch('ajax_url.php?firmid=' + …)`` patterns live on these
            sub-pages, not on the home page).
         3. Runs the AJAX ID enumeration (1 … 50 000) to find every download.
-        4. Writes ``download_urls.md`` with real firmware names.
+        4. Writes ``download_urls.md``.
 
         Much faster than a full crawl because it skips link following,
         asset downloads, and all other crawling stages.
@@ -350,10 +350,6 @@ class Crawler:
         links = extract_all(page_html, "text/html", page_url, self.base)
 
         log.info("Discovered %d link(s) on start page", len(links))
-
-        # Collect firmware ID hints from start-page links to narrow the
-        # enumeration range (e.g. firmwares.php?firm=28436 → hint 28436).
-        self._collect_firmware_id_hints(links)
 
         # Try the home-page links first (works if AJAX patterns are inline).
         self._discover_download_links(links, page_url, page_html)
@@ -388,6 +384,8 @@ class Crawler:
         if n:
             log.info("Done — %d download(s) written to %s",
                      n, self.output_dir / "download_urls.md")
+            # Git-push the MD file so it appears in the crawl repository.
+            self._git_push_download_md()
         else:
             log.warning("No download links found on %s", self.start_url)
 
@@ -1672,6 +1670,38 @@ class Crawler:
         except Exception as exc:
             log.warning("[GIT] Push error: %s", exc)
 
+    def _git_push_download_md(self) -> None:
+        """Commit and push ``download_urls.md`` so it appears in the crawl repo."""
+        md_path = self.output_dir / "download_urls.md"
+        if not md_path.exists():
+            return
+        cwd = str(self.output_dir.resolve())
+        # Check if git repo exists in output dir.
+        if not (self.output_dir / ".git").is_dir():
+            return
+        try:
+            subprocess.run(
+                ["git", "add", "--", "download_urls.md"],
+                cwd=cwd, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "commit", "-m",
+                 f"download_urls.md — {len(self._external_download_urls)} firmware download(s)"],
+                cwd=cwd, capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "push"],
+                cwd=cwd, check=True, capture_output=True, timeout=300,
+            )
+            log.info("[GIT] Pushed download_urls.md to crawl repo")
+        except subprocess.CalledProcessError as exc:
+            msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
+            log.warning("[GIT] Push download_urls.md failed: %s", msg)
+        except FileNotFoundError:
+            log.debug("[GIT] git not found — skipping download_urls.md push")
+        except Exception as exc:
+            log.warning("[GIT] Push error: %s", exc)
+
     @staticmethod
     def _dir_from_url(url: str) -> str:
         """Derive the directory path from a URL for probe tracking."""
@@ -2441,10 +2471,9 @@ class Crawler:
     # ------------------------------------------------------------------
 
     _ENUM_AJAX_MAX_ID = 50_000   # upper bound for ID probing
-    _ENUM_AJAX_WORKERS = 50      # concurrent probe workers
-    _ENUM_PROBE_TIMEOUT = 10     # seconds – shorter than REQUEST_TIMEOUT for fast probes
-    _ENUM_CONSECUTIVE_MISS_LIMIT = 2_000  # stop early after this many consecutive misses
-    _ENUM_RANGE_PADDING = 1_000  # IDs to pad below/above hint range
+    _ENUM_AJAX_WORKERS = 200     # concurrent probe workers (high for fast scanning)
+    _ENUM_PROBE_TIMEOUT = 5      # seconds – short timeout for fast probes
+    _ENUM_CONSECUTIVE_MISS_LIMIT = 5_000  # stop early after this many consecutive misses
 
     def _enumerate_ajax_downloads(
         self,
@@ -2453,20 +2482,20 @@ class Crawler:
         page_path: str | None,
         page_param: str | None,
     ) -> None:
-        """Probe a range of IDs against a discovered AJAX download endpoint.
+        """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
 
-        Uses firmware ID hints from page links to scan only around the
-        range where valid IDs exist (±1 000 padding), instead of blindly
-        probing 1 … 50 000.  Falls back to the full range when no hints
-        are available.
+        Always scans the full range because valid firmware IDs can be
+        distributed anywhere in the 1–50 000 space.
 
-        Runs once per unique AJAX endpoint.  Downloads are recorded
-        **incrementally** as they are discovered so that partial results
-        survive if the crawl is interrupted.
+        **Phase 1** — fast probe: 200 workers hit the AJAX endpoint for
+        every ID.  No title fetching, no extra HTTP requests.
 
-        For each valid ID, the firmware-page ``<title>`` is fetched
-        inline to obtain the real firmware file name (instead of a
-        ``firmware_N`` placeholder).
+        **Phase 2** — batch title resolution: fetch the firmware-page
+        ``<title>`` for each discovered ID (200 workers in parallel) to
+        replace the placeholder ``firmware_N`` with the real file name.
+
+        Downloads are recorded incrementally so partial results survive
+        interruptions.
         """
         enum_key = f"{ajax_path}?{ajax_param}"
         with self._lock:
@@ -2477,48 +2506,21 @@ class Crawler:
         max_id = self._ENUM_AJAX_MAX_ID
         base = self.base  # e.g. "https://getwayrom.com"
 
-        # Use firmware ID hints from page links to narrow the scan range.
-        # Without hints we'd scan 1…50 000 which wastes minutes on empty
-        # low-numbered IDs.  With hints (e.g. IDs around 28 000) we scan
-        # only ±_ENUM_RANGE_PADDING around the known range.
-        #
-        # Hints are keyed by param name; match them to the AJAX param so
-        # that e.g. page-link param "firm" maps to AJAX param "firmid".
-        # Use prefix matching (not arbitrary substring) to avoid false
-        # positives like "firm" ↔ "confirmation".
-        hint_ids: set[int] = set()
-        al = ajax_param.lower()
-        for pname, ids in self._firmware_id_hints.items():
-            pl = pname.lower()
-            if pl.startswith(al) or al.startswith(pl):
-                hint_ids.update(ids)
-        # Fallback: if no param-name match, use the largest hint set.
-        if not hint_ids and self._firmware_id_hints:
-            hint_ids = max(self._firmware_id_hints.values(), key=len)
-
-        padding = self._ENUM_RANGE_PADDING
-
-        if hint_ids:
-            min_hint = min(hint_ids)
-            max_hint = max(hint_ids)
-            start_id = max(1, min_hint - padding)
-            end_id = min(max_id, max_hint + padding)
-            log.info("[ENUM] %d hint ID(s) from page links (range %d–%d); "
-                     "scanning %s?%s=%d…%d",
-                     len(hint_ids), min_hint, max_hint,
-                     ajax_path, ajax_param, start_id, end_id)
-        else:
-            start_id = 1
-            end_id = max_id
-            log.info("[ENUM] No hint IDs found; scanning %s?%s=%d…%d",
-                     ajax_path, ajax_param, start_id, end_id)
+        # Always scan the full range — valid IDs can be anywhere.
+        start_id = 1
+        end_id = max_id
         scan_size = end_id - start_id + 1
+        log.info("[ENUM] Phase 1 — probing %s?%s=%d…%d (%d workers, %ds timeout)",
+                 ajax_path, ajax_param, start_id, end_id,
+                 self._ENUM_AJAX_WORKERS, self._ENUM_PROBE_TIMEOUT)
 
         new_count = 0
-        cancel = threading.Event()  # signal workers to stop on early termination
+        cancel = threading.Event()
+        # Collect (index, n) pairs for phase-2 title resolution.
+        title_queue: list[tuple[int, int]] = []  # (list-index, firmware-id)
 
         def _probe_and_record(n: int) -> bool:
-            """Probe a single ID; record and write to .md immediately."""
+            """Probe a single ID; record download URL immediately."""
             if cancel.is_set():
                 return False
             ajax_url = (f"{base}{ajax_path}"
@@ -2559,49 +2561,25 @@ class Crawler:
             if page_path and page_param:
                 fw_page = (f"{base}{page_path}"
                            f"?{urllib.parse.urlencode({page_param: str(n)})}")
-            # Fetch real firmware name from page <title> instead of placeholder
-            fw_name = ""
-            if fw_page:
-                try:
-                    tresp = self.session.get(
-                        fw_page, timeout=self._ENUM_PROBE_TIMEOUT, stream=True,
-                    )
-                    try:
-                        if tresp.ok:
-                            head = b""
-                            for chunk in tresp.iter_content(chunk_size=2048):
-                                head += chunk
-                                if len(head) >= 8192:
-                                    break
-                            text = head.decode("utf-8", errors="replace")
-                            tm = re.search(
-                                r"<title>(.*?)</title>", text,
-                                re.I | re.DOTALL,
-                            )
-                            if tm:
-                                fw_name = re.split(
-                                    r"\s*\|\s*", tm.group(1),
-                                )[0].strip()
-                    finally:
-                        tresp.close()
-                except _NETWORK_ERRORS:
-                    pass
-            if not fw_name:
-                fw_name = f"firmware_{n}"
+            fw_name = f"firmware_{n}"
             direct = self._build_direct_download_url(download_url)
 
             with self._lock:
                 if ajax_url in self._download_links_seen:
                     return False
                 self._download_links_seen.add(ajax_url)
+                idx = len(self._external_download_urls)
                 self._external_download_urls.append(
                     (fw_page, ajax_url, download_url, fw_name),
                 )
+                if fw_page:
+                    title_queue.append((idx, n))
                 self._record_external_download(
                     fw_page, download_url, direct, fw_name,
                 )
             return True
 
+        # ---- Phase 1: fast probe ----
         checked = 0
         consecutive_misses = 0
         miss_limit = self._ENUM_CONSECUTIVE_MISS_LIMIT
@@ -2616,21 +2594,19 @@ class Crawler:
                     consecutive_misses = 0
                 else:
                     consecutive_misses += 1
-                if checked % 1000 == 0:
+                if checked % 5000 == 0:
                     log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
                              checked, scan_size, new_count)
-                # Early stop: if we've found at least some downloads and then
-                # hit a long stretch of consecutive misses, the remaining IDs
-                # are very likely unused.
                 if (new_count > 0
                         and consecutive_misses >= miss_limit):
                     log.info(
                         "[ENUM] %d consecutive misses after %d download(s) "
                         "— stopping early at ID %d",
-                        consecutive_misses, new_count, checked,
+                        consecutive_misses, new_count,
+                        start_id + checked - 1,
                     )
                     stopped_early = True
-                    cancel.set()  # tell in-flight workers to bail out
+                    cancel.set()
                     break
 
         if stopped_early:
@@ -2640,8 +2616,75 @@ class Crawler:
             log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
                      new_count, scan_size)
 
+        # ---- Phase 2: batch title resolution ----
+        if title_queue:
+            log.info("[ENUM] Phase 2 — resolving titles for %d firmware(s) …",
+                     len(title_queue))
+            self._resolve_firmware_titles(title_queue)
+
         log.info("[ENUM] Enumeration complete — %d download(s) total",
                  len(self._external_download_urls))
+
+    def _resolve_firmware_titles(
+        self, title_queue: list[tuple[int, int]],
+    ) -> None:
+        """Fetch ``<title>`` for each firmware page and update the names.
+
+        Runs with ``_ENUM_AJAX_WORKERS`` parallelism so that title
+        resolution for thousands of hits takes seconds, not minutes.
+        """
+        resolved = 0
+
+        def _fetch_title(item: tuple[int, int]) -> None:
+            nonlocal resolved
+            idx, n = item
+            fw_page, ajax_url, download_url, old_name = (
+                self._external_download_urls[idx]
+            )
+            if not fw_page:
+                return
+            fw_name = ""
+            try:
+                tresp = self.session.get(
+                    fw_page, timeout=self._ENUM_PROBE_TIMEOUT, stream=True,
+                )
+                try:
+                    if tresp.ok:
+                        head = b""
+                        for chunk in tresp.iter_content(chunk_size=2048):
+                            head += chunk
+                            if len(head) >= 8192:
+                                break
+                        text = head.decode("utf-8", errors="replace")
+                        tm = re.search(
+                            r"<title>(.*?)</title>", text,
+                            re.I | re.DOTALL,
+                        )
+                        if tm:
+                            fw_name = re.split(
+                                r"\s*\|\s*", tm.group(1),
+                            )[0].strip()
+                finally:
+                    tresp.close()
+            except _NETWORK_ERRORS:
+                pass
+            if fw_name and fw_name != old_name:
+                with self._lock:
+                    self._external_download_urls[idx] = (
+                        fw_page, ajax_url, download_url, fw_name,
+                    )
+                    resolved += 1
+
+        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
+            done = 0
+            total = len(title_queue)
+            for _ in pool.map(_fetch_title, title_queue):
+                done += 1
+                if done % 2000 == 0:
+                    log.info("[ENUM]   … titles %d/%d resolved", done, total)
+
+        log.info("[ENUM] Resolved %d/%d firmware title(s)",
+                 resolved, len(title_queue))
 
     # ------------------------------------------------------------------
     # AJAX download-link discovery (Google Drive, OneDrive, Mega, …)
