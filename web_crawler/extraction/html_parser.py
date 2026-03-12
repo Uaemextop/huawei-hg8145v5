@@ -4,6 +4,7 @@ HTML/ASP attribute extraction via BeautifulSoup.
 
 import json
 import re
+import urllib.parse as _urlparse
 import warnings
 
 from web_crawler.utils.url import normalise_url
@@ -122,7 +123,6 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     # by moving content into ``data-src="data:text/javascript,…"``
     # attributes.  The encoded payload may contain API URLs, REST
     # endpoints, and other references.
-    import urllib.parse as _urlparse
     for script_el in soup.find_all("script", attrs={"data-src": True}):
         ds = script_el["data-src"]
         if ds.startswith("data:text/javascript,"):
