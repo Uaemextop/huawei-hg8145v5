@@ -69,6 +69,7 @@ from web_crawler.config import (
     BACKOFF_429_MAX,
     BINARY_CONTENT_TYPES,
     BLOCKED_PATH_RE,
+    CLOUD_STORAGE_HOSTS,
     CRAWLABLE_TYPES,
     DEFAULT_DELAY,
     DEFAULT_CONCURRENCY,
@@ -237,6 +238,12 @@ class Crawler:
         self._download_links_path = self.output_dir / "download_links.txt"
         self._download_links_seen: set[str] = set()
 
+        # Discovered external download URLs (Google Drive, OneDrive, Mega …).
+        # Populated by _discover_download_links() when AJAX endpoints return
+        # cloud-storage URLs.  Written to download_urls.txt at crawl end.
+        self._external_download_urls: list[tuple[str, str, str]] = []
+        # ^-- list of (page_url, ajax_endpoint, download_url)
+
         # robots.txt (loaded after captcha solve in run())
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._respect_robots = respect_robots
@@ -350,6 +357,9 @@ class Crawler:
         log.info("Retry OK    : %d", s["retry_ok"])
         log.info("Errors      : %d  (%.1f%%)", s["err"], pct_err)
         log.info("Captcha     : %d solves", self._sg_captcha_solves)
+        if self._external_download_urls:
+            log.info("Downloads   : %d external download URL(s) discovered",
+                     len(self._external_download_urls))
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log.info("Files saved in: %s", self.output_dir.resolve())
         ci_endgroup()
@@ -359,6 +369,9 @@ class Crawler:
 
         # Write video URL list
         self._write_video_url_list()
+
+        # Write external download URL list (Google Drive, OneDrive, Mega, …)
+        self._write_download_url_list()
 
     @staticmethod
     def _sanitize_meta_value(value: str) -> str:
@@ -2170,6 +2183,16 @@ class Crawler:
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
+            # Resolve parameterised AJAX endpoints whose query value
+            # can be inferred from the current page URL.  For example,
+            # fetch('ajax_url.php?firmid=' + id) is extracted as the
+            # bare endpoint 'ajax_url.php?firmid='; we fill in the
+            # value from a matching query parameter on the page URL
+            # (e.g. firmwares.php?firm=27162 → firmid=27162).
+            new_links |= self._resolve_ajax_params(new_links, url)
+            # Follow resolved AJAX endpoints to discover external download
+            # URLs (Google Drive, OneDrive, Mega, etc.) and record them.
+            self._discover_download_links(new_links, url)
             # Also scan for links to target download extensions
             if self.download_extensions:
                 new_links |= self._extract_extension_links(
@@ -2199,6 +2222,264 @@ class Crawler:
                 log.debug("  +%d new URLs enqueued", added)
 
         time.sleep(self.delay)
+
+    # ------------------------------------------------------------------
+    # AJAX parameter resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_ajax_params(
+        links: set[str], page_url: str,
+    ) -> set[str]:
+        """Expand AJAX endpoints whose query string has empty values.
+
+        When the JS extractor finds ``fetch('ajax_url.php?firmid=' + var)``
+        it produces a bare URL like ``…/ajax_url.php?firmid=``.  If the
+        page URL contains a query parameter whose name partially matches
+        (e.g. ``firm=27162`` matches ``firmid``), fill in the value so the
+        crawler can actually fetch the endpoint.
+        """
+        page_qs = urllib.parse.parse_qs(
+            urllib.parse.urlparse(page_url).query, keep_blank_values=True,
+        )
+        if not page_qs:
+            return set()
+        extra: set[str] = set()
+        for link in list(links):
+            link_parsed = urllib.parse.urlparse(link)
+            link_qs = urllib.parse.parse_qs(
+                link_parsed.query, keep_blank_values=True,
+            )
+            if not link_qs:
+                continue
+            filled = False
+            new_params: dict[str, str] = {}
+            for param, vals in link_qs.items():
+                val = vals[0] if vals else ""
+                if val:
+                    new_params[param] = val
+                    continue
+                # Try to match against page URL params (substring match)
+                for pname, pvals in page_qs.items():
+                    if not pvals or not pvals[0]:
+                        continue
+                    # Match: "firmid" contains "firm", or "firm" contains
+                    # "firmid", or exact match.
+                    pname_l = pname.lower()
+                    param_l = param.lower()
+                    if (pname_l in param_l or param_l in pname_l
+                            or pname_l == param_l):
+                        new_params[param] = pvals[0]
+                        filled = True
+                        break
+                else:
+                    new_params[param] = val
+            if filled:
+                new_query = urllib.parse.urlencode(new_params)
+                resolved = urllib.parse.urlunparse((
+                    link_parsed.scheme, link_parsed.netloc,
+                    link_parsed.path, "", new_query, "",
+                ))
+                extra.add(resolved)
+        return extra
+
+    # ------------------------------------------------------------------
+    # AJAX download-link discovery (Google Drive, OneDrive, Mega, …)
+    # ------------------------------------------------------------------
+
+    def _discover_download_links(
+        self, links: set[str], page_url: str,
+    ) -> None:
+        """Follow AJAX endpoints that return cloud-storage download URLs.
+
+        Sites like getwayrom.com hide the real download link behind an
+        AJAX call (``fetch('ajax_url.php?firmid=' + id)``).  The
+        response body is a plain-text URL pointing to Google Drive,
+        OneDrive, Mega, etc.
+
+        This method:
+
+        1. Identifies candidate AJAX endpoints in *links* (PHP/ASP
+           URLs whose path suggests a download handler).
+        2. GETs each endpoint with the crawler's session.
+        3. If the response is a cloud-storage URL, records it in
+           ``download_urls.txt`` with a ready-to-use direct link.
+        """
+        # Heuristic: AJAX download endpoints are same-host PHP/ASP URLs
+        # whose path or query suggests a download handler.
+        _AJAX_HINT_RE = re.compile(
+            r"(?:ajax|download|get[_-]?(?:link|url|file)|dl|fetch)[^/]*\.php",
+            re.I,
+        )
+        for link in list(links):
+            parsed = urllib.parse.urlparse(link)
+            if parsed.netloc != self.allowed_host:
+                continue
+            # Only follow candidates with a query string (parameterised)
+            if not parsed.query:
+                continue
+            # Check that the query has at least one non-empty param value
+            qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            has_value = any(v and v[0] for v in qs.values())
+            if not has_value:
+                continue
+            # Must match the AJAX download-endpoint heuristic
+            if not _AJAX_HINT_RE.search(parsed.path):
+                continue
+            # Skip if already discovered
+            with self._lock:
+                if link in self._download_links_seen:
+                    continue
+                self._download_links_seen.add(link)
+
+            log.debug("[AJAX-DL] Probing download endpoint: %s", link)
+            try:
+                resp = self.session.get(
+                    link,
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=False,
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": page_url,
+                    },
+                )
+            except _NETWORK_ERRORS as exc:
+                log.debug("[AJAX-DL] Request failed: %s – %s", link, exc)
+                continue
+
+            if not resp.ok:
+                log.debug("[AJAX-DL] HTTP %s for %s", resp.status_code, link)
+                continue
+
+            body = resp.text.strip()
+            if not body or len(body) > 2000:
+                continue
+
+            # Check if the response is a URL
+            if not body.startswith(("http://", "https://")):
+                continue
+
+            download_url = body
+            dl_parsed = urllib.parse.urlparse(download_url)
+            is_cloud = dl_parsed.netloc in CLOUD_STORAGE_HOSTS
+            # Also match subdomains (e.g. dl.dropboxusercontent.com)
+            if not is_cloud:
+                for host in CLOUD_STORAGE_HOSTS:
+                    if dl_parsed.netloc.endswith("." + host):
+                        is_cloud = True
+                        break
+
+            if not is_cloud and dl_parsed.netloc == self.allowed_host:
+                # Same-host download – enqueue it normally
+                continue
+
+            # Build direct-download URL for known cloud providers
+            direct_url = self._build_direct_download_url(download_url)
+
+            log.info(
+                "  [DOWNLOAD] %s → %s",
+                link, download_url,
+            )
+            with self._lock:
+                self._external_download_urls.append(
+                    (page_url, link, download_url)
+                )
+
+            # Also write to download_links.txt immediately (with curl cmd)
+            with self._lock:
+                self._record_external_download(
+                    page_url, download_url, direct_url,
+                )
+
+    @staticmethod
+    def _build_direct_download_url(url: str) -> str:
+        """Convert a cloud-storage sharing URL to a direct-download URL.
+
+        Supported providers:
+
+        * **Google Drive**: ``/file/d/ID/view`` → ``/uc?export=download&id=ID&confirm=t``
+        * **Dropbox**: ``?dl=0`` → ``?dl=1``
+        * **MediaFire**: kept as-is (requires JS)
+        * **Mega**: kept as-is (requires client decryption)
+
+        Returns the direct URL or the original URL if no transformation
+        is available.
+        """
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+
+        # Google Drive: /file/d/<ID>/view → direct download
+        if "drive.google.com" in host or "docs.google.com" in host:
+            m = re.search(r"/(?:file/d/|open\?id=)([a-zA-Z0-9_-]+)", url)
+            if m:
+                file_id = m.group(1)
+                return (
+                    f"https://drive.usercontent.google.com/download"
+                    f"?id={file_id}&export=download&confirm=t"
+                )
+
+        # Dropbox: change dl=0 to dl=1
+        if "dropbox.com" in host:
+            if "dl=0" in url:
+                return url.replace("dl=0", "dl=1")
+            if "dl=" not in url:
+                sep = "&" if "?" in url else "?"
+                return url + sep + "dl=1"
+
+        # 1drv.ms / OneDrive: change type=embed to type=download
+        if "1drv.ms" in host or "onedrive" in host:
+            if "download=1" not in url:
+                sep = "&" if "?" in url else "?"
+                return url + sep + "download=1"
+
+        return url
+
+    def _record_external_download(
+        self, page_url: str, sharing_url: str, direct_url: str,
+    ) -> None:
+        """Append an external download link to ``download_urls.txt``.
+
+        Each entry contains:
+        * The source page URL
+        * The cloud-storage sharing URL (as returned by the AJAX endpoint)
+        * A direct-download URL (with provider-specific bypass)
+        * Ready-to-run ``curl`` and ``wget`` commands
+
+        Must be called while ``self._lock`` is held.
+        """
+        dl_path = self.output_dir / "download_urls.txt"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with dl_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"# Source page: {page_url}\n")
+            fh.write(f"# Sharing URL: {sharing_url}\n")
+            fh.write(f"{direct_url}\n")
+            fh.write(f"curl -L -o download_file '{direct_url}'\n")
+            fh.write(f"wget -O download_file '{direct_url}'\n")
+            fh.write("# " + "─" * 60 + "\n\n")
+
+    def _write_download_url_list(self) -> None:
+        """Write all discovered external download URLs to ``download_urls.txt``.
+
+        This is called at the end of the crawl.  If individual entries
+        were already written during crawl (by ``_record_external_download``),
+        this method also writes a summary section at the end.
+        """
+        if not self._external_download_urls:
+            return
+        dl_path = self.output_dir / "download_urls.txt"
+        dl_path.parent.mkdir(parents=True, exist_ok=True)
+        with dl_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n# " + "═" * 60 + "\n")
+            fh.write(f"# SUMMARY: {len(self._external_download_urls)}"
+                      " download URL(s) discovered\n")
+            fh.write("# " + "═" * 60 + "\n\n")
+            for page_url, ajax_ep, download_url in self._external_download_urls:
+                direct = self._build_direct_download_url(download_url)
+                fh.write(f"{direct}\n")
+        log.info(
+            "Download URLs: %d URL(s) → %s",
+            len(self._external_download_urls), dl_path,
+        )
 
     # ------------------------------------------------------------------
     # CDN media download

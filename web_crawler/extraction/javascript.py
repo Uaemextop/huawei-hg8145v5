@@ -12,6 +12,12 @@ _WIN_LOC_RE = re.compile(
     re.I,
 )
 
+# window.open('url', ...) – popup / new-tab navigations
+_WIN_OPEN_RE = re.compile(
+    r"""window\.open\s*\(\s*['"`](https?://[^'"`\n]+|/[^'"`\n]+|[a-zA-Z0-9_\-./]+\.[a-zA-Z]{2,5}[^'"`\n]*)['"`]""",
+    re.I,
+)
+
 # Form action patterns
 _FORM_ACTION_RE = re.compile(
     r"""\.(?:setAction|setAttribute\s*\(\s*['"]action['"])\s*[,(]\s*['"`]([^'"`\n]+)['"`]""",
@@ -21,6 +27,15 @@ _FORM_ACTION_RE = re.compile(
 # $.ajax({ url: '/path', ... }) / fetch('/path') / axios.get('/path')
 _AJAX_URL_RE = re.compile(
     r"""(?:['"]url['"]\s*:|url\s*:|fetch\s*\(|axios\.(?:get|post)\s*\()\s*['"`]([^'"`\n]+)['"`]""",
+    re.I,
+)
+
+# fetch('endpoint?param=' + var) / $.get('url?id=' + val)
+# Captures the static base URL from concatenated fetch/ajax calls so
+# that the crawler can discover the endpoint even when the dynamic part
+# cannot be resolved statically.
+_AJAX_CONCAT_RE = re.compile(
+    r"""(?:fetch|axios\.(?:get|post)|(?:\$\.(?:get|post|ajax)))\s*\(\s*['"`]([^'"`\n]+)['"`]\s*\+""",
     re.I,
 )
 
@@ -154,6 +169,7 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
         _WIN_LOC_RE,
         _FORM_ACTION_RE,
         _AJAX_URL_RE,
+        _AJAX_CONCAT_RE,
         _ABS_QUOTED_PATH_RE,
         _REL_EXT_PATH_RE,
         _HIDDEN_FILE_RE,
@@ -162,6 +178,15 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
     ):
         for m in pat.finditer(js):
             _add(m.group(1))
+
+    # window.open() often targets external URLs (popups, share links)
+    for m in _WIN_OPEN_RE.finditer(js):
+        raw = m.group(1)
+        if "${" not in raw and not _is_garbage_path(raw):
+            n = normalise_url(raw.strip(), page_url, base,
+                              allow_external=True)
+            if n:
+                found.add(n)
 
     for m in _DOC_WRITE_RE.finditer(js):
         snippet = m.group(1).replace("\\'", "'").replace('\\"', '"')
