@@ -4,8 +4,8 @@ from setuptools import setup, find_packages
 
 setup(
     name="web-crawler",
-    version="2.0.0",
-    description="Generic web crawler that downloads all reachable pages and assets from a website",
+    version="3.0.0",
+    description="Web intelligence crawler – discovers infrastructure, detects technologies, and extracts links from websites",
     packages=find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.10",
     install_requires=[
@@ -19,17 +19,8 @@ setup(
             "tqdm>=4.66.0",
             "colorlog>=6.8.0",
         ],
-        "ai": [
-            "openai>=1.0.0",
-            "playwright>=1.40.0",
-            "playwright-stealth>=2.0.0",
-        ],
         "zendriver": [
             "zendriver>=0.15.0",
-        ],
-        "captcha": [
-            "flask>=3.0.0",
-            "openai>=1.0.0",
         ],
     },
     entry_points={

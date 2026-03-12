@@ -1,15 +1,21 @@
 """
-Generic BFS web crawler.
+Web intelligence crawler engine.
 
 Crawls a target website starting from a seed URL, downloading ALL reachable
-pages and static assets with NO page limit.  Supports:
+pages and static assets with NO page limit.  Uses a modular plugin-based
+pipeline for technology detection, protection detection, link extraction,
+and content analysis.
+
+Features:
 
 * robots.txt respect
 * Configurable depth limit
 * Resume from previously downloaded files
 * Deduplication by content hash
 * Soft-404 / false-positive detection
-* WordPress auto-discovery (REST API, sitemaps, feeds, plugins, themes)
+* Plugin-based technology detection (WordPress, frameworks, CDNs, etc.)
+* Plugin-based WAF / protection detection
+* Plugin-based endpoint discovery and content analysis
 * User-Agent rotation and header-rotation retry on 403/402
 * Cloudflare / WAF / CAPTCHA detection
 * Exponential backoff on 429 (rate limiting)
@@ -111,12 +117,16 @@ from web_crawler.core.storage import (
 from web_crawler.extraction.links import extract_links
 from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
+from web_crawler.engine.pipeline import Pipeline, PageResult
+from web_crawler.plugins import load_plugins
 
 
 class Crawler:
     """
-    Generic BFS web crawler.  Downloads every reachable page and asset
-    from a target website with NO page limit.
+    Web intelligence crawler engine.  Downloads every reachable page and
+    asset from a target website with NO page limit.  Uses a plugin-based
+    pipeline for technology detection, link extraction, and content
+    analysis.
     """
 
     def __init__(
@@ -248,6 +258,18 @@ class Crawler:
         self._robots: urllib.robotparser.RobotFileParser | None = None
         self._respect_robots = respect_robots
 
+        # ── Plugin-based analysis pipeline ─────────────────────────────
+        self._plugins = load_plugins()
+        self._pipeline = Pipeline()
+        if self._plugins:
+            log.info("Loaded %d plugins: %s",
+                     len(self._plugins),
+                     ", ".join(p.name for p in self._plugins))
+
+        # Pipeline results: accumulated technology + external link intel
+        self._detected_technologies: dict[str, set[str]] = {}
+        self._all_external_links: list[dict[str, str]] = []
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -364,6 +386,9 @@ class Crawler:
         log.info("Files saved in: %s", self.output_dir.resolve())
         ci_endgroup()
 
+        # Write intelligence report
+        self._write_intelligence_report()
+
         # Write final URL list
         self._write_url_list()
 
@@ -372,6 +397,51 @@ class Crawler:
 
         # Write external download URL list (Google Drive, OneDrive, Mega, …)
         self._write_download_url_list()
+
+    def _write_intelligence_report(self) -> None:
+        """Write a JSON intelligence report with detected technologies,
+        protections, and external links discovered during the crawl."""
+        import json as _json
+
+        report: dict = {
+            "target": self.start_url,
+            "technologies": {},
+            "external_links": [],
+            "stats": {
+                "urls_visited": len(self._visited),
+                "files_saved": self._stats["ok"],
+                "errors": self._stats["err"],
+            },
+        }
+
+        # Group technologies by category
+        for category, names in self._detected_technologies.items():
+            report["technologies"][category] = sorted(names)
+
+        # Deduplicate external links
+        seen: set[str] = set()
+        for link in self._all_external_links:
+            url = link.get("url", "")
+            if url and url not in seen:
+                seen.add(url)
+                report["external_links"].append(link)
+
+        # Only write if there's meaningful intelligence
+        if report["technologies"] or report["external_links"]:
+            report_path = self.output_dir / "intelligence_report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                _json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            log.info("[INTEL] Intelligence report: %s", report_path)
+            if report["technologies"]:
+                log.info("[INTEL] Technologies detected:")
+                for cat, names in sorted(report["technologies"].items()):
+                    log.info("  %s: %s", cat, ", ".join(names))
+            if report["external_links"]:
+                log.info("[INTEL] External links: %d unique URLs",
+                         len(report["external_links"]))
 
     @staticmethod
     def _sanitize_meta_value(value: str) -> str:
@@ -2126,14 +2196,43 @@ class Crawler:
                 log.debug("  [SOFT-404] %s – not saving", url)
                 return
 
+            # ── Plugin pipeline analysis ───────────────────────────────
+            page_result = self._pipeline.process(
+                url=url,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+                body=text,
+                base=self.base,
+            )
+            # Record detected technologies
+            if page_result.technologies:
+                with self._lock:
+                    for tech in page_result.technologies:
+                        cat = tech.get("category", "other")
+                        if cat not in self._detected_technologies:
+                            self._detected_technologies[cat] = set()
+                        self._detected_technologies[cat].add(tech.get("name", ""))
+                tech_names = [t["name"] for t in page_result.technologies]
+                log.debug("  [TECH] Detected: %s", ", ".join(tech_names))
+            # Record external links from plugins
+            if page_result.external_links:
+                with self._lock:
+                    self._all_external_links.extend(page_result.external_links)
+
             # WordPress detection on first HTML page
-            if not self._wp_detected and self.detect_wordpress(text):
+            if not self._wp_detected and (
+                page_result.is_wordpress or self.detect_wordpress(text)
+            ):
                 self._wp_detected = True
                 self._enqueue_wp_discovery(depth)
 
             # Extract WP nonce from HTML for REST API access
             if self._wp_detected:
-                self._extract_wp_nonce(text)
+                wp_nonce = page_result.extra.get("wp_nonce")
+                if wp_nonce:
+                    self._wp_nonce = wp_nonce
+                else:
+                    self._extract_wp_nonce(text)
         else:
             text = None
 
@@ -2183,6 +2282,20 @@ class Crawler:
         )
         if ct in CRAWLABLE_TYPES or is_parseable_ext:
             new_links = extract_links(content, content_type, url, self.base)
+            # Merge links discovered by pipeline endpoint-discovery plugins.
+            # For HTML pages page_result was already computed above; for
+            # other content types we run endpoint plugins directly.
+            _pl_links: set[str] = set()
+            if ct_lower in ("text/html", "application/xhtml+xml"):
+                # page_result is available from the HTML analysis block above
+                _pl_links = page_result.discovered_links
+            elif text is not None:
+                _non_html_result = self._pipeline.process(
+                    url=url, status_code=resp.status_code,
+                    headers=dict(resp.headers), body=text, base=self.base,
+                )
+                _pl_links = _non_html_result.discovered_links
+            new_links |= _pl_links
             # Resolve parameterised AJAX endpoints whose query value
             # can be inferred from the current page URL.  For example,
             # fetch('ajax_url.php?firmid=' + id) is extracted as the
