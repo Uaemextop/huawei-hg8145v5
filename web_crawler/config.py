@@ -487,6 +487,137 @@ WP_THEME_FILES = [
 ]
 
 # ---------------------------------------------------------------------------
+# XenForo Resource Manager (XFRM) discovery paths
+# ---------------------------------------------------------------------------
+XF_DISCOVERY_PATHS = [
+    # Sitemaps
+    "/sitemap.xml",
+    # Resource Manager
+    "/resources/",
+    "/whats-new/resources/",
+    "/resources/latest-reviews",
+    # Forums
+    "/forums/",
+    "/whats-new/",
+    "/whats-new/posts",
+    "/featured/",
+    # Help / legal
+    "/help/",
+    "/help/terms/",
+    "/help/privacy-policy/",
+    "/help/cookies",
+    # RSS feed
+    "/forums/-/index.rss",
+    # Members directory
+    "/members/",
+    # Search
+    "/search/?type=resource",
+    "/search/?type=post",
+    # Webmanifest / PWA
+    "/webmanifest.php",
+]
+
+# ---------------------------------------------------------------------------
+# External file-hosting domains whose URLs are collected into
+# ``external_downloads.txt`` during crawling.  Each entry is matched
+# case-insensitively against the *netloc* portion of a URL.
+# ---------------------------------------------------------------------------
+FILE_HOSTING_DOMAINS = (
+    # Google
+    "drive.google.com",
+    "docs.google.com",
+    # Microsoft
+    "1drv.ms",
+    "onedrive.live.com",
+    # Mega
+    "mega.nz",
+    "mega.co.nz",
+    # Mediafire
+    "mediafire.com",
+    "www.mediafire.com",
+    # Dropbox
+    "dropbox.com",
+    "www.dropbox.com",
+    "dl.dropboxusercontent.com",
+    # Box
+    "box.com",
+    "www.box.com",
+    "app.box.com",
+    # 4shared
+    "4shared.com",
+    "www.4shared.com",
+    # Gofile / Pixeldrain / Krakenfiles / Solidfiles
+    "gofile.io",
+    "www.gofile.io",
+    "pixeldrain.com",
+    "www.pixeldrain.com",
+    "krakenfiles.com",
+    "www.krakenfiles.com",
+    "solidfiles.com",
+    "www.solidfiles.com",
+    # Terabox
+    "terabox.com",
+    "www.terabox.com",
+    "teraboxapp.com",
+    "www.teraboxapp.com",
+    # Wetransfer / Filemail
+    "wetransfer.com",
+    "www.wetransfer.com",
+    "we.tl",
+    "filemail.com",
+    "www.filemail.com",
+    # PixVid (XenForo embed/upload service)
+    "pixvid.org",
+    # Archive / SourceForge / GitHub Releases
+    "archive.org",
+    "sourceforge.net",
+    "www.sourceforge.net",
+    # Sendspace / Uploaded / Rapidgator / Turbobit
+    "sendspace.com",
+    "www.sendspace.com",
+    "uploaded.net",
+    "www.uploaded.net",
+    "rapidgator.net",
+    "www.rapidgator.net",
+    "turbobit.net",
+    "www.turbobit.net",
+    # WorkUpload / AnonFiles / Bayfiles
+    "workupload.com",
+    "www.workupload.com",
+    "anonfiles.com",
+    "www.anonfiles.com",
+    # Catbox / Litterbox
+    "files.catbox.moe",
+    "litter.catbox.moe",
+)
+
+# Compiled set for O(1) lookup (lowercase).
+_FILE_HOSTING_SET: frozenset[str] = frozenset(
+    d.lower() for d in FILE_HOSTING_DOMAINS
+)
+
+
+def is_file_hosting_url(url: str) -> bool:
+    """Return ``True`` if *url* belongs to a known file-hosting service."""
+    try:
+        from urllib.parse import urlparse
+        netloc = urlparse(url).netloc.lower()
+        # Direct match or "sub.domain.com" → try stripping leading "www."
+        if netloc in _FILE_HOSTING_SET:
+            return True
+        if netloc.startswith("www."):
+            return netloc[4:] in _FILE_HOSTING_SET
+        # Check if domain ends with a known hosting domain
+        # (e.g. "dl.dropboxusercontent.com" matches "dropbox.com" substring)
+        for hd in _FILE_HOSTING_SET:
+            if netloc == hd or netloc.endswith("." + hd):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Cache-bypass query parameters (appended to force fresh responses)
 # ---------------------------------------------------------------------------
 CACHE_BYPASS_PARAMS = [

@@ -95,6 +95,7 @@ from web_crawler.config import (
     WP_PLUGIN_PROBES,
     WP_THEME_FILES,
     WP_THEME_PROBES,
+    XF_DISCOVERY_PATHS,
     auto_concurrency,
 )
 from web_crawler.session import (
@@ -219,6 +220,10 @@ class Crawler:
         self._wp_nonce: str = ""        # extracted from page HTML (not sent globally)
         self._wp_confirmed_plugins: set[str] = set()
         self._wp_confirmed_themes: set[str] = set()
+
+        # XenForo detection
+        self._xf_detected: bool = False
+        self._xf_probed: bool = False
 
         # Cloudflare bypass state
         self._cf_bypass_done: bool = False
@@ -918,6 +923,71 @@ class Crawler:
             return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # XenForo detection & discovery
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def detect_xenforo(html: str) -> bool:
+        """Return True if the HTML indicates a XenForo site."""
+        lower = html.lower()
+        indicators = [
+            'data-xf="',
+            'data-xf-init="',
+            "xf_csrf",
+            "xenforo",
+            "/js/xf/core-compiled.js",
+            'cookie-prefix="xf_"',
+        ]
+        return any(ind in lower for ind in indicators)
+
+    def _enqueue_xf_discovery(self, depth: int) -> None:
+        """Enqueue XenForo-specific discovery URLs."""
+        if self._xf_probed:
+            return
+        self._xf_probed = True
+        for path in XF_DISCOVERY_PATHS:
+            xf_url = self.base + path
+            self._probe_urls.add(url_key(xf_url))
+            self._enqueue(xf_url, 0)
+        log.info("[XF] XenForo detected – enqueued %d discovery URLs",
+                 len(XF_DISCOVERY_PATHS))
+
+    # ------------------------------------------------------------------
+    # External download link recording
+    # ------------------------------------------------------------------
+
+    def _record_external_downloads(self, html: str, page_url: str) -> None:
+        """Extract download-worthy URLs from *html* and append them to
+        ``external_downloads.txt`` in the output directory.
+
+        This captures XenForo XFRM download endpoints, attachment URLs,
+        file-hosting links (Google Drive, Mega, Dropbox …), and direct
+        links to common binary/archive extensions.
+        """
+        from web_crawler.extraction.html_parser import extract_download_links
+
+        dl_links = extract_download_links(html, page_url, self.base)
+        if not dl_links:
+            return
+
+        dl_path = self.output_dir / "external_downloads.txt"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            # De-duplicate across calls
+            if not hasattr(self, "_ext_dl_seen"):
+                self._ext_dl_seen: set[str] = set()
+            new_links = dl_links - self._ext_dl_seen
+            if not new_links:
+                return
+            self._ext_dl_seen |= new_links
+
+        with dl_path.open("a", encoding="utf-8") as fh:
+            for link in sorted(new_links):
+                fh.write(f"{link}\n")
+        log.info("  [DL] Recorded %d download link(s) from %s",
+                 len(new_links), page_url)
 
     # ------------------------------------------------------------------
     # WordPress detection & discovery
@@ -2121,6 +2191,14 @@ class Crawler:
             # Extract WP nonce from HTML for REST API access
             if self._wp_detected:
                 self._extract_wp_nonce(text)
+
+            # XenForo detection on first HTML page
+            if not self._xf_detected and self.detect_xenforo(text):
+                self._xf_detected = True
+                self._enqueue_xf_discovery(depth)
+
+            # Record download links (XenForo XFRM, attachments, file-hosting)
+            self._record_external_downloads(text, url)
         else:
             text = None
 
