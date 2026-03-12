@@ -153,9 +153,13 @@ WAF_SIGNATURES = {
         "cf-mitigated",
         "attention required! | cloudflare",
         "cf-chl-bypass",
-        "checking your browser",
         "_cf_chl_opt",
         "challenges.cloudflare.com",
+    ],
+    "hcdn": [
+        "server: hcdn",
+        "hcdn-cgi/jschallenge",
+        "x-hcdn-request-id",
     ],
     "wordfence": [
         "wordfence",
