@@ -127,14 +127,12 @@ class Pipeline:
             except Exception as exc:
                 log.debug("Plugin %s error: %s", plugin.name, exc)
 
-        # De-duplicate technologies by name
-        seen_tech: set[str] = set()
-        unique_tech: list[dict[str, str]] = []
+        # De-duplicate technologies by name (preserving insertion order)
+        unique_tech: dict[str, dict[str, str]] = {}
         for t in result.technologies:
             name = t.get("name", "")
-            if name and name not in seen_tech:
-                seen_tech.add(name)
-                unique_tech.append(t)
-        result.technologies = unique_tech
+            if name and name not in unique_tech:
+                unique_tech[name] = t
+        result.technologies = list(unique_tech.values())
 
         return result

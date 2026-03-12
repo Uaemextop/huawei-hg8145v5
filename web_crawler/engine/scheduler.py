@@ -110,14 +110,22 @@ class Scheduler:
 
         Returns None when the queue is empty.
         """
+        # Calculate sleep time under lock, but sleep outside it
+        sleep_needed = 0.0
         with self._lock:
             if not self._queue:
                 return None
-            # Rate limiting
             now = time.monotonic()
             elapsed = now - self._last_issue
             if elapsed < self._delay:
-                time.sleep(self._delay - elapsed)
+                sleep_needed = self._delay - elapsed
+
+        if sleep_needed > 0:
+            time.sleep(sleep_needed)
+
+        with self._lock:
+            if not self._queue:
+                return None
             self._last_issue = time.monotonic()
             return self._queue.popleft()
 

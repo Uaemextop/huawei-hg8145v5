@@ -25,7 +25,7 @@ _WP_INDICATORS: list[str] = [
 ]
 
 _WP_NONCE_RE = re.compile(
-    r"""(?:wp_rest_nonce|wpApiSettings[^}]*nonce)\W*[=:]\s*['"]([a-f0-9]+)['"]""",
+    r"""(?:wp_rest_nonce|wpApiSettings[^}]*nonce)\W*[=:]\s*['"]([a-zA-Z0-9]+)['"]""",
     re.I,
 )
 
