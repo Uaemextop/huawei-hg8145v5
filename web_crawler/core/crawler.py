@@ -966,8 +966,12 @@ class Crawler:
 
         # Discover media file URLs (images, ZIPs) via REST API
         self._discover_wp_media()
+        # Discover custom post types (e.g. Magisk modules, products, etc.)
+        self._discover_wp_custom_post_types()
         # Discover WooCommerce product pages and any linked files
         self._discover_wc_products()
+        # Discover Androidacy-style third-party module repositories
+        self._discover_androidacy_repo()
 
     def _discover_wp_media(self) -> None:
         """Use the WP REST API to discover downloadable media files
@@ -1001,6 +1005,81 @@ class Crawler:
         if total:
             log.debug("  [WP-MEDIA] Discovered %d media files via REST API",
                      total)
+
+    def _discover_wp_custom_post_types(self) -> None:
+        """Discover custom post types via the WP REST API ``/wp/v2/types``
+        endpoint and enumerate all their published items.
+
+        WordPress sites often register custom post types for domain-specific
+        content (e.g. Magisk modules, firmware entries, products) that live
+        under non-standard URL paths.  The built-in ``posts`` and ``pages``
+        are already covered by :data:`WP_DISCOVERY_PATHS`; this method
+        handles all *additional* types exposed by the REST API.
+        """
+        # Standard types already covered by WP_DISCOVERY_PATHS
+        _SKIP_TYPES = frozenset({
+            "post", "page", "attachment", "nav_menu_item",
+            "wp_block", "wp_template", "wp_template_part",
+            "wp_global_styles", "wp_navigation", "wp_font_family",
+            "wp_font_face",
+        })
+        types_url = f"{self.base}/wp-json/wp/v2/types"
+        try:
+            resp = self.session.get(types_url, timeout=REQUEST_TIMEOUT)
+        except _NETWORK_ERRORS:
+            return
+        if resp.status_code != 200:
+            return
+        try:
+            types_data = resp.json()
+        except ValueError:
+            return
+        if not isinstance(types_data, dict):
+            return
+
+        for slug, info in types_data.items():
+            if slug in _SKIP_TYPES:
+                continue
+            rest_base = info.get("rest_base", "")
+            type_name = info.get("name", slug)
+            if not rest_base:
+                continue
+            # Enumerate all published items for this custom post type
+            page_num = 1
+            item_total = 0
+            while page_num <= 50:
+                api_url = (
+                    f"{self.base}/wp-json/wp/v2/{rest_base}"
+                    f"?per_page=100&page={page_num}"
+                )
+                try:
+                    items_resp = self.session.get(
+                        api_url, timeout=REQUEST_TIMEOUT,
+                    )
+                except _NETWORK_ERRORS:
+                    break
+                if items_resp.status_code != 200:
+                    break
+                try:
+                    items = items_resp.json()
+                except ValueError:
+                    break
+                if not isinstance(items, list) or not items:
+                    break
+                for item in items:
+                    link = item.get("link", "")
+                    if link and self.allowed_host in link:
+                        self._enqueue(link, 1)
+                        item_total += 1
+                if len(items) < 100:
+                    break
+                page_num += 1
+                time.sleep(self.delay)
+            if item_total:
+                log.info(
+                    "[WP-CPT] Discovered %d '%s' items via REST API",
+                    item_total, type_name,
+                )
 
     def _discover_wc_products(self) -> None:
         """Enumerate WooCommerce products via the Store API and enqueue:
@@ -1118,6 +1197,132 @@ class Crawler:
         if probed:
             log.info("[WC-UPLOADS] Found %d archive files in uploads dirs",
                      probed)
+
+    # ------------------------------------------------------------------
+    # Androidacy Magisk module repository discovery
+    # ------------------------------------------------------------------
+
+    # Third-party module repository API endpoints discovered by analysing
+    # the Androidacy WordPress plugin (``apipl``) and its companion SPA at
+    # ``production-api.androidacy.com``.
+    _ANDROIDACY_REPO_URL = (
+        "https://production-api.androidacy.com/magisk/repo"
+    )
+    _MMRL_ALT_REPO_URL = (
+        "https://magisk-modules-alt-repo.github.io/json-v2/json/modules.json"
+    )
+
+    def _discover_androidacy_repo(self) -> None:
+        """Discover Magisk module repositories used by Androidacy sites.
+
+        Androidacy (``www.androidacy.com``) is a WordPress site that hosts
+        a Magisk module repository.  The modules are served by a separate
+        Laravel API at ``production-api.androidacy.com`` and also mirrored
+        on the public Magisk Modules Alt Repo (GitHub Pages).
+
+        This method:
+        1. Fetches the production API ``/magisk/repo`` JSON (118+ modules).
+        2. Fetches the MMRL Alt Repo ``modules.json`` (119+ modules with
+           direct ZIP download URLs from GitHub Pages).
+        3. Enqueues every discoverable URL: module pages, support links,
+           donation pages, README endpoints, and ZIP download URLs.
+        """
+        base_host = urllib.parse.urlparse(self.base).netloc
+        if not (base_host == "androidacy.com"
+                or base_host.endswith(".androidacy.com")):
+            return
+
+        total_urls = 0
+
+        # ── 1. Production API module repository ─────────────────────
+        try:
+            resp = self.session.get(
+                self._ANDROIDACY_REPO_URL, timeout=REQUEST_TIMEOUT,
+            )
+        except _NETWORK_ERRORS:
+            resp = None
+
+        if resp is not None and resp.status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            modules = data.get("data", [])
+            if isinstance(modules, list):
+                for mod in modules:
+                    # Enqueue the module's web page on the WP site
+                    url = mod.get("url", "")
+                    if url and self.allowed_host in url:
+                        # Strip hash fragment for the queue
+                        clean = url.split("#")[0]
+                        self._enqueue(clean, 1)
+                        total_urls += 1
+                    # Support / donate / website links (external)
+                    for key in ("support", "donate", "website"):
+                        ext = mod.get(key, "")
+                        if ext and ext.startswith("http"):
+                            self._enqueue(ext, 2)
+                            total_urls += 1
+                log.info(
+                    "[ANDROIDACY] Production API: %d modules, "
+                    "%d URLs enqueued",
+                    len(modules), total_urls,
+                )
+
+        # ── 2. MMRL Alt Repo (public GitHub Pages with ZIPs) ────────
+        alt_total = 0
+        try:
+            alt_resp = self.session.get(
+                self._MMRL_ALT_REPO_URL, timeout=REQUEST_TIMEOUT,
+            )
+        except _NETWORK_ERRORS:
+            alt_resp = None
+
+        if alt_resp is not None and alt_resp.status_code == 200:
+            try:
+                alt_data = alt_resp.json()
+            except ValueError:
+                alt_data = {}
+            alt_mods = alt_data.get("modules", [])
+            if isinstance(alt_mods, list):
+                for mod in alt_mods:
+                    # GitHub source repository
+                    track = mod.get("track", {})
+                    source = track.get("source", "")
+                    if source and source.startswith("http"):
+                        self._enqueue(source.rstrip(".git"), 2)
+                        alt_total += 1
+                    # Direct ZIP downloads (GitHub Pages hosted)
+                    for ver in mod.get("versions", []):
+                        zip_url = ver.get("zipUrl", "")
+                        if zip_url and zip_url.startswith("http"):
+                            self._enqueue(zip_url, 2)
+                            alt_total += 1
+                        # Changelog markdown
+                        cl = ver.get("changelog", "")
+                        if cl and cl.startswith("http"):
+                            self._enqueue(cl, 2)
+                            alt_total += 1
+                    # Support / donate links
+                    for key in ("support", "donate"):
+                        ext = mod.get(key, "")
+                        if ext and ext.startswith("http"):
+                            self._enqueue(ext, 2)
+                            alt_total += 1
+                if alt_total:
+                    log.info(
+                        "[ANDROIDACY] Alt Repo: %d modules, "
+                        "%d URLs enqueued (incl. ZIP downloads)",
+                        len(alt_mods), alt_total,
+                    )
+
+        total_urls += alt_total
+        if total_urls:
+            log.info(
+                "[ANDROIDACY] Total: %d URLs discovered across "
+                "all module repositories",
+                total_urls,
+            )
 
     def _deep_crawl_wp_plugin(self, slug: str, depth: int) -> None:
         """Enqueue internal files for a confirmed WordPress plugin."""
