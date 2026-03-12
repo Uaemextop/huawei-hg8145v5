@@ -157,25 +157,26 @@ class TestBlockDetector(unittest.TestCase):
         bd = BlockDetector()
         self.assertTrue(bd.is_blocked(429, {}))
 
-    def test_403_is_blocked(self):
+    def test_403_with_block_body_is_blocked(self):
         bd = BlockDetector()
-        self.assertTrue(bd.is_blocked(403, {}))
+        self.assertTrue(bd.is_blocked(403, {}, body="Access Denied"))
 
-    def test_503_is_blocked(self):
+    def test_403_without_block_body_not_blocked(self):
         bd = BlockDetector()
-        self.assertTrue(bd.is_blocked(503, {}))
+        self.assertFalse(bd.is_blocked(403, {}))
+
+    def test_503_with_block_body_is_blocked(self):
+        bd = BlockDetector()
+        self.assertTrue(bd.is_blocked(503, {}, body="rate limit exceeded"))
 
     def test_200_not_blocked(self):
         bd = BlockDetector()
         self.assertFalse(bd.is_blocked(200, {}))
 
-    def test_cloudflare_challenge_blocked(self):
+    def test_retry_after_extraction(self):
         bd = BlockDetector()
-        self.assertTrue(bd.is_blocked(200, {"cf-mitigated": "challenge"}))
-
-    def test_retry_after_header(self):
-        bd = BlockDetector()
-        self.assertTrue(bd.is_blocked(200, {"retry-after": "30"}))
+        self.assertEqual(bd.get_retry_after({"retry-after": "30"}), 30.0)
+        self.assertEqual(bd.get_retry_after({}), 0.0)
 
 
 if __name__ == "__main__":

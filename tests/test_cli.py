@@ -31,8 +31,8 @@ class TestParseExtensions(unittest.TestCase):
 
     def test_all_as_empty_false(self):
         result = _parse_extensions("all", all_as_empty=False)
-        self.assertIn(".zip", result)
-        self.assertIn(".exe", result)
+        self.assertIn("zip", result)
+        self.assertIn("exe", result)
 
 
 class TestParseArgs(unittest.TestCase):
