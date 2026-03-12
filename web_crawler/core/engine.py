@@ -2303,16 +2303,18 @@ class Crawler:
     ) -> None:
         """Probe IDs 1 … 50 000 against a discovered AJAX download endpoint.
 
-        Runs once per unique AJAX endpoint.  Three phases:
+        Runs once per unique AJAX endpoint.  Downloads are recorded
+        **incrementally** as they are discovered so that partial results
+        survive if the crawl is interrupted.
 
-        1. **Probe** — GET ``ajax_path?ajax_param=N`` for every N in
-           ``1 … _ENUM_AJAX_MAX_ID``.  Valid responses (cloud-storage
-           URLs) are collected.  Invalid / empty responses are discarded.
-        2. **Titles** — For each valid ID, stream the first 8 KB of the
-           corresponding firmware page to extract the ``<title>`` tag
-           (the firmware file name).
-        3. **Record** — All downloads are appended to
-           ``_external_download_urls`` and the Markdown file.
+        1. **Probe + record** — GET ``ajax_path?ajax_param=N`` for every
+           N.  Each valid cloud-storage URL is immediately appended to
+           ``_external_download_urls`` and written to
+           ``download_urls.md``.
+        2. **Title enrichment** — For each valid ID, fetch the first
+           8 KB of the firmware page to extract the ``<title>`` tag.
+           The final ``_write_download_url_list`` (called at crawl end)
+           rewrites the file with proper names.
         """
         enum_key = f"{ajax_path}?{ajax_param}"
         with self._lock:
@@ -2325,32 +2327,33 @@ class Crawler:
         log.info("[ENUM] Scanning %s?%s=1…%d for download links …",
                  ajax_path, ajax_param, max_id)
 
-        # ── Phase 1: probe AJAX endpoint for every ID ───────────────
-        valid: list[tuple[int, str]] = []  # (id, download_url)
+        new_count = 0
 
-        def _probe(n: int) -> tuple[int, str] | None:
-            url = (f"{base}{ajax_path}"
-                   f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
+        def _probe_and_record(n: int) -> bool:
+            """Probe a single ID; record and write to .md immediately."""
+            ajax_url = (f"{base}{ajax_path}"
+                        f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
             with self._lock:
-                if url in self._download_links_seen:
-                    return None
+                if ajax_url in self._download_links_seen:
+                    return False
             try:
                 resp = self.session.get(
-                    url, timeout=REQUEST_TIMEOUT, allow_redirects=False,
+                    ajax_url, timeout=REQUEST_TIMEOUT,
+                    allow_redirects=False,
                     headers={"X-Requested-With": "XMLHttpRequest"},
                 )
             except _NETWORK_ERRORS:
-                return None
+                return False
             if resp.status_code == 429:
                 time.sleep(2)
-                return None
+                return False
             if not resp.ok:
-                return None
+                return False
             body = resp.text.strip()
             if not body or len(body) > 2000:
-                return None
+                return False
             if not body.startswith(("http://", "https://")):
-                return None
+                return False
             dp = urllib.parse.urlparse(body)
             is_cloud = dp.netloc in CLOUD_STORAGE_HOSTS
             if not is_cloud:
@@ -2359,87 +2362,19 @@ class Crawler:
                         is_cloud = True
                         break
             if not is_cloud:
-                return None
-            return (n, body)
+                return False
 
-        checked = 0
-        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
-            for result in pool.map(_probe, range(1, max_id + 1)):
-                checked += 1
-                if result:
-                    valid.append(result)
-                if checked % 5000 == 0:
-                    log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
-                             checked, max_id, len(valid))
-
-        if not valid:
-            log.info("[ENUM] Scan complete — 0 downloads in %d IDs", max_id)
-            return
-
-        log.info("[ENUM] Found %d download(s). Fetching file names …",
-                 len(valid))
-
-        # ── Phase 2: stream firmware-page titles for valid IDs ──────
-        titles: dict[int, str] = {}
-
-        if page_path and page_param:
-            def _title(n: int) -> tuple[int, str]:
-                url = (f"{base}{page_path}"
-                       f"?{urllib.parse.urlencode({page_param: str(n)})}")
-                try:
-                    resp = self.session.get(
-                        url, timeout=REQUEST_TIMEOUT, stream=True,
-                    )
-                    if not resp.ok:
-                        resp.close()
-                        return (n, "")
-                    head = b""
-                    for chunk in resp.iter_content(chunk_size=2048):
-                        head += chunk
-                        if len(head) >= 8192:
-                            break
-                    resp.close()
-                    text = head.decode("utf-8", errors="replace")
-                    m = re.search(
-                        r"<title>(.*?)</title>", text, re.I | re.DOTALL,
-                    )
-                    if m:
-                        raw = re.split(r"\s*\|\s*", m.group(1))[0].strip()
-                        if raw:
-                            return (n, raw)
-                except _NETWORK_ERRORS:
-                    pass
-                return (n, "")
-
-            fetched = 0
-            with ThreadPoolExecutor(
-                max_workers=self._ENUM_AJAX_WORKERS,
-            ) as pool:
-                for n, title in pool.map(
-                    _title, [n for n, _ in valid],
-                ):
-                    titles[n] = title
-                    fetched += 1
-                    if fetched % 2000 == 0:
-                        log.info("[ENUM]   … fetched %d/%d titles",
-                                 fetched, len(valid))
-
-        # ── Phase 3: record all downloads ───────────────────────────
-        valid.sort()
-        new_count = 0
-        for n, download_url in valid:
-            ajax_url = (f"{base}{ajax_path}"
-                        f"?{urllib.parse.urlencode({ajax_param: str(n)})}")
+            download_url = body
             fw_page = ""
             if page_path and page_param:
                 fw_page = (f"{base}{page_path}"
                            f"?{urllib.parse.urlencode({page_param: str(n)})}")
-            fw_name = titles.get(n, "") or f"firmware_{n}"
+            fw_name = f"firmware_{n}"
             direct = self._build_direct_download_url(download_url)
 
             with self._lock:
                 if ajax_url in self._download_links_seen:
-                    continue
+                    return False
                 self._download_links_seen.add(ajax_url)
                 self._external_download_urls.append(
                     (fw_page, ajax_url, download_url, fw_name),
@@ -2447,10 +2382,98 @@ class Crawler:
                 self._record_external_download(
                     fw_page, download_url, direct, fw_name,
                 )
-                new_count += 1
+            return True
 
-        log.info("[ENUM] Enumeration complete — %d new download(s) recorded "
-                 "(%d total)", new_count,
+        checked = 0
+        with ThreadPoolExecutor(max_workers=self._ENUM_AJAX_WORKERS) as pool:
+            for found in pool.map(
+                _probe_and_record, range(1, max_id + 1),
+            ):
+                checked += 1
+                if found:
+                    new_count += 1
+                if checked % 5000 == 0:
+                    log.info("[ENUM]   … probed %d/%d IDs — %d download(s)",
+                             checked, max_id, new_count)
+
+        log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
+                 new_count, max_id)
+
+        if not new_count:
+            return
+
+        # ── Title enrichment (optional) ─────────────────────────────
+        # Fetch firmware-page <title> tags to replace ``firmware_N``
+        # placeholder names.  Results are stored in the in-memory list;
+        # the final _write_download_url_list() rewrites the file with
+        # proper names at crawl end.
+        if not (page_path and page_param):
+            return
+
+        # Collect indices needing title enrichment.
+        to_enrich: list[tuple[int, int]] = []  # (list_index, firmware_id)
+        with self._lock:
+            for idx, (_, ajax_ep, _, fw_name) in enumerate(
+                self._external_download_urls,
+            ):
+                if not fw_name.startswith("firmware_"):
+                    continue
+                m = re.search(r"[?&]" + re.escape(ajax_param) + r"=(\d+)",
+                              ajax_ep)
+                if m:
+                    to_enrich.append((idx, int(m.group(1))))
+
+        if not to_enrich:
+            return
+
+        log.info("[ENUM] Fetching %d firmware titles …", len(to_enrich))
+
+        def _title(pair: tuple[int, int]) -> tuple[int, str]:
+            idx, n = pair
+            url = (f"{base}{page_path}"
+                   f"?{urllib.parse.urlencode({page_param: str(n)})}")
+            try:
+                resp = self.session.get(
+                    url, timeout=REQUEST_TIMEOUT, stream=True,
+                )
+                if not resp.ok:
+                    resp.close()
+                    return (idx, "")
+                head = b""
+                for chunk in resp.iter_content(chunk_size=2048):
+                    head += chunk
+                    if len(head) >= 8192:
+                        break
+                resp.close()
+                text = head.decode("utf-8", errors="replace")
+                m = re.search(
+                    r"<title>(.*?)</title>", text, re.I | re.DOTALL,
+                )
+                if m:
+                    raw = re.split(r"\s*\|\s*", m.group(1))[0].strip()
+                    if raw:
+                        return (idx, raw)
+            except _NETWORK_ERRORS:
+                pass
+            return (idx, "")
+
+        fetched = 0
+        with ThreadPoolExecutor(
+            max_workers=self._ENUM_AJAX_WORKERS,
+        ) as pool:
+            for idx, title in pool.map(_title, to_enrich):
+                if title:
+                    with self._lock:
+                        old = self._external_download_urls[idx]
+                        self._external_download_urls[idx] = (
+                            old[0], old[1], old[2], title,
+                        )
+                fetched += 1
+                if fetched % 2000 == 0:
+                    log.info("[ENUM]   … fetched %d/%d titles",
+                             fetched, len(to_enrich))
+
+        log.info("[ENUM] Enumeration complete — %d download(s) total",
                  len(self._external_download_urls))
 
     # ------------------------------------------------------------------
