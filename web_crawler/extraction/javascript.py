@@ -190,7 +190,7 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
 
     for m in _DOC_WRITE_RE.finditer(js):
         snippet = m.group(1).replace("\\'", "'").replace('\\"', '"')
-        from web_crawler.extraction.html_parser import extract_html_attrs
+        from web_crawler.extraction.html import extract_html_attrs
         found |= extract_html_attrs(snippet, page_url, base)
 
     # Extract absolute stream/media URLs (often on external CDN hosts)

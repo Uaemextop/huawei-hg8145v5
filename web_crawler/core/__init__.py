@@ -1,6 +1,3 @@
-"""Core crawler logic – BFS crawler and file storage."""
-
-from web_crawler.core.crawler import Crawler
-from web_crawler.core.storage import save_file, content_hash, smart_local_path
-
-__all__ = ["Crawler", "save_file", "content_hash", "smart_local_path"]
+"""Core crawl engine."""
+from web_crawler.core.engine import Crawler
+__all__ = ["Crawler"]

@@ -21,7 +21,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from web_crawler.config import MAX_RETRIES, USER_AGENTS
+from web_crawler.config.settings import MAX_RETRIES, USER_AGENTS
 
 try:
     from curl_cffi import requests as _cf_requests

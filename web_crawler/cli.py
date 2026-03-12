@@ -9,12 +9,12 @@ import sys
 import time
 from pathlib import Path
 
-from web_crawler.config import (
+from web_crawler.config.settings import (
     DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY,
     DEFAULT_CONCURRENCY, DEFAULT_DOWNLOAD_EXTENSIONS,
     auto_concurrency,
 )
-from web_crawler.core.crawler import Crawler
+from web_crawler.core.engine import Crawler
 from web_crawler.utils.log import setup_logging, log
 
 try:
