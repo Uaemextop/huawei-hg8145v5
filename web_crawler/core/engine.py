@@ -2428,22 +2428,23 @@ class Crawler:
                     tresp = self.session.get(
                         fw_page, timeout=REQUEST_TIMEOUT, stream=True,
                     )
-                    if tresp.ok:
-                        head = b""
-                        for chunk in tresp.iter_content(chunk_size=2048):
-                            head += chunk
-                            if len(head) >= 8192:
-                                break
-                        tresp.close()
-                        text = head.decode("utf-8", errors="replace")
-                        tm = re.search(
-                            r"<title>(.*?)</title>", text, re.I | re.DOTALL,
-                        )
-                        if tm:
-                            fw_name = re.split(
-                                r"\s*\|\s*", tm.group(1),
-                            )[0].strip()
-                    else:
+                    try:
+                        if tresp.ok:
+                            head = b""
+                            for chunk in tresp.iter_content(chunk_size=2048):
+                                head += chunk
+                                if len(head) >= 8192:
+                                    break
+                            text = head.decode("utf-8", errors="replace")
+                            tm = re.search(
+                                r"<title>(.*?)</title>", text,
+                                re.I | re.DOTALL,
+                            )
+                            if tm:
+                                fw_name = re.split(
+                                    r"\s*\|\s*", tm.group(1),
+                                )[0].strip()
+                    finally:
                         tresp.close()
                 except _NETWORK_ERRORS:
                     pass
