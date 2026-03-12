@@ -1,5 +1,5 @@
 """
-Command-line interface for the generic web crawler.
+Command-line interface for the web intelligence crawler.
 """
 
 import argparse
@@ -31,8 +31,9 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generic web crawler – exhaustively downloads ALL pages "
-                    "and assets from a target website with no limits.",
+        description="Web intelligence crawler – discovers infrastructure, "
+                    "detects technologies, extracts links, and downloads "
+                    "all reachable pages and assets from a target website.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
