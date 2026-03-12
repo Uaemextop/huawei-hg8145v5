@@ -399,11 +399,15 @@ class Crawler:
             if not parsed.query:
                 continue
             qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            best = None
             for vals in qs.values():
                 for v in vals:
                     if v.isdigit():
-                        candidates.append((int(v), link))
-                        break
+                        n = int(v)
+                        if best is None or n > best:
+                            best = n
+            if best is not None:
+                candidates.append((best, link))
         # Deduplicate by URL.
         seen: set[str] = set()
         unique: list[tuple[int, str]] = []
