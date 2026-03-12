@@ -99,9 +99,9 @@ from web_crawler.config import (
 )
 from web_crawler.session import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
-    is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
-    solve_sg_captcha,
+    is_cf_managed_challenge, is_flying_press_cached, is_s3_access_denied,
+    is_sg_captcha_response, is_tomcat_ip_restricted, random_headers,
+    solve_cf_challenge, solve_sg_captcha,
 )
 from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
@@ -2096,6 +2096,12 @@ class Crawler:
             resp.status_code, content_type, len(content),
         )
 
+        # Log Flying Press cache status when present (WordPress cache plugin).
+        # This is informational only – it helps understand caching behaviour
+        # when crawling sites like androidacy.com.
+        if is_flying_press_cached(resp):
+            log.debug("  [FLYING-PRESS] Cache HIT for %s", url)
+
         # Detect WAF / Cloudflare / CAPTCHA on successful responses too
         if ct_lower in ("text/html", "application/xhtml+xml"):
             text = content.decode("utf-8", errors="replace")
@@ -2150,6 +2156,13 @@ class Crawler:
                 self._saved_urls.append(url)
                 self._track_video_url(url)
             self._maybe_git_push()
+
+        # Extract URLs from response headers
+        # speculation-rules: "/cdn-cgi/speculation" → crawlable JSON resource
+        _spec_rules = resp.headers.get("speculation-rules", "").strip().strip('"')
+        if _spec_rules and _spec_rules.startswith("/"):
+            spec_url = urllib.parse.urljoin(self.base, _spec_rules)
+            self._enqueue(spec_url, depth + 1)
 
         # Extract and enqueue links from parseable content
         ct = ct_lower

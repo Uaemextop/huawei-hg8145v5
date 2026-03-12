@@ -205,7 +205,11 @@ WAF_SIGNATURES = {
         ".well-known/sgcaptcha",
     ],
     "captcha": [
-        "captcha",
+        # Specific CAPTCHA provider widget patterns (code-level identifiers).
+        # NOTE: the generic word "captcha" is intentionally excluded because
+        # legitimate pages may mention it in user-facing text (e.g.
+        # "see less CAPTCHAs") causing false-positive WAF detection that
+        # blocks saving of real content.
         "recaptcha",
         "hcaptcha",
         "g-recaptcha",
@@ -213,6 +217,9 @@ WAF_SIGNATURES = {
         "cf-turnstile",
         "funcaptcha",
         "geetest",
+        "captcha-container",
+        "captcha-response",
+        "captcha_challenge",
         "please verify you are a human",
         "verificar que eres humano",
         "complete the security check",
