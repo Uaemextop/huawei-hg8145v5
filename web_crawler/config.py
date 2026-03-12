@@ -561,6 +561,53 @@ MAX_QUEUE_SIZE = 50_000
 
 
 # ---------------------------------------------------------------------------
+# Cloud storage host patterns for download-link detection
+# ---------------------------------------------------------------------------
+# Hosts whose URLs should be recorded as download links rather than crawled.
+# The crawler recognises these when following AJAX download endpoints
+# (e.g. ``ajax_url.php?firmid=X`` returning a Google Drive URL).
+CLOUD_STORAGE_HOSTS = frozenset({
+    "drive.google.com",
+    "drive.usercontent.google.com",
+    "docs.google.com",
+    "onedrive.live.com",
+    "1drv.ms",
+    "mega.nz",
+    "mega.co.nz",
+    "mediafire.com",
+    "www.mediafire.com",
+    "dropbox.com",
+    "www.dropbox.com",
+    "dl.dropboxusercontent.com",
+    "terabox.com",
+    "www.terabox.com",
+    "pixeldrain.com",
+    "www.upload.ee",
+    "krakenfiles.com",
+    "gofile.io",
+    "workupload.com",
+    "fichier.com",        # 1fichier
+    "www.fichier.com",
+    "send.cm",
+    "solidfiles.com",
+    "www.solidfiles.com",
+    "userscloud.com",
+    "bayfiles.com",
+    "anonfiles.com",
+    "uploadhaven.com",
+    "racaty.net",
+    "zippyshare.com",
+})
+
+# Regex that matches AJAX-style download endpoints: a URL whose query
+# string ends with ``key=`` (empty value) suggesting the real value is
+# concatenated at runtime from a JS variable.
+_AJAX_DOWNLOAD_ENDPOINT_RE = re.compile(
+    r"[?&]\w+=\s*$",
+)
+
+
+# ---------------------------------------------------------------------------
 # Hidden / sensitive files to probe at every discovered directory
 # ---------------------------------------------------------------------------
 HIDDEN_FILE_PROBES = [
