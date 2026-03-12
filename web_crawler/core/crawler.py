@@ -99,9 +99,9 @@ from web_crawler.config import (
 )
 from web_crawler.session import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
-    is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
-    solve_sg_captcha,
+    is_cf_managed_challenge, is_hcdn_challenge, is_s3_access_denied,
+    is_sg_captcha_response, is_tomcat_ip_restricted, random_headers,
+    solve_cf_challenge, solve_hcdn_challenge, solve_sg_captcha,
 )
 from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
@@ -275,6 +275,9 @@ class Crawler:
         # Must run before any other HTTP requests so the session cookie
         # is set for robots.txt loading and soft-404 probing.
         self._try_sg_captcha_bypass()
+
+        # Check for HCDN (Hostinger CDN) JS challenge early.
+        self._check_hcdn_challenge()
 
         # Check for Cloudflare Managed Challenge early, before wasting
         # time on robots.txt and soft-404 probing.
@@ -749,6 +752,22 @@ class Crawler:
             log.info("[SG-CAPTCHA] Solved – session cookie set")
         else:
             log.info("No SiteGround CAPTCHA detected (or not solvable)")
+
+    def _check_hcdn_challenge(self) -> None:
+        """Detect and auto-solve an HCDN (Hostinger CDN) JS challenge.
+
+        HCDN serves HTTP 403 with a JavaScript PoW challenge.  The solver
+        computes SHA-256 of a server-provided token and POSTs it back to
+        obtain a bypass cookie.  No browser automation is needed.
+        """
+        log.info("Checking for HCDN JS challenge …")
+        solved = solve_hcdn_challenge(
+            self.session, self.base, self.start_url,
+        )
+        if solved:
+            log.info("[HCDN] Challenge solved – session cookie set")
+        else:
+            log.info("No HCDN challenge detected (or not solvable)")
 
     def _check_cf_managed_challenge(self) -> None:
         """Detect and auto-solve a Cloudflare Managed Challenge.
@@ -1761,6 +1780,15 @@ class Crawler:
                     return
                 # Could not bypass CF – fall through to save the CF page body
                 log.debug("  [CF] Bypass failed – saving CF page body: %s", url)
+
+            # HCDN JS challenge – re-solve the SHA-256 challenge.
+            elif is_hcdn_challenge(resp):
+                log.info("[HCDN] Challenge on %s – re-solving …", url)
+                if solve_hcdn_challenge(self.session, self.base, url):
+                    self._visited.discard(key)
+                    self._enqueue(url, depth, priority=True)
+                    return
+                log.debug("  [HCDN] Bypass failed – saving body: %s", url)
 
             # Skip expensive retries for speculative probe URLs
             elif is_probe:

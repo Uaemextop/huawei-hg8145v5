@@ -59,7 +59,7 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -103,7 +103,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
             "es-MX,es;q=0.9,en;q=0.8",
             "en-GB,en;q=0.9",
         ]),
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": random.choice(["no-cache", "no-store", "max-age=0"]),
         "Pragma": "no-cache",
         "Sec-Fetch-Dest": "document",
@@ -482,3 +482,136 @@ def solve_cf_challenge(
     except Exception as exc:
         log.warning("[CF] Playwright error: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# HCDN (Hostinger CDN) JS challenge detection & solver
+# ---------------------------------------------------------------------------
+
+_HCDN_CJS_RE = re.compile(r"const\s+cjs\s*=\s*'([^']+)'")
+_HCDN_VALIDATE_RE = re.compile(r"const\s+jsChallengeUrl\s*=\s*'([^']+)'")
+_HCDN_URI_RE = re.compile(r"const\s+uri\s*=\s*'([^']+)'")
+
+
+def is_hcdn_challenge(resp: requests.Response) -> bool:
+    """Return ``True`` if *resp* is an HCDN JavaScript challenge page.
+
+    HCDN (Hostinger CDN) serves an HTTP 403 with a JS-based PoW challenge.
+    Indicators:
+
+    * ``server: hcdn`` response header
+    * Body contains ``/hcdn-cgi/jschallenge``
+    * Title: "Checking your browser before accessing"
+    """
+    if resp.status_code != 403:
+        return False
+    server = (resp.headers.get("server") or "").lower()
+    if server != "hcdn":
+        return False
+    snippet = resp.text[:4096]
+    return "hcdn-cgi/jschallenge" in snippet
+
+
+def solve_hcdn_challenge(
+    session: requests.Session,
+    base_url: str,
+    target_url: str,
+    timeout: int = 30,
+) -> bool:
+    """Solve an HCDN JS challenge and inject the bypass cookie.
+
+    The HCDN challenge flow:
+      1. GET *target_url* → HTTP 403 with challenge page
+      2. GET ``/hcdn-cgi/jschallenge`` (with ``Referer``) → JS defining
+         ``cjs``, ``jsChallengeUrl``, ``uri``
+      3. Compute ``SHA-256(cjs)``
+      4. POST hash to ``jsChallengeUrl`` → server sets ``hcdn`` cookie
+      5. Subsequent requests with the cookie bypass the challenge.
+
+    Returns ``True`` when the ``hcdn`` cookie is obtained.
+    """
+    from web_crawler.utils.log import log
+
+    # Step 1 – Fetch the challenge page (may already be in caller's hands,
+    # but we need to establish the session's TLS connection / cookies).
+    try:
+        resp = session.get(target_url, timeout=timeout)
+    except requests.RequestException:
+        return False
+
+    if not is_hcdn_challenge(resp):
+        # Not an HCDN challenge – nothing to do.
+        return False
+
+    # Step 2 – Fetch the jschallenge script with Referer.
+    js_url = base_url.rstrip("/") + "/hcdn-cgi/jschallenge"
+    try:
+        js_resp = session.get(
+            js_url, timeout=timeout,
+            headers={"Referer": target_url},
+        )
+    except requests.RequestException:
+        log.warning("[HCDN] Failed to fetch jschallenge script")
+        return False
+
+    if js_resp.status_code != 200:
+        log.warning("[HCDN] jschallenge returned HTTP %s", js_resp.status_code)
+        return False
+
+    cjs_m = _HCDN_CJS_RE.search(js_resp.text)
+    val_m = _HCDN_VALIDATE_RE.search(js_resp.text)
+    if not cjs_m or not val_m:
+        log.warning("[HCDN] Could not parse jschallenge variables")
+        return False
+
+    cjs = cjs_m.group(1)
+    validate_path = val_m.group(1)
+
+    # Step 3 – Compute SHA-256 of the challenge token.
+    challenge_hash = hashlib.sha256(cjs.encode("utf-8")).hexdigest()
+    log.info("[HCDN] Solving JS challenge (cjs=%s…)", cjs[:12])
+
+    # Step 4 – POST the solution.
+    # Use a bare ``requests.post()`` instead of ``session.post()`` because the
+    # session's default browser-navigation headers (Sec-Fetch-Dest: document,
+    # Upgrade-Insecure-Requests: 1, etc.) are merged into the request and cause
+    # HTTP 405 on HCDN edge nodes.  The endpoint expects XHR-style headers.
+    # The session's cookies are transferred manually after the POST succeeds.
+    validate_url = base_url.rstrip("/") + validate_path
+    post_headers = {
+        "User-Agent": session.headers.get("User-Agent", random.choice(USER_AGENTS)),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": target_url,
+        "Origin": base_url,
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    try:
+        post_resp = requests.post(
+            validate_url,
+            data=f"challenge={challenge_hash}",
+            timeout=timeout,
+            headers=post_headers,
+            verify=session.verify,
+        )
+    except requests.RequestException as exc:
+        log.warning("[HCDN] Validate POST failed: %s", exc)
+        return False
+
+    if post_resp.status_code != 200:
+        log.warning("[HCDN] Validate returned HTTP %s", post_resp.status_code)
+        return False
+
+    # Transfer the hcdn cookie from the POST response into the crawler session.
+    for cookie in post_resp.cookies:
+        session.cookies.set(
+            cookie.name, cookie.value,
+            domain=cookie.domain, path=cookie.path,
+        )
+
+    has_cookie = any(c.name == "hcdn" for c in session.cookies)
+    if has_cookie:
+        log.info("[HCDN] Bypass cookie obtained – challenge solved")
+    else:
+        log.warning("[HCDN] POST succeeded but no hcdn cookie set")
+    return has_cookie

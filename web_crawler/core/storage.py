@@ -226,4 +226,15 @@ def smart_local_path(
             if ct in ext_map:
                 path += ext_map[ct]
 
+    # Encode query parameters into the filename to avoid overwriting
+    # when multiple URLs share the same path (e.g. PHP query-based routing).
+    if parsed.query:
+        from web_crawler.utils.url import _query_to_filename_suffix
+        safe_qs = _query_to_filename_suffix(parsed.query)
+        p = Path(path)
+        if p.suffix:
+            path = str(p.with_suffix("")) + "_" + safe_qs + p.suffix
+        else:
+            path = path + "_" + safe_qs
+
     return output_dir / Path(path)
