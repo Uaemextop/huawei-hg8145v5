@@ -1227,7 +1227,9 @@ class Crawler:
         3. Enqueues every discoverable URL: module pages, support links,
            donation pages, README endpoints, and ZIP download URLs.
         """
-        if "androidacy.com" not in self.base:
+        base_host = urllib.parse.urlparse(self.base).netloc
+        if not (base_host == "androidacy.com"
+                or base_host.endswith(".androidacy.com")):
             return
 
         total_urls = 0
