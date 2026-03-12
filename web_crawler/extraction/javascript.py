@@ -210,18 +210,23 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
     return found
 
 
-def resolve_ajax_urls(js: str, page_html: str, page_url: str, base: str) -> set[str]:
+def resolve_ajax_urls(script_content: str, page_html: str,
+                      page_url: str, base: str) -> set[str]:
     """Resolve AJAX fetch endpoints that use dynamic parameter concatenation.
 
-    Looks for patterns like ``fetch('endpoint?param=' + var)`` in the JS,
-    then scans *page_html* for known parameter values (e.g. from ``<a>``
-    hrefs on the same page) and generates fully-qualified URLs for each
-    discovered value.  This allows the crawler to follow AJAX endpoints
-    that would otherwise require JavaScript execution.
+    Looks for patterns like ``fetch('endpoint?param=' + var)`` in
+    *script_content*, then scans *page_html* for known parameter values
+    (e.g. from ``<a>`` hrefs on the same page) and generates
+    fully-qualified URLs for each discovered value.  This allows the
+    crawler to follow AJAX endpoints that would otherwise require
+    JavaScript execution.
+
+    *script_content* and *page_html* may point to the same string when
+    the JS is embedded inside the HTML document (inline ``<script>``).
     """
     found: set[str] = set()
 
-    for m in _AJAX_PARAM_RE.finditer(js):
+    for m in _AJAX_PARAM_RE.finditer(script_content):
         ajax_base = m.group(1)        # e.g. "ajax_url.php?firmid="
         param_name = m.group(2)        # e.g. "firmid"
 
@@ -229,7 +234,10 @@ def resolve_ajax_urls(js: str, page_html: str, page_url: str, base: str) -> set[
         # params share a similar name.  For example, firmid= matches
         # firm= in  firmwares.php?firm=28436
         # Use the shorter of the two names as substring match.
-        _param_variants = {param_name, param_name.rstrip("id"), param_name + "id"}
+        _param_variants = {param_name, param_name.rstrip("id"),
+                           param_name + "id"}
+        # Discard empty strings that could match everything
+        _param_variants.discard("")
         _val_re = re.compile(
             r"""(?:""" + "|".join(re.escape(v) for v in _param_variants if v) +
             r""")=([a-zA-Z0-9_-]+)""",

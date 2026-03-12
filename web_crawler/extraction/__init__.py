@@ -31,6 +31,9 @@ def extract_all(content, content_type, url, base):
         found |= extract_html_attrs(content, url, base)
         found |= extract_js_paths(content, url, base)
         found |= extract_cloud_links(content)
+        # For HTML pages the JS and the page HTML are the same string
+        # (scripts are inline).  resolve_ajax_urls reads the AJAX fetch
+        # patterns from the JS and parameter values from the HTML links.
         found |= resolve_ajax_urls(content, content, url, base)
     elif ct in ("application/javascript", "text/javascript"):
         found |= extract_js_paths(content, url, base)
