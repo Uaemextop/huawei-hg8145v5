@@ -1,7 +1,8 @@
 """
-Generic Web Crawler
-====================
-Downloads all reachable pages and static assets from any website.
+Web Crawler
+===========
+Universal modular web crawler that downloads all reachable pages and
+static assets from any website.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
