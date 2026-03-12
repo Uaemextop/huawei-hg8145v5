@@ -20,7 +20,7 @@ on:
       delay:
         description: "Delay between requests in seconds"
         required: false
-        default: "0.1"
+        default: "0.25"
         type: string
       concurrency:
         description: "Parallel workers ('auto' = CPU/RAM-based, or a number)"

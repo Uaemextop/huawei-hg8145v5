@@ -2602,8 +2602,7 @@ class Crawler:
                     log.info(
                         "[ENUM] %d consecutive misses after %d download(s) "
                         "— stopping early at ID %d",
-                        consecutive_misses, new_count,
-                        start_id + checked - 1,
+                        consecutive_misses, new_count, checked,
                     )
                     stopped_early = True
                     cancel.set()
@@ -2611,7 +2610,7 @@ class Crawler:
 
         if stopped_early:
             log.info("[ENUM] Stopped early at ID %d — %d download(s) found",
-                     start_id + checked - 1, new_count)
+                     checked, new_count)
         else:
             log.info("[ENUM] Probe complete — %d download(s) in %d IDs",
                      new_count, scan_size)
@@ -2680,7 +2679,7 @@ class Crawler:
             total = len(title_queue)
             for _ in pool.map(_fetch_title, title_queue):
                 done += 1
-                if done % 2000 == 0:
+                if done % 5000 == 0:
                     log.info("[ENUM]   … titles %d/%d resolved", done, total)
 
         log.info("[ENUM] Resolved %d/%d firmware title(s)",
