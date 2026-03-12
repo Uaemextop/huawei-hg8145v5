@@ -1,5 +1,5 @@
 """
-Command-line interface for the generic web crawler.
+Command-line interface for the web crawling framework.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from web_crawler.config import (
     auto_concurrency,
 )
 from web_crawler.core.crawler import Crawler
+from web_crawler.plugins import PluginRegistry
 from web_crawler.utils.log import setup_logging, log
 
 try:
@@ -29,6 +30,26 @@ try:
     _COLORLOG_AVAILABLE = True
 except ImportError:
     _COLORLOG_AVAILABLE = False
+
+
+def _parse_extensions(raw: str, *, all_as_empty: bool = True) -> frozenset[str]:
+    """Parse a comma-separated extension string into a normalised frozenset.
+
+    When *all_as_empty* is True, ``"all"`` or ``""`` returns an empty
+    frozenset (meaning "no filter").  Otherwise ``"all"`` expands to a
+    built-in list of common binary extensions.
+    """
+    stripped = raw.strip().lower()
+    if stripped in ("all", "") and all_as_empty:
+        return frozenset()
+    if stripped == "all":
+        return frozenset(
+            "zip exe rar 7z bin tar gz bz2 xz iso img msi apk ipa "
+            "deb rpm jar war ear".split()
+        )
+    return frozenset(
+        f".{e.strip().lstrip('.')}" for e in raw.split(",") if e.strip()
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,37 +188,6 @@ def parse_args() -> argparse.Namespace:
              "their links.  Pre-signed LMSA S3 URLs matching this list are "
              "also recorded directly without queuing.",
     )
-    # ── AI CAPTCHA solver options ────────────────────────────────────
-    parser.add_argument(
-        "--ai-captcha", action="store_true", default=False,
-        help="Enable AI-powered CAPTCHA solving on login pages using the "
-             "GitHub Models vision API (requires GITHUB_TOKEN env var and "
-             "Playwright).  Adapted from Auto_CAPTCHA_with_LLM.",
-    )
-    parser.add_argument(
-        "--ai-captcha-url", default="", metavar="URL",
-        help="Login page URL where the AI CAPTCHA solver should run.  "
-             "If omitted, the crawl target URL is used.",
-    )
-    parser.add_argument(
-        "--ai-captcha-type", default="auto",
-        choices=["auto", "numbersOnly", "lettersOnly"],
-        help="CAPTCHA type hint (default: auto).  'numbersOnly' for "
-             "digit-only CAPTCHAs, 'lettersOnly' for alphabetic CAPTCHAs.",
-    )
-    parser.add_argument(
-        "--ai-model", default="openai/gpt-4o", metavar="MODEL",
-        help="GitHub Models model to use for AI CAPTCHA solving and text "
-             "extraction (default: openai/gpt-4o).  Must support vision.",
-    )
-    parser.add_argument(
-        "--ai-login-user", default="", metavar="USER",
-        help="Username to fill on the login page before solving the CAPTCHA.",
-    )
-    parser.add_argument(
-        "--ai-login-pass", default="", metavar="PASS",
-        help="Password to fill on the login page before solving the CAPTCHA.",
-    )
     return parser.parse_args()
 
 
@@ -231,18 +221,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse download extensions ("all" = no filtering, download everything)
-    raw_dl = args.download_extensions.strip().lower()
-    if raw_dl in ("all", ""):
-        dl_exts: frozenset[str] = frozenset()
-        log.info("Download mode: ALL file types (no extension filter)")
+    dl_exts = _parse_extensions(args.download_extensions)
+    if dl_exts:
+        log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
     else:
-        dl_exts = frozenset(
-            f".{e.strip().lstrip('.')}"
-            for e in args.download_extensions.split(",")
-            if e.strip()
-        )
-        if dl_exts:
-            log.info("Actively seeking extensions: %s", ", ".join(sorted(dl_exts)))
+        log.info("Download mode: ALL file types (no extension filter)")
 
     # Resolve concurrency (auto or explicit integer)
     raw_conc = args.concurrency.strip().lower()
@@ -258,21 +241,19 @@ def main() -> None:
             concurrency = auto_concurrency()
 
     # Parse upload extensions ("all" = push everything to git)
-    raw_up = args.upload_extensions.strip().lower()
-    upload_exts: frozenset[str] = frozenset()
-    if raw_up not in ("all", ""):
-        upload_exts = frozenset(
-            f".{e.strip().lstrip('.')}"
-            for e in args.upload_extensions.split(",")
-            if e.strip()
-        )
-        if upload_exts:
-            log.info("Upload filter: only %s extensions pushed to git",
-                     ", ".join(sorted(upload_exts)))
+    upload_exts = _parse_extensions(args.upload_extensions)
+    if upload_exts:
+        log.info("Upload filter: only %s extensions pushed to git",
+                 ", ".join(sorted(upload_exts)))
 
-    # ------------------------------------------------------------------ #
-    # LMSA authentication (optional)
-    # ------------------------------------------------------------------ #
+    # ── Plugin registry ─────────────────────────────────────────────
+    registry = PluginRegistry()
+    registry.discover()
+    loaded = sum(len(registry.get_plugins(c)) for c in ("detector", "strategy", "extractor", "processor"))
+    if loaded:
+        log.info("Loaded %d plugins", loaded)
+
+    # ── LMSA authentication (optional) ──────────────────────────────
     lmsa_session = None
     lmsa_email    = args.lmsa_email    or os.environ.get("LMSA_EMAIL", "")
     lmsa_password = args.lmsa_password or os.environ.get("LMSA_PASSWORD", "")
@@ -327,9 +308,7 @@ def main() -> None:
         except Exception as exc:
             log.warning("[LMSA] Auth error (continuing without auth): %s", exc)
 
-    # ------------------------------------------------------------------ #
-    # LMSA firmware scan (when target is rsddownload-secure.lenovo.com)
-    # ------------------------------------------------------------------ #
+    # ── LMSA firmware scan ──────────────────────────────────────────
     extra_seed_urls: list[str] = []
     _LMSA_S3_HOST = "rsddownload-secure.lenovo.com"
     if (
@@ -345,7 +324,6 @@ def main() -> None:
             from web_crawler.auth.lmsa import _FIRMWARE_COUNTRIES
             country_filter = getattr(args, "lmsa_country", "")
             if country_filter:
-                # Support comma-separated countries, e.g. "Mexico,China"
                 scan_countries = tuple(
                     c.strip() for c in country_filter.split(",") if c.strip()
                 )
@@ -361,12 +339,10 @@ def main() -> None:
                 "[LMSA] Firmware scan found %d unique download URLs (%d resources)",
                 len(url_pairs), len(resources),
             )
-            # Also collect plugin/toolbox URLs.
             plugin_pairs = lmsa_session.get_plugin_urls()
             if plugin_pairs:
                 log.info("[LMSA] Plugin/tool URLs: %d", len(plugin_pairs))
 
-            # Write typed URL manifest files (rom, tool, other).
             typed = lmsa_session.collect_download_urls_by_type(resources)
             for cat_name, cat_pairs in typed.items():
                 if cat_pairs:
@@ -378,7 +354,6 @@ def main() -> None:
                         "[LMSA] %s URL manifest: %s (%d URLs)",
                         cat_name, typed_path, len(cat_pairs),
                     )
-            # Write plugin URLs to a dedicated manifest file.
             if plugin_pairs:
                 plugin_path = output_dir / "lmsa_plugin_urls.txt"
                 with plugin_path.open("w", encoding="utf-8") as pf:
@@ -389,100 +364,25 @@ def main() -> None:
                     plugin_path, len(plugin_pairs),
                 )
 
-            # Write combined manifest with all URLs (backward compatibility).
             all_pairs = url_pairs + plugin_pairs
             manifest_path = output_dir / "lmsa_firmware_urls.txt"
             with manifest_path.open("w", encoding="utf-8") as mf:
                 for dl_url, dl_name in all_pairs:
                     mf.write(f"{dl_url}\t{dl_name}\n")
             log.info("[LMSA] Combined firmware URL manifest saved: %s", manifest_path)
-            # Collect pre-signed URLs as seeds for the crawler.
             extra_seed_urls = [u for u, _ in all_pairs]
         except Exception as exc:
             log.warning("[LMSA] Firmware scan failed (continuing): %s", exc)
 
     # Parse skip_download_exts
     skip_dl_exts_raw = getattr(args, "skip_download_exts", "") or ""
+    skip_dl_exts: frozenset[str] | None = None
     if skip_dl_exts_raw.strip().lower() == "all":
-        # "all" means skip downloading every binary/archive extension
-        skip_dl_exts: frozenset[str] | None = frozenset(
-            "zip exe rar 7z bin tar gz bz2 xz iso img msi apk ipa deb rpm jar war ear".split()
-        )
+        skip_dl_exts = _parse_extensions(skip_dl_exts_raw, all_as_empty=False)
     elif skip_dl_exts_raw.strip():
         skip_dl_exts = frozenset(
             e.strip().lower().lstrip(".") for e in skip_dl_exts_raw.split(",") if e.strip()
         )
-    else:
-        skip_dl_exts = None
-
-    # ------------------------------------------------------------------ #
-    # AI-powered CAPTCHA solver (optional)
-    # ------------------------------------------------------------------ #
-    ai_cookies: dict[str, str] = {}
-    if args.ai_captcha:
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        if not github_token:
-            log.warning(
-                "[AI-CAPTCHA] GITHUB_TOKEN env var not set — "
-                "AI CAPTCHA solver disabled"
-            )
-        else:
-            try:
-                from web_crawler.ai.github_models import GitHubModelsClient
-                from web_crawler.ai.captcha_solver import AICaptchaSolver
-
-                ai_client = GitHubModelsClient(
-                    token=github_token,
-                    model=args.ai_model,
-                )
-                solver = AICaptchaSolver(
-                    ai_client=ai_client,
-                    captcha_type=args.ai_captcha_type,
-                )
-                captcha_url = args.ai_captcha_url or target_url
-
-                # LMSA hosts (lsa.lenovo.com, rsddownload-secure.lenovo.com)
-                # require authentication via passport.lenovo.com — redirect
-                # the CAPTCHA solver to the actual login page.
-                _LMSA_CAPTCHA_HOSTS = {
-                    "lsa.lenovo.com",
-                    "rsddownload-secure.lenovo.com",
-                }
-                captcha_parsed = urllib.parse.urlparse(captcha_url)
-                if captcha_parsed.hostname in _LMSA_CAPTCHA_HOSTS:
-                    captcha_url = (
-                        "https://passport.lenovo.com/glbwebauthnv6/preLogin"
-                        "?lenovoid.action=uilogin"
-                        "&lenovoid.realm=lmsaclient"
-                        "&lenovoid.cb=https://lsa.lenovo.com"
-                        "/Tips/lenovoIdSuccess.html"
-                    )
-                    log.info(
-                        "[AI-CAPTCHA] LMSA target detected — redirecting "
-                        "CAPTCHA solver to passport.lenovo.com login"
-                    )
-
-                log.info(
-                    "[AI-CAPTCHA] Solving CAPTCHA at %s (model=%s, type=%s)",
-                    captcha_url, args.ai_model, args.ai_captcha_type,
-                )
-                result = solver.solve_login_captcha(
-                    captcha_url,
-                    username=args.ai_login_user,
-                    password=args.ai_login_pass,
-                )
-                if result:
-                    ai_cookies = result
-                    log.info(
-                        "[AI-CAPTCHA] ✓ Obtained %d cookies from login",
-                        len(ai_cookies),
-                    )
-                else:
-                    log.warning("[AI-CAPTCHA] Failed to solve CAPTCHA")
-            except ImportError as exc:
-                log.warning("[AI-CAPTCHA] Missing dependency: %s", exc)
-            except Exception as exc:
-                log.warning("[AI-CAPTCHA] Error (continuing): %s", exc)
 
     crawler = Crawler(
         start_url=target_url,
@@ -504,25 +404,8 @@ def main() -> None:
         skip_download_exts=skip_dl_exts,
         lmsa_session=lmsa_session,
         extra_seed_urls=extra_seed_urls,
+        plugin_registry=registry,
     )
-
-    # Inject cookies obtained by the AI CAPTCHA solver into the crawler
-    # session so that subsequent requests carry the login cookies.
-    if ai_cookies:
-        parsed = urllib.parse.urlparse(target_url)
-        # Cookies from passport.lenovo.com need to be set on .lenovo.com
-        # for cross-subdomain access (lsa.lenovo.com, rsddownload-secure.lenovo.com).
-        hostname = parsed.hostname or ""
-        if hostname.endswith(".lenovo.com"):
-            cookie_domain = ".lenovo.com"
-        else:
-            cookie_domain = hostname
-        for name, value in ai_cookies.items():
-            crawler.session.cookies.set(name, value, domain=cookie_domain)
-        log.info(
-            "[AI-CAPTCHA] Injected %d cookies into crawler session "
-            "(domain=%s)", len(ai_cookies), cookie_domain,
-        )
 
     t0 = time.monotonic()
     crawler.run()
