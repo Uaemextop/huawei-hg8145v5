@@ -1327,9 +1327,10 @@ class Crawler:
     # an ever-growing URL like ``/a/b/a/b/a/b/page``.
     _MAX_PATH_DEPTH = 15
 
-    # Regex that detects a path segment appearing 3+ times — a strong
-    # signal that relative-URL resolution is looping.
-    _REPEATING_SEGMENT_RE = re.compile(r"(/[^/]+(?:/[^/]+){0,2})\1{2,}")
+    # Regex that detects a sub-path of 1–3 segments repeating 3+ times
+    # consecutively (e.g. ``/a/b/a/b/a/b``) — a strong signal that
+    # relative-URL resolution is looping.
+    _REPEATING_SEGMENT_RE = re.compile(r"(/[^/]+(?:/[^/]+){0,2})\1{2}")
 
     def _enqueue(self, url: str, depth: int, *, priority: bool = False) -> None:
         """Add *url* to the queue if not yet visited and within scope.
@@ -2412,14 +2413,14 @@ class Crawler:
 
         # Collect indices needing title enrichment.
         to_enrich: list[tuple[int, int]] = []  # (list_index, firmware_id)
+        _id_re = re.compile(r"[?&]" + re.escape(ajax_param) + r"=(\d+)")
         with self._lock:
             for idx, (_, ajax_ep, _, fw_name) in enumerate(
                 self._external_download_urls,
             ):
                 if not fw_name.startswith("firmware_"):
                     continue
-                m = re.search(r"[?&]" + re.escape(ajax_param) + r"=(\d+)",
-                              ajax_ep)
+                m = _id_re.search(ajax_ep)
                 if m:
                     to_enrich.append((idx, int(m.group(1))))
 
