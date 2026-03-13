@@ -40,7 +40,7 @@ directory structure on disk for fully-offline browsing and analysis.
 
 ```
 web_crawler/                # Main Python package
-├── __init__.py             # Package version (3.0.0)
+├── __init__.py             # Package version
 ├── __main__.py             # Entry point: python -m web_crawler
 ├── cli.py                  # CLI argument parsing
 ├── config/
@@ -146,7 +146,7 @@ python -m web_crawler https://example.com --skip-download-exts zip,exe,rar
 
 ```
 downloaded_site/
-├── index.html            # Browsable file index (auto-generated)
+├── _index.html           # Browsable file index (auto-generated)
 ├── about.html
 ├── css/
 │   └── style.css
