@@ -5,3 +5,4 @@ __pycache__/
 dist/
 build/
 .eggs/
+firmware_analysis/analysis_results.json
