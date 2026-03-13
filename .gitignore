@@ -5,3 +5,24 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Environment and secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Crawl output
+downloaded_site/
