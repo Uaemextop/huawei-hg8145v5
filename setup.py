@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="web-crawler",
-    version="2.0.0",
+    version="3.0.0",
     description="Generic web crawler that downloads all reachable pages and assets from a website",
     packages=find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.10",

@@ -108,6 +108,7 @@ from web_crawler.core.storage import (
 from web_crawler.extraction import extract_links
 from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
+from web_crawler.utils.index_generator import generate_index
 
 
 class Crawler:
@@ -330,6 +331,12 @@ class Crawler:
 
         # Write external download URL list (Google Drive, OneDrive, Mega, …)
         self._write_download_url_list()
+
+        # Generate browsable HTML file index
+        try:
+            generate_index(self.output_dir, site_name=self.allowed_host)
+        except Exception as exc:
+            log.warning("Failed to generate HTML index: %s", exc)
 
     @staticmethod
     def _sanitize_meta_value(value: str) -> str:
