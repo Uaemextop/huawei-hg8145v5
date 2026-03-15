@@ -1,0 +1,99 @@
+name: Publish Motorola Firmware Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_owner:
+        description: 'User or organization to create the repo under'
+        required: true
+        default: 'Uaemextop'
+        type: string
+      repo_name:
+        description: 'Repository name'
+        required: true
+        default: 'motorola-firmware'
+        type: string
+      repo_visibility:
+        description: 'Repository visibility'
+        required: true
+        default: 'public'
+        type: choice
+        options:
+          - public
+          - private
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+
+      - name: Create target repository
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          TARGET_OWNER: ${{ inputs.target_owner }}
+          TARGET_REPO: ${{ inputs.repo_name }}
+          VISIBILITY: ${{ inputs.repo_visibility }}
+        run: |
+          FULL_REPO="${TARGET_OWNER}/${TARGET_REPO}"
+
+          if gh repo view "$FULL_REPO" &>/dev/null; then
+            echo "Repository $FULL_REPO already exists, skipping creation."
+          else
+            gh repo create "$FULL_REPO" \
+              "--${VISIBILITY}" \
+              --description "Motorola Firmware Suite — search, authenticate & download Motorola firmware, ROMs and tools" \
+              --clone=false
+            echo "Repository $FULL_REPO created."
+          fi
+
+      - name: Push motorola_downloader content
+        env:
+          GH_TOKEN: ${{ secrets.REPO_PAT }}
+          TARGET_OWNER: ${{ inputs.target_owner }}
+          TARGET_REPO: ${{ inputs.repo_name }}
+        run: |
+          set -e
+          FULL_REPO="${TARGET_OWNER}/${TARGET_REPO}"
+
+          WORK_DIR=$(mktemp -d)
+          cp -r motorola_downloader/. "$WORK_DIR/"
+
+          # Copy top-level files relevant to the package
+          [ -f requirements.txt ] && cp requirements.txt "$WORK_DIR/"
+          [ -f setup.py ]         && cp setup.py "$WORK_DIR/"
+          [ -f README.md ]        && cp README.md "$WORK_DIR/"
+
+          # Create a .gitignore for the new repo
+          cat > "$WORK_DIR/.gitignore" <<'EOF'
+          __pycache__/
+          *.pyc
+          *.pyo
+          *.egg-info/
+          dist/
+          build/
+          .eggs/
+          logs/
+          downloads/
+          *.log
+          *.key
+          config.local.ini
+          EOF
+          sed -i 's/^[[:space:]]*//' "$WORK_DIR/.gitignore"
+
+          cd "$WORK_DIR"
+          git init -b main
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Initial commit: Motorola Firmware Suite (source: ${{ github.repository }}@${{ github.sha }})"
+
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${FULL_REPO}.git"
+          git push -u origin main --force
+
+          echo "✅ Published to https://github.com/${FULL_REPO}"
