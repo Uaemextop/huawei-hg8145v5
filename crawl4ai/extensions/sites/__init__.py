@@ -74,6 +74,6 @@ def get_matching_modules(
             if inst.matches(url):
                 log.debug("Site module %s matched URL %s", cls.__name__, url)
                 matched.append(inst)
-        except Exception as exc:  # noqa: BLE001
+        except (TypeError, AttributeError, ValueError, ImportError) as exc:
             log.debug("Error checking site module %s: %s", cls.__name__, exc)
     return matched

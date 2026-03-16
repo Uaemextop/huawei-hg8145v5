@@ -127,7 +127,8 @@ class HPSupportModule(BaseSiteModule):
         import requests as _req
         s = _req.Session()
         s.headers.update(_HEADERS)
-        s.verify = False
+        # Inherit verify setting from the caller's session if available;
+        # new fallback sessions use the default (True = verify SSL).
         return s
 
     @staticmethod
