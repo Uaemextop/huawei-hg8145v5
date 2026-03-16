@@ -26,6 +26,7 @@ Markdown table.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 import urllib.parse
@@ -424,7 +425,7 @@ class HPSupportModule(BaseSiteModule):
         release = latest.get("releaseDate", "")
         desc_html = (latest.get("detailInformation") or {}).get("description", "")
         # Strip HTML tags for plain-text description
-        description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:200]
+        description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:_MAX_DESCRIPTION_LENGTH]
 
         file_url = latest.get("fileUrl", "")
         if file_url and file_url.startswith("http"):
@@ -449,7 +450,7 @@ class HPSupportModule(BaseSiteModule):
             ))
 
             # Additional sub-files with different URLs
-            for sf in sub_files[1:]:
+            for sf in itertools.islice(sub_files, 1, None):
                 sf_url = sf.get("fileUrl", "")
                 if sf_url and sf_url.startswith("http") and sf_url != file_url:
                     entries.append(FileEntry(

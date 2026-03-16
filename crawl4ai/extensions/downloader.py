@@ -208,6 +208,9 @@ _META_REFRESH_RE = re.compile(
 # ── Chunk size for streaming ─────────────────────────────────────────────
 _STREAM_CHUNK = 524_288  # 512 KiB
 
+# ── File-index limits ────────────────────────────────────────────────────
+_MAX_DESCRIPTIONS_IN_INDEX = 50
+
 
 class SiteDownloader:
     """Download pages and files from a website, saving locally and optionally
@@ -253,6 +256,7 @@ class SiteDownloader:
         allow_external: bool = True,
         git_repo_dir: str | Path | None = None,
         git_push_every: int = 0,
+        future_timeout: float = 60,
     ) -> None:
         parsed = urllib.parse.urlparse(url)
         if not parsed.scheme or not parsed.netloc:
@@ -267,6 +271,7 @@ class SiteDownloader:
         self.concurrency = auto_concurrency() if concurrency <= 0 else concurrency
         self.git_repo_dir = Path(git_repo_dir) if git_repo_dir else None
         self.git_push_every = git_push_every
+        self.future_timeout = future_timeout
 
         # Determine target extensions
         if download_extensions is None:
@@ -350,7 +355,7 @@ class SiteDownloader:
         # Maximum time to wait for any single future before cycling (seconds).
         # This prevents the main loop from stalling indefinitely when
         # requests hang without raising exceptions.
-        _FUTURE_TIMEOUT = 60
+        _FUTURE_TIMEOUT = self.future_timeout
 
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             futures = {}
@@ -831,7 +836,7 @@ class SiteDownloader:
             ]
             if descs:
                 fh.write("\n## Descriptions\n\n")
-                for name, desc in descs[:50]:
+                for name, desc in descs[:_MAX_DESCRIPTIONS_IN_INDEX]:
                     fh.write(f"**{name}**: {desc}\n\n")
 
         # Track as a downloaded file for git push and summary
