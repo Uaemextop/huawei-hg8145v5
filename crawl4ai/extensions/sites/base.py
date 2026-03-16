@@ -2,25 +2,43 @@
 crawl4ai.extensions.sites.base – Abstract base class for site modules.
 
 Every site-specific module must subclass :class:`BaseSiteModule` and
-implement two methods:
+implement:
 
 * :meth:`matches` – Return ``True`` if this module applies to the given URL.
-* :meth:`extra_urls` – Return a set of additional download URLs discovered
-  via site-specific logic (API calls, catalogue parsing, etc.).
+* :meth:`generate_index` – Dynamically discover files via site APIs and
+  return a list of :class:`FileEntry` dicts with metadata + download URL.
+
+The downloader writes the returned entries to a ``file_index.md`` Markdown
+table instead of downloading the actual files.
 """
 
 from __future__ import annotations
 
 import abc
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     import requests
 
-__all__ = ["BaseSiteModule"]
+__all__ = ["BaseSiteModule", "FileEntry"]
 
 log = logging.getLogger(__name__)
+
+
+class FileEntry(TypedDict, total=False):
+    """Metadata for a single discoverable file.
+
+    Only ``name`` and ``url`` are required; the rest are optional.
+    """
+    name: str
+    url: str
+    size: str
+    version: str
+    release_date: str
+    category: str
+    os: str
+    description: str
 
 
 class BaseSiteModule(abc.ABC):
@@ -50,16 +68,20 @@ class BaseSiteModule(abc.ABC):
         """
 
     @abc.abstractmethod
-    def extra_urls(self, url: str) -> set[str]:
-        """Return additional download URLs for the given start *url*.
+    def generate_index(self, url: str) -> list[FileEntry]:
+        """Dynamically discover files and return their metadata.
 
-        This method is called **once** when the crawl begins.  It may make
-        HTTP requests (using ``self.session``) to discover download links
-        that are not present in the static HTML (e.g. AJAX API responses,
-        catalogue files, hidden CDN links).
+        This method is called **once** when the crawl begins.  It should
+        make HTTP requests (using ``self.session``) to site-specific APIs
+        and return a list of :class:`FileEntry` dicts containing file
+        metadata (name, size, version, release date, category, OS,
+        description) and the download URL.
+
+        The downloader will write these entries to a ``file_index.md``
+        Markdown file instead of downloading the actual files.
 
         Returns
         -------
-        set[str]
-            Absolute URLs to download.
+        list[FileEntry]
+            One entry per discoverable file.
         """

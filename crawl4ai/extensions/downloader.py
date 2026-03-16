@@ -324,24 +324,33 @@ class SiteDownloader:
         self._queue.append((self.start_url, 0))
 
         # ── Site-specific modules ────────────────────────────────────
-        # Check if any site module matches the start URL and inject
-        # additional download URLs that are only discoverable via APIs.
+        # Check if any site module matches the start URL and generate
+        # a file index with metadata instead of downloading files.
         site_modules = get_matching_modules(self.start_url, session=self.session)
         for mod in site_modules:
-            log.info("🔌 %s matched — discovering extra URLs …",
+            log.info("🔌 %s matched — generating file index …",
                      _c(mod.name, "magenta"))
             try:
-                extra = mod.extra_urls(self.start_url)
-                if extra:
-                    for u in extra:
-                        self._queue.append((u, 0))
-                    log.info("🔌 %s injected %s extra download URLs",
+                index_entries = mod.generate_index(self.start_url)
+                if index_entries:
+                    index_path = self._write_file_index(
+                        mod.name, index_entries,
+                    )
+                    log.info("🔌 %s: wrote %s entries to %s",
                              _c(mod.name, "magenta"),
-                             _c(len(extra), "green"))
+                             _c(len(index_entries), "green"),
+                             _c(index_path, "green"))
+                else:
+                    log.info("🔌 %s: no files discovered", _c(mod.name, "magenta"))
             except Exception as exc:
                 log.warning("⚠️  %s error: %s", _c(mod.name, "yellow"), exc)
 
         t0 = time.time()
+
+        # Maximum time to wait for any single future before cycling (seconds).
+        # This prevents the main loop from stalling indefinitely when
+        # requests hang without raising exceptions.
+        _FUTURE_TIMEOUT = 60
 
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             futures = {}
@@ -360,14 +369,30 @@ class SiteDownloader:
                 if not futures:
                     break
 
-                # Wait for at least one to complete
-                for fut in as_completed(futures):
-                    try:
-                        fut.result()
-                    except Exception:
-                        pass
-                    del futures[fut]
-                    break  # Process one and loop to submit more
+                # Wait for at least one to complete, with a timeout to
+                # prevent the crawler from stalling on stuck requests.
+                done = False
+                try:
+                    for fut in as_completed(futures, timeout=_FUTURE_TIMEOUT):
+                        try:
+                            fut.result()
+                        except Exception:
+                            pass
+                        del futures[fut]
+                        done = True
+                        break  # Process one and loop to submit more
+                except TimeoutError:
+                    pass
+
+                # If we timed out (no future completed), cancel the oldest
+                # stalled futures to avoid getting stuck forever.
+                if not done:
+                    stalled = list(futures.keys())[:self.concurrency]
+                    for sf in stalled:
+                        sf.cancel()
+                        url_info = futures.pop(sf, ("?", 0))
+                        log.warning("⚠️  Cancelled stalled request: %s",
+                                    _c(url_info[0] if isinstance(url_info, tuple) else url_info, "yellow"))
 
         elapsed = time.time() - t0
 
@@ -754,6 +779,71 @@ class SiteDownloader:
                 )
         except Exception:
             pass
+
+    # ── File index (site-module output) ─────────────────────────────
+
+    def _write_file_index(
+        self,
+        module_name: str,
+        entries: list,
+    ) -> Path:
+        """Write a file index Markdown table from site-module metadata.
+
+        Parameters
+        ----------
+        module_name:
+            Human-readable name of the site module (for the heading).
+        entries:
+            List of :class:`FileEntry` dicts from the site module's
+            ``generate_index()`` method.
+
+        Returns
+        -------
+        Path
+            The path to the generated ``file_index.md``.
+        """
+        index_path = self.output_dir / "file_index.md"
+        with index_path.open("w", encoding="utf-8") as fh:
+            fh.write(f"# File Index — {module_name}\n\n")
+            fh.write(f"Generated from: `{self.start_url}`\n\n")
+            fh.write(f"**{len(entries)} files discovered**\n\n")
+            fh.write("| # | Name | Version | Size | Release Date "
+                     "| Category | OS | Download URL |\n")
+            fh.write("|---|------|---------|------|-------------- "
+                     "|----------|----|--------------|\n")
+            for i, entry in enumerate(entries, 1):
+                name = entry.get("name", "").replace("|", "\\|")
+                version = entry.get("version", "")
+                size = entry.get("size", "")
+                release = entry.get("release_date", "")
+                category = entry.get("category", "").replace("|", "\\|")
+                os_name = entry.get("os", "")
+                url = entry.get("url", "")
+                fh.write(
+                    f"| {i} | {name} | {version} | {size} | {release} "
+                    f"| {category} | {os_name} | {url} |\n"
+                )
+
+            # Optional: description section for entries that have one
+            descs = [
+                (e.get("name", "?"), e.get("description", ""))
+                for e in entries if e.get("description")
+            ]
+            if descs:
+                fh.write("\n## Descriptions\n\n")
+                for name, desc in descs[:50]:
+                    fh.write(f"**{name}**: {desc}\n\n")
+
+        # Track as a downloaded file for git push and summary
+        with self._lock:
+            self._download_count += 1
+            self._downloaded_files.append(index_path)
+
+        # Push index to git if configured
+        if self.git_repo_dir and self.git_push_every > 0:
+            self._git_push(f"File index: {len(entries)} entries from {module_name}")
+
+        return index_path
 
     # ── Summary ──────────────────────────────────────────────────────
 

@@ -13,10 +13,15 @@ via the ``/wcc-services/`` JSON API.  This module:
 4. If the OS API returns no data, falls back to the
    ``/wcc-services/s/init`` API to detect the user's OS dynamically.
 5. POSTs to ``/wcc-services/swd-v2/driverDetails`` for every OS version
-   and collects all ``fileUrl`` values from each software entry.
+   and collects file metadata (name, size, version, release date,
+   category, OS, description, download URL) for each software entry.
 
 **No static / hardcoded data** — all product OIDs, OS IDs, platform IDs,
-and download URLs are discovered at runtime via HP's own APIs.
+and file metadata are discovered at runtime via HP's own APIs.
+
+Instead of returning download URLs, this module returns a list of
+:class:`FileEntry` dicts that the downloader writes to a ``file_index.md``
+Markdown table.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import re
 import urllib.parse
 from typing import TYPE_CHECKING
 
-from .base import BaseSiteModule
+from .base import BaseSiteModule, FileEntry
 
 if TYPE_CHECKING:
     import requests
@@ -59,7 +64,6 @@ _SWD_DRIVERS_URL = f"{_BASE}/wcc-services/swd-v2/driverDetails"
 _SWD_OS_URL = f"{_BASE}/wcc-services/swd-v2/osVersionData"
 _INIT_URL = f"{_BASE}/wcc-services/s/init"
 _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
-_SITEMAP_URL = f"{_BASE}/wcc-services/sitemap/href"
 
 _REQUEST_TIMEOUT = 30
 
@@ -78,10 +82,15 @@ _HEADERS = {
 
 
 class HPSupportModule(BaseSiteModule):
-    """Discovers driver/software download URLs from support.hp.com.
+    """Discovers driver/software file metadata from support.hp.com.
 
-    All product IDs, OS versions, platform IDs, and download URLs are
+    All product IDs, OS versions, platform IDs, and file metadata are
     fetched **dynamically** from HP's JSON APIs — nothing is hardcoded.
+
+    Returns a list of :class:`FileEntry` dicts with file name, size,
+    version, release date, category, OS, description, and download URL
+    so the downloader can write a ``file_index.md`` instead of
+    downloading the actual files.
     """
 
     name = "HP Support (drivers & software)"
@@ -93,17 +102,17 @@ class HPSupportModule(BaseSiteModule):
         parsed = urllib.parse.urlparse(url)
         return parsed.netloc in _HP_HOSTS
 
-    def extra_urls(self, url: str) -> set[str]:
-        """Discover driver/software download URLs via HP's SWD APIs.
+    def generate_index(self, url: str) -> list[FileEntry]:
+        """Discover driver/software files and return their metadata.
 
         The entire flow is dynamic:
 
         1. Extract locale (``cc``, ``lc``) from the URL.
         2. Extract or discover product OID(s).
         3. For each OID, fetch OS versions from the API.
-        4. For each OS, POST to driverDetails and collect ``fileUrl``.
+        4. For each OS, POST to driverDetails and collect file metadata.
         """
-        urls: set[str] = set()
+        entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
 
         # 1. Try extracting OID directly from the URL
@@ -116,11 +125,12 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP] No OID in URL — searching for '%s'", seo_name)
                 oid = self._resolve_oid_by_search(seo_name, cc, lc)
 
-        # 3. If still no OID, scan for product page links as fallback
+        # 3. If still no OID, try the search API with a broad query
         if not oid:
-            log.info("[HP] No product OID found — scanning sitemap")
-            urls |= self._discover_product_pages(url, cc, lc)
-            return urls
+            log.info("[HP] No product OID found — searching broadly")
+            oid = self._resolve_oid_by_search(_DEFAULT_SEARCH_QUERY, cc, lc)
+            if not oid:
+                return entries
 
         log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
 
@@ -130,17 +140,26 @@ class HPSupportModule(BaseSiteModule):
             # Fallback: detect user OS from /s/init API
             os_list = self._detect_os_from_init(cc, lc)
 
-        # 5. For each OS, fetch driver/software list
+        # 5. For each OS, fetch driver/software metadata
         for os_info in os_list:
             try:
-                driver_urls = self._fetch_driver_urls(oid, os_info, cc, lc)
-                urls |= driver_urls
+                os_entries = self._fetch_driver_entries(oid, os_info, cc, lc)
+                entries.extend(os_entries)
             except Exception as exc:
                 log.debug("[HP] Error fetching drivers for OS %s: %s",
                           os_info.get("name", "?"), exc)
 
-        log.info("[HP] Discovered %d download URLs for product %s", len(urls), oid)
-        return urls
+        # Deduplicate by URL
+        seen_urls: set[str] = set()
+        unique: list[FileEntry] = []
+        for entry in entries:
+            u = entry.get("url", "")
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                unique.append(entry)
+
+        log.info("[HP] Discovered %d files for product %s", len(unique), oid)
+        return unique
 
     # ── Session helper ───────────────────────────────────────────────
 
@@ -325,21 +344,20 @@ class HPSupportModule(BaseSiteModule):
             log.debug("[HP] /s/init OS detection failed: %s", exc)
         return []
 
-    # ── Driver / software list ───────────────────────────────────────
+    # ── Driver / software metadata collection ────────────────────────
 
-    def _fetch_driver_urls(
+    def _fetch_driver_entries(
         self,
         oid: str,
         os_info: dict,
         cc: str,
         lc: str,
-    ) -> set[str]:
+    ) -> list[FileEntry]:
         """POST to ``/wcc-services/swd-v2/driverDetails`` and extract
-        all download URLs from the response.
+        file metadata from the response.
 
-        The response contains ``softwareTypes[]`` → ``softwareDriversList[]``
-        → ``latestVersionDriver`` / ``productSoftwareFileList[]`` with
-        ``fileUrl`` pointing to ``ftp.hp.com`` download links.
+        Returns a list of :class:`FileEntry` dicts with name, size,
+        version, release date, category, OS, description, and URL.
         """
         sess = self._get_session()
         payload = {
@@ -351,7 +369,8 @@ class HPSupportModule(BaseSiteModule):
             "platformId": os_info.get("platformId", ""),
         }
 
-        urls: set[str] = set()
+        entries: list[FileEntry] = []
+        os_name = os_info.get("name", "")
         try:
             resp = sess.post(
                 _SWD_DRIVERS_URL,
@@ -360,138 +379,119 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
-                return urls
+                return entries
             data = resp.json().get("data", {})
             if data is None:
-                return urls
+                return entries
 
             for sw_type in data.get("softwareTypes", []):
-                # Primary structure (newer API responses)
-                for item in sw_type.get("softwareDriversList", []):
-                    self._collect_file_urls_from_driver(item, urls)
-                # Fallback structure (older API responses).
-                # Duplicates are harmless — ``urls`` is a set.
+                category = sw_type.get(
+                    "accordionName",
+                    sw_type.get("categoryName", ""),
+                )
+                # Primary structure: softwareDriversList[]
+                for drv in sw_type.get("softwareDriversList", []):
+                    self._collect_entries_from_driver(
+                        drv, category, os_name, entries,
+                    )
+                # Fallback structure: softwareList[]
                 for item in sw_type.get("softwareList", []):
-                    self._collect_file_urls_from_item(item, urls)
+                    self._collect_entries_from_item(
+                        item, category, os_name, entries,
+                    )
                     for sub in item.get("subCategory", {}).get("softwareList", []):
-                        self._collect_file_urls_from_item(sub, urls)
+                        self._collect_entries_from_item(
+                            sub, category, os_name, entries,
+                        )
         except Exception as exc:
             log.debug("[HP] driverDetails call failed: %s", exc)
 
-        return urls
+        return entries
 
     @staticmethod
-    def _collect_file_urls_from_driver(driver: dict, urls: set[str]) -> None:
-        """Extract download URLs from a ``softwareDriversList`` entry.
-
-        Each entry has a ``latestVersionDriver`` object with ``fileUrl``
-        and a ``productSoftwareFileList`` array with per-file URLs.
-        """
+    def _collect_entries_from_driver(
+        driver: dict,
+        category: str,
+        os_name: str,
+        entries: list[FileEntry],
+    ) -> None:
+        """Extract file entries from a ``softwareDriversList`` item."""
         latest = driver.get("latestVersionDriver") or {}
+        drv_name = latest.get("name", driver.get("name", ""))
+        version = latest.get("version", "")
+        size = latest.get("fileSize", "")
+        release = latest.get("releaseDate", "")
+        desc_html = (latest.get("detailInformation") or {}).get("description", "")
+        # Strip HTML tags for plain-text description
+        description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:200]
+
         file_url = latest.get("fileUrl", "")
         if file_url and file_url.startswith("http"):
-            urls.add(file_url)
-        for f in latest.get("productSoftwareFileList", []):
-            fu = f.get("fileUrl", "")
-            if fu and fu.startswith("http"):
-                urls.add(fu)
+            # Derive file name from productSoftwareFileList or URL
+            sub_files = latest.get("productSoftwareFileList", [])
+            if sub_files:
+                fname = sub_files[0].get("fileName", "")
+                fsize = sub_files[0].get("fileSize", size)
+            else:
+                fname = file_url.rsplit("/", 1)[-1].split("?")[0]
+                fsize = size
 
-        # Also check previousDriverVersions if available
-        for prev in latest.get("detailInformation", {}).get(
-            "previousDriverVersions", []
-        ):
-            fu = prev.get("fileUrl", "")
-            if fu and fu.startswith("http"):
-                urls.add(fu)
+            entries.append(FileEntry(
+                name=fname or drv_name or file_url.rsplit("/", 1)[-1],
+                url=file_url,
+                size=str(fsize) if fsize else "",
+                version=str(version) if version else "",
+                release_date=str(release).split("T")[0] if release else "",
+                category=category,
+                os=os_name,
+                description=description,
+            ))
+
+            # Additional sub-files with different URLs
+            for sf in sub_files[1:]:
+                sf_url = sf.get("fileUrl", "")
+                if sf_url and sf_url.startswith("http") and sf_url != file_url:
+                    entries.append(FileEntry(
+                        name=sf.get("fileName", sf_url.rsplit("/", 1)[-1]),
+                        url=sf_url,
+                        size=str(sf.get("fileSize", "")) if sf.get("fileSize") else "",
+                        version=str(version) if version else "",
+                        release_date=str(release).split("T")[0] if release else "",
+                        category=category,
+                        os=os_name,
+                        description=description,
+                    ))
 
     @staticmethod
-    def _collect_file_urls_from_item(item: dict, urls: set[str]) -> None:
-        """Extract download URLs from a generic software item dict."""
+    def _collect_entries_from_item(
+        item: dict,
+        category: str,
+        os_name: str,
+        entries: list[FileEntry],
+    ) -> None:
+        """Extract file entries from a generic software item dict."""
         file_url = item.get("fileUrl", "")
         if file_url and file_url.startswith("http"):
-            urls.add(file_url)
+            entries.append(FileEntry(
+                name=item.get("name", file_url.rsplit("/", 1)[-1]),
+                url=file_url,
+                size=str(item.get("fileSize", "")) if item.get("fileSize") else "",
+                version=str(item.get("version", "")) if item.get("version") else "",
+                release_date="",
+                category=category,
+                os=os_name,
+                description="",
+            ))
         for f in item.get("productSoftwareFileList", []):
-            fn = f.get("fileName", "")
-            if fn and fn.startswith("http"):
-                urls.add(fn)
             fu = f.get("fileUrl", "")
             if fu and fu.startswith("http"):
-                urls.add(fu)
-
-    # ── Product page discovery (no OID fallback) ─────────────────────
-
-    def _discover_product_pages(
-        self, url: str, cc: str, lc: str,
-    ) -> set[str]:
-        """Fallback when no OID could be determined.
-
-        Scans the HP sitemap API for product/driver page links and also
-        tries to discover products from the search API with a broad query.
-        """
-        urls: set[str] = set()
-        urls |= self._scan_sitemap_links(url, cc, lc)
-        urls |= self._search_product_pages(cc, lc)
-        return urls
-
-    def _scan_sitemap_links(
-        self, url: str, cc: str, lc: str,
-    ) -> set[str]:
-        """Scan the HP ``/wcc-services/sitemap/href`` API for driver pages."""
-        sess = self._get_session()
-        urls: set[str] = set()
-        try:
-            resp = sess.get(
-                _SITEMAP_URL,
-                params={"cc": cc, "lc": lc},
-                headers=_HEADERS,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            if resp.ok:
-                data = resp.json()
-                for entry in data.get("data", []) or []:
-                    href = entry.get("href", "")
-                    if href and "/drivers/" in href:
-                        abs_url = urllib.parse.urljoin(url, href)
-                        urls.add(abs_url)
-        except Exception as exc:
-            log.debug("[HP] Sitemap scan failed: %s", exc)
-        return urls
-
-    def _search_product_pages(
-        self, cc: str, lc: str,
-    ) -> set[str]:
-        """Use the search API to discover popular product driver pages."""
-        sess = self._get_session()
-        urls: set[str] = set()
-        try:
-            resp = sess.get(
-                f"{_SEARCH_URL}/{cc}-{lc}",
-                params={"q": _DEFAULT_SEARCH_QUERY, "context": "pdp"},
-                headers=_HEADERS,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            if not resp.ok:
-                return urls
-            data = resp.json()
-            categories = (
-                data.get("data", {})
-                .get("kaaSResponse", {})
-                .get("data", {})
-                .get("searchResults", {})
-                .get("categories", [])
-            )
-            for cat in categories:
-                for sub in cat.get("subCategoryList") or []:
-                    for prod in sub.get("productList") or []:
-                        target = prod.get("targetUrl", "")
-                        if target:
-                            abs_url = urllib.parse.urljoin(_BASE, target)
-                            urls.add(abs_url)
-                for prod in cat.get("productList") or []:
-                    target = prod.get("targetUrl", "")
-                    if target:
-                        abs_url = urllib.parse.urljoin(_BASE, target)
-                        urls.add(abs_url)
-        except Exception as exc:
-            log.debug("[HP] Product search fallback failed: %s", exc)
-        return urls
+                entries.append(FileEntry(
+                    name=f.get("fileName", fu.rsplit("/", 1)[-1]),
+                    url=fu,
+                    size=str(f.get("fileSize", "")) if f.get("fileSize") else "",
+                    version="",
+                    release_date="",
+                    category=category,
+                    os=os_name,
+                    description="",
+                ))

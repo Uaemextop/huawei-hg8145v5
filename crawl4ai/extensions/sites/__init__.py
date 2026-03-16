@@ -5,16 +5,20 @@ Each module in this package defines rules and logic for a particular
 website.  When the :class:`~crawl4ai.extensions.downloader.SiteDownloader`
 starts a crawl, it iterates over the **registry** and checks each module's
 :pymethod:`matches` method against the target URL.  If a module matches,
-its :pymethod:`extra_urls` method is called to inject additional download
-URLs that cannot be discovered by simple HTML link scanning (e.g. AJAX
-API endpoints, catalogue files, hidden download links).
+its :pymethod:`generate_index` method is called to dynamically discover
+files via site-specific APIs and return a list of
+:class:`FileEntry` dicts with metadata (name, size, version, release
+date, category, OS, description) and a download URL.
+
+The downloader writes these entries to a ``file_index.md`` Markdown table
+instead of downloading the actual files.
 
 Creating a new site module
 --------------------------
 
 1. Create ``crawl4ai/extensions/sites/my_site.py``.
 2. Subclass :class:`BaseSiteModule` and implement ``matches()`` and
-   ``extra_urls()``.
+   ``generate_index()``.
 3. Add the class to the ``_REGISTRY`` list in this ``__init__.py``.
 
 The downloader will automatically pick up the module.
@@ -25,7 +29,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from .base import BaseSiteModule
+from .base import BaseSiteModule, FileEntry
 from .hp_support import HPSupportModule
 
 if TYPE_CHECKING:
@@ -33,6 +37,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BaseSiteModule",
+    "FileEntry",
     "HPSupportModule",
     "get_matching_modules",
 ]
