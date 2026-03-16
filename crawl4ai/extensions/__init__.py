@@ -25,7 +25,7 @@ Other modules:
 
 * **extraction** – cloud-storage link, CSS url(), JS path, JSON path extraction
 * **storage** – on-disk file writing, content-hash dedup, Git integration
-* **huawei_crawler** – Huawei router firmware download enumeration
+* **downloader** – Page & file downloader with GitHub upload
 * **settings** – Configuration constants & WAF signatures
 * **url_utils** – URL normalisation & deduplication
 * **log_utils** – Logging with ANSI colours & GitHub Actions support
@@ -33,7 +33,7 @@ Other modules:
 
 from .detection import detect_all  # noqa: F401
 from .extraction import extract_all  # noqa: F401
-from .huawei_crawler import HuaweiCrawler  # noqa: F401
+from .downloader import SiteDownloader  # noqa: F401
 from .bypass import (  # noqa: F401
     build_session,
     build_cf_session,
@@ -54,8 +54,8 @@ __all__ = [
     "detect_all",
     # extraction
     "extract_all",
-    # crawler
-    "HuaweiCrawler",
+    # downloader
+    "SiteDownloader",
     # bypass / session
     "build_session",
     "build_cf_session",

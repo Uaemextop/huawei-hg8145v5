@@ -228,7 +228,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Extensions ported from the web_crawler package (Huawei HG8145V5 project)
 # ---------------------------------------------------------------------------
-from .extensions.huawei_crawler import HuaweiCrawler
+from .extensions.downloader import SiteDownloader
 
 # Detection – individual modules in crawl4ai/extensions/detection/
 from .extensions.detection import (
@@ -270,7 +270,7 @@ from .extensions.bypass import (
 
 __all__ += [
     # Huawei / web_crawler extensions
-    "HuaweiCrawler",
+    "SiteDownloader",
     # Detection
     "BaseDetector",
     "CloudflareDetector",

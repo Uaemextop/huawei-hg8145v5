@@ -272,48 +272,48 @@ jobs:
             cd ..
           fi
 
-          # ── Boolean flags ───────────────────────────────────────────────
-          EXTRA_ARGS=""
-          [ "${{ inputs.download_only }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --download-only"
-          [ "${{ inputs.no_robots }}"     = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-robots"
-          [ "${{ inputs.no_verify_ssl }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-verify-ssl"
-          [ "${{ inputs.force }}"         = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --force"
-          [ "${{ inputs.debug }}"         = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --debug"
-          [ "${{ inputs.skip_captcha }}"  = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-check-captcha"
-          [ "${{ inputs.skip_media_files }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --skip-media-files"
-          [ "${{ inputs.allow_external_urls }}" = "false" ] && EXTRA_ARGS="$EXTRA_ARGS --no-external"
-
-          # ── Optional string flags ───────────────────────────────────────
-          [ -n "${{ inputs.skip_download_exts }}" ] && \
-            EXTRA_ARGS="$EXTRA_ARGS --skip-download-exts '${{ inputs.skip_download_exts }}'"
-          [ -n "${{ inputs.upload_extensions }}" ] && \
-            [ "${{ inputs.upload_extensions }}" != "all" ] && \
-            EXTRA_ARGS="$EXTRA_ARGS --upload-extensions '${{ inputs.upload_extensions }}'"
-          [ -n "${{ inputs.cf_clearance }}" ] && \
-            EXTRA_ARGS="$EXTRA_ARGS --cf-clearance '${{ inputs.cf_clearance }}'"
-          [ -n "${{ inputs.log_file }}" ] && \
-            EXTRA_ARGS="$EXTRA_ARGS --log-file '${{ inputs.log_file }}'"
-
-          # ── git push ────────────────────────────────────────────────────
-          GIT_PUSH_ARG=""
-          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ] && \
-             [ "${{ inputs.git_push_every }}" != "0" ]; then
-            GIT_PUSH_ARG="--git-push-every ${{ inputs.git_push_every }}"
-          fi
-
           echo "🔍 Crawling ${{ inputs.url }}"
           echo "   depth=${{ inputs.depth }}  delay=${{ inputs.delay }}  concurrency=${{ inputs.concurrency }}"
-          echo "   download: ${{ inputs.download_extensions }}"
-          echo "   skip-download: ${{ inputs.skip_download_exts || '(none)' }}"
+          echo "   download extensions: ${{ inputs.download_extensions }}"
 
-          eval python -m web_crawler "'${{ inputs.url }}'" \
-            --depth "'${{ inputs.depth }}'" \
-            --delay "'${{ inputs.delay }}'" \
-            --output downloaded_site \
-            --download-extensions "'${{ inputs.download_extensions }}'" \
-            --concurrency "'${{ inputs.concurrency }}'" \
-            $EXTRA_ARGS \
-            $GIT_PUSH_ARG
+          # ── Build Python arguments ──────────────────────────────────────
+          GIT_ARGS=""
+          if [ "${{ steps.create_repo.outputs.repo_ready }}" = "true" ] && \
+             [ "${{ inputs.git_push_every }}" != "0" ]; then
+            GIT_ARGS="git_repo_dir='downloaded_site', git_push_every=${{ inputs.git_push_every }},"
+          fi
+
+          VERIFY_SSL="True"
+          [ "${{ inputs.no_verify_ssl }}" = "true" ] && VERIFY_SSL="False"
+
+          ALLOW_EXT="True"
+          [ "${{ inputs.allow_external_urls }}" = "false" ] && ALLOW_EXT="False"
+
+          python3 -c "
+          import logging, sys
+          logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stdout)
+
+          from crawl4ai.extensions.downloader import SiteDownloader
+
+          exts = '${{ inputs.download_extensions }}'.split(',')
+          exts = {e.strip() for e in exts if e.strip()}
+          if 'all' in exts:
+              exts = {'all'}
+
+          dl = SiteDownloader(
+              url='${{ inputs.url }}',
+              output_dir='downloaded_site',
+              max_depth=int('${{ inputs.depth }}') if int('${{ inputs.depth }}') > 0 else 2,
+              download_extensions=exts or None,
+              delay=float('${{ inputs.delay }}'),
+              concurrency=int('${{ inputs.concurrency }}') if '${{ inputs.concurrency }}' != 'auto' else 0,
+              verify_ssl=${VERIFY_SSL},
+              allow_external=${ALLOW_EXT},
+              ${GIT_ARGS}
+          )
+          result = dl.run()
+          print(f'Result: {result}')
+          "
 
       - name: Show download summary
         if: always()
