@@ -308,6 +308,8 @@ class SiteDownloader:
         self._page_count = 0
         self._error_count = 0
         self._seen_hashes: set[str] = set()
+        self._catalog_index_path: Path | None = None
+        self._catalog_entry_count: int = 0
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -411,15 +413,24 @@ class SiteDownloader:
         summary = {
             "pages_scanned": self._page_count,
             "files_downloaded": self._download_count,
+            "catalog_entries": self._catalog_entry_count,
             "errors": self._error_count,
             "elapsed_seconds": round(elapsed, 1),
             "output_dir": str(self.output_dir),
         }
-        log.info("✅ Done: %s pages scanned, %s files downloaded, %s errors in %s",
-                 _c(self._page_count, "cyan"),
-                 _c(self._download_count, "green"),
-                 _c(self._error_count, "red" if self._error_count else "green"),
-                 _c(f"{elapsed:.1f}s", "cyan"))
+        parts = [
+            f"{_c(self._page_count, 'cyan')} pages scanned",
+            f"{_c(self._download_count, 'green')} files downloaded",
+        ]
+        if self._catalog_entry_count:
+            parts.append(
+                f"{_c(self._catalog_entry_count, 'green')} catalog entries"
+            )
+        parts.append(
+            f"{_c(self._error_count, 'red' if self._error_count else 'green')} errors"
+        )
+        parts.append(f"in {_c(f'{elapsed:.1f}s', 'cyan')}")
+        log.info("✅ Done: %s", ", ".join(parts))
         return summary
 
     # ── Internal: process a single URL ───────────────────────────────
@@ -839,10 +850,9 @@ class SiteDownloader:
                 for name, desc in descs[:_MAX_DESCRIPTIONS_IN_INDEX]:
                     fh.write(f"**{name}**: {desc}\n\n")
 
-        # Track as a downloaded file for git push and summary
-        with self._lock:
-            self._download_count += 1
-            self._downloaded_files.append(index_path)
+        # Track the catalog index separately from regular downloads
+        self._catalog_index_path = index_path
+        self._catalog_entry_count = len(entries)
 
         # Push index to git if configured
         if self.git_repo_dir and self.git_push_every > 0:
@@ -862,7 +872,20 @@ class SiteDownloader:
             fh.write(f"| URL | {self.start_url} |\n")
             fh.write(f"| Pages scanned | {self._page_count} |\n")
             fh.write(f"| Files downloaded | {self._download_count} |\n")
+            if self._catalog_entry_count:
+                fh.write(f"| Catalog entries | {self._catalog_entry_count} |\n")
             fh.write(f"| Errors | {self._error_count} |\n\n")
+
+            # Catalog index (site module output — separate from downloads)
+            if self._catalog_index_path and self._catalog_index_path.exists():
+                rel = self._catalog_index_path.relative_to(self.output_dir)
+                fh.write("## Catalog File Index\n\n")
+                fh.write(f"The site module generated a catalog of "
+                         f"**{self._catalog_entry_count}** files "
+                         f"in [`{rel}`]({rel}).\n\n"
+                         f"This index lists drivers, software, and firmware "
+                         f"discovered via the site's APIs — it is separate "
+                         f"from the downloaded HTML/CSS/JS files below.\n\n")
 
             if self._downloaded_files:
                 fh.write("## Downloaded Files\n\n")
