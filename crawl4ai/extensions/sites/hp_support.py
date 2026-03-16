@@ -63,6 +63,9 @@ _SITEMAP_URL = f"{_BASE}/wcc-services/sitemap/href"
 
 _REQUEST_TIMEOUT = 30
 
+# Broad query used as last-resort fallback when no product OID is found.
+_DEFAULT_SEARCH_QUERY = "HP printer"
+
 _HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
@@ -363,10 +366,11 @@ class HPSupportModule(BaseSiteModule):
                 return urls
 
             for sw_type in data.get("softwareTypes", []):
-                # Primary structure: softwareDriversList[]
+                # Primary structure (newer API responses)
                 for item in sw_type.get("softwareDriversList", []):
                     self._collect_file_urls_from_driver(item, urls)
-                # Fallback structure: softwareList[]
+                # Fallback structure (older API responses).
+                # Duplicates are harmless — ``urls`` is a set.
                 for item in sw_type.get("softwareList", []):
                     self._collect_file_urls_from_item(item, urls)
                     for sub in item.get("subCategory", {}).get("softwareList", []):
@@ -395,7 +399,7 @@ class HPSupportModule(BaseSiteModule):
         # Also check previousDriverVersions if available
         for prev in latest.get("detailInformation", {}).get(
             "previousDriverVersions", []
-        ) or []:
+        ):
             fu = prev.get("fileUrl", "")
             if fu and fu.startswith("http"):
                 urls.add(fu)
@@ -462,7 +466,7 @@ class HPSupportModule(BaseSiteModule):
         try:
             resp = sess.get(
                 f"{_SEARCH_URL}/{cc}-{lc}",
-                params={"q": "HP printer", "context": "pdp"},
+                params={"q": _DEFAULT_SEARCH_QUERY, "context": "pdp"},
                 headers=_HEADERS,
                 timeout=_REQUEST_TIMEOUT,
             )
