@@ -140,6 +140,12 @@ def parse_args() -> argparse.Namespace:
              "Files on these hosts are fetched directly without hidden-file "
              "probing or link extraction.",
     )
+    parser.add_argument(
+        "--seed-urls", metavar="URLS", default="",
+        help="Comma-separated additional URLs to enqueue at startup "
+             "(e.g. catalog pages on the same host). Links discovered on "
+             "these pages are followed normally.",
+    )
     return parser.parse_args()
 
 

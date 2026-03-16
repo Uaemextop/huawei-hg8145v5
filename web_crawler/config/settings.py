@@ -146,6 +146,43 @@ USER_AGENTS = [
 RETRY_STATUS_CODES = {403, 402}
 
 # ---------------------------------------------------------------------------
+# Well-known HP software catalog endpoints (use with --extra-hosts and
+# --seed-urls).  Discovered via JS analysis of support.hp.com, the SUDF
+# scripts, and ILSpy decompilation of the HP Support Solutions Framework.
+#
+# Download hosts (no auth required, AkamaiNetStorage / S3+CloudFront):
+#   ftp.hp.com          – main SoftPaq repository
+#   ftp.ext.hp.com      – external SoftPaq mirror
+#   hpia.hpcloud.hp.com – HP Image Assistant & CMSL tools
+#
+# Catalog pages (file indexes – no directory listing on ftp.hp.com):
+#   https://ftp.hp.com/pub/caps-softpaq/cmit/HP_Driverpack_Matrix_x64.html
+#   https://ftp.hp.com/pub/caps-softpaq/cmit/HP_Driverpack_Matrix_x86.html
+#   https://www.hp.com/us-en/solutions/client-management-solutions/download.html
+#
+# SoftPaq URL pattern:
+#   https://ftp.hp.com/pub/softpaq/sp{RANGE}/sp{ID}.exe   (binary)
+#   https://ftp.hp.com/pub/softpaq/sp{RANGE}/sp{ID}.html  (info)
+#   https://ftp.hp.com/pub/softpaq/sp{RANGE}/sp{ID}.cva   (metadata)
+#
+# support.hp.com wcc-services POST APIs (need product OIDs from SPA):
+#   /wcc-services/pdp/category?type=all
+#   /wcc-services/pdp/category-details
+#   /wcc-services/config/{cc}-{lc}/{pageName}
+# ---------------------------------------------------------------------------
+HP_DOWNLOAD_HOSTS = frozenset({
+    "ftp.hp.com",
+    "ftp.ext.hp.com",
+    "hpia.hpcloud.hp.com",
+})
+
+HP_CATALOG_URLS = [
+    "https://ftp.hp.com/pub/caps-softpaq/cmit/HP_Driverpack_Matrix_x64.html",
+    "https://ftp.hp.com/pub/caps-softpaq/cmit/HP_Driverpack_Matrix_x86.html",
+    "https://www.hp.com/us-en/solutions/client-management-solutions/download.html",
+]
+
+# ---------------------------------------------------------------------------
 # WAF / Cloudflare / CAPTCHA detection signatures
 # ---------------------------------------------------------------------------
 WAF_SIGNATURES = {
