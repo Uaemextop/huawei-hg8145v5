@@ -273,8 +273,6 @@ class HPSupportModule(BaseSiteModule):
             if not resp.ok:
                 return categories
             data = resp.json().get("data", {})
-            if data is None:
-                return categories
 
             # Extract from supportCategories
             for cat in data.get("supportCategories", []):

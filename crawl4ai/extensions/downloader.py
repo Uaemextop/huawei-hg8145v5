@@ -851,8 +851,9 @@ class SiteDownloader:
                     fh.write(f"**{name}**: {desc}\n\n")
 
         # Track the catalog index separately from regular downloads
-        self._catalog_index_path = index_path
-        self._catalog_entry_count = len(entries)
+        with self._lock:
+            self._catalog_index_path = index_path
+            self._catalog_entry_count = len(entries)
 
         # Push index to git if configured
         if self.git_repo_dir and self.git_push_every > 0:
@@ -877,11 +878,14 @@ class SiteDownloader:
             fh.write(f"| Errors | {self._error_count} |\n\n")
 
             # Catalog index (site module output — separate from downloads)
-            if self._catalog_index_path and self._catalog_index_path.exists():
-                rel = self._catalog_index_path.relative_to(self.output_dir)
+            with self._lock:
+                cat_path = self._catalog_index_path
+                cat_count = self._catalog_entry_count
+            if cat_path and cat_path.exists():
+                rel = cat_path.relative_to(self.output_dir)
                 fh.write("## Catalog File Index\n\n")
                 fh.write(f"The site module generated a catalog of "
-                         f"**{self._catalog_entry_count}** files "
+                         f"**{cat_count}** files "
                          f"in [`{rel}`]({rel}).\n\n"
                          f"This index lists drivers, software, and firmware "
                          f"discovered via the site's APIs — it is separate "
