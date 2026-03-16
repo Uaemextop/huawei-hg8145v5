@@ -1219,7 +1219,6 @@ class Crawler:
     # ------------------------------------------------------------------
 
     @staticmethod
-    @staticmethod
     def detect_protection(headers: dict[str, str], body: str) -> list[str]:
         """Return a list of detected WAF/protection names from *headers* and
         *body* content.

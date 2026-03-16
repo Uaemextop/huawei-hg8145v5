@@ -72,7 +72,7 @@ _EXTERNAL_DL_RE = re.compile(
     r"download\.hp\.com|"
     r"[a-z0-9\-]+\.hpcloud\.hp\.com|"
     r"[a-z0-9\-]+\.ext\.hp\.com"
-    r""")[^'"`\s\n]{1,500})['"`]""",
+    r""")[^'"`\s]{1,500})['"`]""",
     re.I,
 )
 

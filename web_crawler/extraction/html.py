@@ -4,6 +4,7 @@ HTML/ASP attribute extraction via BeautifulSoup.
 
 import json
 import re
+import urllib.parse
 import warnings
 
 from web_crawler.utils.url import normalise_url
@@ -52,7 +53,6 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         return found
 
     # Honour <base href="…"> — resolve relative URLs against it
-    import urllib.parse
     resolve_base = page_url
     base_tag = soup.find("base", href=True)
     if base_tag:

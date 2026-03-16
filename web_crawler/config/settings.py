@@ -189,7 +189,8 @@ WAF_SIGNATURES = {
         # normal CDN headers like x-akamai-transformed, akamai-grn, or
         # ak_bmsc cookies which appear on every Akamai-served page.
         "access denied</title>",
-        "reference&#32;&#35;18",
+        "reference&#32;&#35;18",    # HTML-entity encoded version
+        "reference #18.",            # decoded version
     ],
     "shield_security": [
         "icwp-wpsf",
