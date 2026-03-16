@@ -87,7 +87,7 @@ from crawl4ai.extensions.settings import (
     WP_THEME_PROBES,
     auto_concurrency,
 )
-from crawl4ai.extensions.session_helpers import (
+from crawl4ai.extensions.bypass import (
     build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
     is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
     is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
