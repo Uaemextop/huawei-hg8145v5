@@ -47,6 +47,7 @@ import urllib3
 
 from crawl4ai.extensions.bypass.session import build_session, random_headers
 from crawl4ai.extensions.detection import detect_all
+from crawl4ai.extensions.sites import get_matching_modules
 from crawl4ai.extensions.extraction import (
     extract_html_attrs,
     extract_css_urls,
@@ -321,6 +322,25 @@ class SiteDownloader:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._queue.append((self.start_url, 0))
+
+        # ── Site-specific modules ────────────────────────────────────
+        # Check if any site module matches the start URL and inject
+        # additional download URLs that are only discoverable via APIs.
+        site_modules = get_matching_modules(self.start_url, session=self.session)
+        for mod in site_modules:
+            log.info("🔌 %s matched — discovering extra URLs …",
+                     _c(mod.name, "magenta"))
+            try:
+                extra = mod.extra_urls(self.start_url)
+                if extra:
+                    for u in extra:
+                        self._queue.append((u, 0))
+                    log.info("🔌 %s injected %s extra download URLs",
+                             _c(mod.name, "magenta"),
+                             _c(len(extra), "green"))
+            except Exception as exc:
+                log.warning("⚠️  %s error: %s", _c(mod.name, "yellow"), exc)
+
         t0 = time.time()
 
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:

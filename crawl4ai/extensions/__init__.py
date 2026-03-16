@@ -21,6 +21,11 @@ Bypass / correction (individual modules in ``bypass/``):
 * :mod:`bypass.s3` – Amazon S3 AccessDenied detection
 * :mod:`bypass.tomcat` – Apache Tomcat IP-restriction detection
 
+Site-specific modules (individual modules in ``sites/``):
+
+* :mod:`sites.base` – Abstract base class for site modules
+* :mod:`sites.hp_support` – HP Support (support.hp.com) driver/software downloader
+
 Other modules:
 
 * **extraction** – cloud-storage link, CSS url(), JS path, JSON path extraction
