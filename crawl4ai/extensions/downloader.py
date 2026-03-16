@@ -68,41 +68,49 @@ from crawl4ai.extensions.settings import (
 
 __all__ = ["SiteDownloader"]
 
-# ── Colored logging ──────────────────────────────────────────────────────
+# ── ANSI colour helpers (inline – only keywords / URLs get colour) ───────
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_MAGENTA = "\033[35m"
+_CYAN = "\033[36m"
+_WHITE = "\033[37m"
+
+_COLORS = {
+    "red": _RED, "green": _GREEN, "yellow": _YELLOW,
+    "blue": _BLUE, "magenta": _MAGENTA, "cyan": _CYAN,
+    "white": _WHITE, "bold": _BOLD,
+}
+
+
+def _c(text: object, color: str) -> str:
+    """Wrap *text* in an ANSI colour escape.  Only the text is coloured."""
+    code = _COLORS.get(color, "")
+    return f"{code}{text}{_RESET}" if code else str(text)
+
+
+# ── Plain logging (no whole-line colouring) ──────────────────────────────
 _LOGGER_NAME = "crawl4ai.extensions.downloader"
 log = logging.getLogger(_LOGGER_NAME)
 
 
 def _setup_colored_logging(level: int = logging.INFO) -> None:
-    """Configure the module logger with coloured output via *colorlog*.
+    """Configure the module logger with **plain** formatting.
 
-    Falls back to plain ``logging`` when *colorlog* is not installed.
+    Colour is applied inline via :func:`_c` to individual keywords / URLs
+    inside the log message – the line itself is not coloured.
 
     Side-effects (intentional for CLI / workflow usage):
-    * Suppresses verbose ``urllib3`` pool and retry log messages – the
-      downloader already logs retries and errors at its own level.
+    * Suppresses verbose ``urllib3`` pool and retry log messages.
     """
     if log.handlers:
         return  # already configured
 
-    try:
-        import colorlog  # noqa: WPS433
-
-        handler = colorlog.StreamHandler()
-        handler.setFormatter(colorlog.ColoredFormatter(
-            "%(log_color)s%(message)s%(reset)s",
-            log_colors={
-                "DEBUG":    "white",
-                "INFO":     "cyan",
-                "WARNING":  "yellow",
-                "ERROR":    "red",
-                "CRITICAL": "bold_red",
-            },
-        ))
-    except ImportError:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(message)s"))
-
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
     log.addHandler(handler)
     log.setLevel(level)
     log.propagate = False
@@ -120,33 +128,62 @@ _NETWORK_ERRORS = (
 )
 
 # ── Downloadable file extensions ─────────────────────────────────────────
-# This is the master list of file extensions that the downloader will look
-# for when scanning pages.  Can be overridden in the constructor.
+# Master list covering virtually every file type: web assets, code, media,
+# archives, executables, documents, data, etc.  The downloader will look
+# for links matching these when scanning pages.  Pass ``{"all"}`` to the
+# constructor to bypass this list entirely and download *everything*.
 DEFAULT_DOWNLOAD_EXTENSIONS: frozenset[str] = frozenset({
-    # Archives
+    # ── Web pages / assets ──
+    "html", "htm", "xhtml", "shtml", "asp", "aspx", "php", "jsp", "cgi",
+    "css", "js", "mjs", "ts", "jsx", "tsx", "vue", "svelte",
+    "svg", "ico", "woff", "woff2", "ttf", "eot", "otf",
+    "map", "webmanifest",
+    # ── Images ──
+    "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "avif",
+    "heic", "heif", "jxl", "raw", "cr2", "nef", "psd", "ai", "eps",
+    # ── Video ──
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp",
+    "3g2", "ts", "mpeg", "mpg", "f4v", "asf", "ogv", "vob",
+    # ── Audio ──
+    "mp3", "flac", "wav", "ogg", "aac", "m4a", "wma", "opus", "ape",
+    "aiff", "mid", "midi",
+    # ── Archives ──
     "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "cab", "lzh",
-    "arj", "ace", "zst",
-    # Executables / Installers
+    "arj", "ace", "zst", "lz", "lzma", "z",
+    # ── Executables / Installers ──
     "exe", "msi", "msp", "msix", "appx", "dmg", "pkg", "deb", "rpm",
-    "apk", "aab", "appimage", "snap", "flatpak",
-    # Disk images
+    "apk", "aab", "appimage", "snap", "flatpak", "run", "ipa",
+    # ── Disk images ──
     "iso", "img", "bin", "cue", "nrg", "vhd", "vhdx", "vmdk", "qcow2",
-    # Firmware
+    "ova", "ovf",
+    # ── Firmware ──
     "fw", "rom", "bios", "uf2", "hex", "srec",
-    # Documents
+    # ── Documents ──
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods",
-    "odp", "rtf", "epub",
-    # Java / JVM
-    "jar", "war", "ear",
-    # Data
-    "sql", "sqlite", "db", "csv", "tsv", "json", "xml", "yaml", "yml",
-    # Scripts / source
-    "py", "sh", "bat", "ps1", "cmd", "rb", "pl",
-    # Media (selectively – large media often desired)
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm",
-    "mp3", "flac", "wav", "ogg", "aac", "m4a",
-    # Other common downloads
-    "torrent", "patch", "diff",
+    "odp", "rtf", "epub", "djvu", "mobi", "azw3", "pages", "numbers",
+    "key", "txt", "md", "rst", "tex", "latex",
+    # ── Java / JVM ──
+    "jar", "war", "ear", "class",
+    # ── Data / Config ──
+    "sql", "sqlite", "db", "mdb", "csv", "tsv", "json", "jsonl", "ndjson",
+    "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "properties",
+    "env", "log",
+    # ── Scripts / Source code ──
+    "py", "pyc", "pyw", "pyx",
+    "sh", "bash", "zsh", "fish",
+    "bat", "ps1", "cmd", "vbs",
+    "rb", "pl", "pm", "lua",
+    "c", "h", "cpp", "hpp", "cc", "cxx",
+    "java", "kt", "kts", "scala", "groovy",
+    "go", "rs", "swift", "m", "mm",
+    "cs", "fs", "vb",
+    "r", "R", "jl", "matlab",
+    "asm", "s",
+    # ── .NET / Windows ──
+    "dll", "sys", "ocx", "lib", "obj", "pdb", "so", "dylib", "a",
+    # ── Misc ──
+    "torrent", "patch", "diff", "ics", "vcf", "gpx", "kml", "kmz",
+    "wasm", "swf",
 })
 
 # Regex to find download links in HTML
@@ -271,13 +308,16 @@ class SiteDownloader:
     def run(self) -> dict:
         """Run the downloader.  Returns a summary dict."""
         _setup_colored_logging()
-        log.info("🔍 Starting download from %s → %s", self.start_url, self.output_dir)
-        log.info("  depth=%d  concurrency=%d  delay=%.2fs",
-                 self.max_depth, self.concurrency, self.delay)
+        log.info("🔍 Starting download from %s → %s",
+                 _c(self.start_url, "cyan"), _c(self.output_dir, "green"))
+        log.info("   depth=%s  concurrency=%s  delay=%s",
+                 _c(self.max_depth, "cyan"), _c(self.concurrency, "cyan"),
+                 _c(f"{self.delay:.2f}s", "cyan"))
         if self._target_exts:
-            log.info("  target extensions: %s", ", ".join(sorted(self._target_exts)))
+            log.info("   target extensions: %s",
+                     _c(", ".join(sorted(self._target_exts)), "cyan"))
         else:
-            log.info("  target extensions: ALL files")
+            log.info("   target extensions: %s", _c("ALL files", "green"))
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._queue.append((self.start_url, 0))
@@ -325,8 +365,11 @@ class SiteDownloader:
             "elapsed_seconds": round(elapsed, 1),
             "output_dir": str(self.output_dir),
         }
-        log.info("✅ Done: %d pages scanned, %d files downloaded, %d errors in %.1fs",
-                 self._page_count, self._download_count, self._error_count, elapsed)
+        log.info("✅ Done: %s pages scanned, %s files downloaded, %s errors in %s",
+                 _c(self._page_count, "cyan"),
+                 _c(self._download_count, "green"),
+                 _c(self._error_count, "red" if self._error_count else "green"),
+                 _c(f"{elapsed:.1f}s", "cyan"))
         return summary
 
     # ── Internal: process a single URL ───────────────────────────────
@@ -384,8 +427,9 @@ class SiteDownloader:
         # Run detection
         detections = detect_all(resp.url, resp.status_code, dict(resp.headers), body)
         if detections:
-            log.warning("🛡️  [DETECT] %s: %s", url,
-                     ", ".join(d.get("type", "?") for d in detections))
+            log.warning("🛡️  %s %s: %s", _c("[DETECT]", "yellow"),
+                     _c(url, "cyan"),
+                     _c(", ".join(d.get("type", "?") for d in detections), "yellow"))
 
         # Save the page HTML
         page_path = smart_local_path(resp.url, self.output_dir, ct)
@@ -450,15 +494,17 @@ class SiteDownloader:
                 new_page_links += 1
                 self._queue.append((abs_url, depth + 1))
 
-        log.info("📄 [PAGE] %s → %d file links, %d page links",
-                 url, new_file_links, new_page_links)
+        log.info("📄 %s %s → %s file links, %s page links",
+                 _c("[PAGE]", "blue"), _c(url, "cyan"),
+                 _c(new_file_links, "green"), _c(new_page_links, "green"))
         time.sleep(self.delay)
 
     def _download_file(self, url: str, content_type: str, content_length: int) -> None:
         """Download a file and save it locally."""
-        log.info("⬇️  [DOWNLOAD] %s (%s, ~%s)",
-                 url, content_type or "?",
-                 self._human_size(content_length) if content_length else "?")
+        log.info("⬇️  %s %s (%s, ~%s)",
+                 _c("[DOWNLOAD]", "magenta"), _c(url, "cyan"),
+                 content_type or "?",
+                 _c(self._human_size(content_length), "green") if content_length else "?")
 
         try:
             resp = self.session.get(
@@ -466,7 +512,8 @@ class SiteDownloader:
                 stream=True,
             )
         except _NETWORK_ERRORS as exc:
-            log.warning("❌ [DOWNLOAD] Failed: %s – %s", url, exc)
+            log.warning("❌ %s Failed: %s – %s",
+                        _c("[DOWNLOAD]", "red"), _c(url, "cyan"), exc)
             with self._lock:
                 self._error_count += 1
             return
@@ -512,9 +559,10 @@ class SiteDownloader:
             self._download_count += 1
             self._downloaded_files.append(local_path)
 
-        log.info("💾 [SAVED] %s → %s (%s)",
-                 url, local_path.relative_to(self.output_dir),
-                 self._human_size(total))
+        log.info("💾 %s %s → %s (%s)",
+                 _c("[SAVED]", "green"), _c(url, "cyan"),
+                 _c(local_path.relative_to(self.output_dir), "green"),
+                 _c(self._human_size(total), "green"))
 
         # Periodic git push
         if self.git_repo_dir and self.git_push_every > 0:
@@ -649,15 +697,15 @@ class SiteDownloader:
                 ["git", "-c", "lfs.locksverify=false", "push"],
                 cwd=cwd, check=True, capture_output=True, timeout=300,
             )
-            log.info("📤 [GIT] Pushed: %s", message)
+            log.info("📤 %s Pushed: %s", _c("[GIT]", "magenta"), message)
         except subprocess.CalledProcessError as exc:
             msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
-            log.warning("⚠️  [GIT] Push failed: %s", msg)
+            log.warning("⚠️  %s Push failed: %s", _c("[GIT]", "yellow"), msg)
         except FileNotFoundError:
-            log.warning("⚠️  [GIT] git not found – disabling push")
+            log.warning("⚠️  %s git not found – disabling push", _c("[GIT]", "yellow"))
             self.git_push_every = 0
         except Exception as exc:
-            log.warning("⚠️  [GIT] Error: %s", exc)
+            log.warning("⚠️  %s Error: %s", _c("[GIT]", "yellow"), exc)
 
     @staticmethod
     def _git_lfs_track_large_files(cwd: str) -> None:
@@ -713,7 +761,7 @@ class SiteDownloader:
                     except Exception:
                         fh.write(f"| {i} | `{fp.name}` | ? |\n")
 
-        log.info("📊 Summary written → %s", summary_path)
+        log.info("📊 Summary written → %s", _c(summary_path, "green"))
 
     # ── Helpers ──────────────────────────────────────────────────────
 

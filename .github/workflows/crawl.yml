@@ -25,7 +25,7 @@ on:
       download_extensions:
         description: "Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk or 'all' to download every discovered file)."
         required: false
-        default: "zip,exe,rar,bin,7z,apk,jar,msi,img,iso,deb,rpm"
+        default: "all"
         type: string
       no_verify_ssl:
         description: "Disable TLS certificate verification"
