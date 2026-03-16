@@ -33,9 +33,51 @@ except ImportError:
 _CF_IMPERSONATE_PROFILES = ["chrome", "safari", "safari_ios"]
 
 
+def _client_hints_for_ua(ua: str) -> dict[str, str]:
+    """Derive Client Hints headers from a User-Agent string.
+
+    Modern Akamai / Cloudflare / Imperva bot-detection checks for the
+    presence of ``sec-ch-ua*`` headers that real browsers send.  Without
+    them the request fingerprint looks like a plain HTTP client.
+    """
+    hints: dict[str, str] = {}
+    # Chrome / Chromium-based browsers include a sec-ch-ua brand list.
+    # "Not_A Brand";v="8" is the standard greasing token that Chrome
+    # sends to prevent servers from relying on a fixed brand order.
+    m = re.search(r"Chrome/(\d+)", ua)
+    if m:
+        ver = m.group(1)
+        brand = '"Chromium";v="{v}", "Not_A Brand";v="8"'.format(v=ver)
+        if "Edg/" in ua:
+            brand += ', "Microsoft Edge";v="{v}"'.format(v=ver)
+        elif "OPR/" in ua:
+            brand += ', "Opera";v="{v}"'.format(v=ver)
+        else:
+            brand += ', "Google Chrome";v="{v}"'.format(v=ver)
+        hints["sec-ch-ua"] = brand
+    # Mobile flag
+    hints["sec-ch-ua-mobile"] = "?1" if "Mobile" in ua else "?0"
+    # Platform — order matters: iPhone/iPad must precede "Mac OS" match
+    if "iPhone" in ua or "iPad" in ua:
+        hints["sec-ch-ua-platform"] = '"iOS"'
+    elif "Windows" in ua:
+        hints["sec-ch-ua-platform"] = '"Windows"'
+    elif "Android" in ua:
+        hints["sec-ch-ua-platform"] = '"Android"'
+    elif "Macintosh" in ua or "Mac OS" in ua:
+        hints["sec-ch-ua-platform"] = '"macOS"'
+    elif "Linux" in ua:
+        hints["sec-ch-ua-platform"] = '"Linux"'
+    else:
+        hints["sec-ch-ua-platform"] = '""'
+    return hints
+
+
 def build_session(verify_ssl: bool = True) -> requests.Session:
     """Return a ``requests.Session`` with retry logic, keep-alive,
-    randomised User-Agent, and cache-busting headers."""
+    randomised User-Agent, cache-busting headers, and Client Hints
+    derived from the chosen User-Agent (required by Akamai and similar
+    bot-detection systems)."""
     session = requests.Session()
     retry = Retry(
         total=MAX_RETRIES,
@@ -52,8 +94,9 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
-    session.headers.update({
-        "User-Agent": random.choice(USER_AGENTS),
+    ua = random.choice(USER_AGENTS)
+    headers: dict[str, str] = {
+        "User-Agent": ua,
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -68,7 +111,9 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
         "Connection": "keep-alive",
-    })
+    }
+    headers.update(_client_hints_for_ua(ua))
+    session.headers.update(headers)
     return session
 
 
@@ -89,7 +134,8 @@ def build_cf_session(verify_ssl: bool = True) -> "_cf_requests.Session | None":
 
 def random_headers(base_url: str = "") -> dict[str, str]:
     """Return a set of randomised browser headers for retry / bypass
-    attempts.  Includes cache-busting and Referer spoofing."""
+    attempts.  Includes cache-busting, Referer spoofing, and Client
+    Hints (required by Akamai / Imperva bot-detection)."""
     ua = random.choice(USER_AGENTS)
     headers: dict[str, str] = {
         "User-Agent": ua,
@@ -113,6 +159,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
         "Upgrade-Insecure-Requests": "1",
         "Connection": "keep-alive",
     }
+    headers.update(_client_hints_for_ua(ua))
     if base_url:
         headers["Referer"] = base_url
         headers["Origin"] = base_url
