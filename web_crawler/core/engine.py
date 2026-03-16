@@ -105,7 +105,7 @@ from web_crawler.core.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
     stream_to_file,
 )
-from web_crawler.extraction import extract_links
+
 from web_crawler.utils.log import ci_endgroup, ci_group, log
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 
@@ -1270,22 +1270,9 @@ class Crawler:
     }
 
     def _parse_local_file(self, local_path: Path, url: str) -> int:
-        """Read a local file, extract links, and enqueue new ones."""
-        ct = self._DISK_CT.get(local_path.suffix.lower())
-        if ct is None:
-            return 0
-        try:
-            content = local_path.read_bytes()
-        except OSError as exc:
-            log.debug("Could not read %s: %s", local_path, exc)
-            return 0
-        added = 0
-        for link in extract_links(content, ct, url, self.base):
-            k = url_key(link)
-            if k not in self._visited:
-                self._queue.append((link, 1))
-                added += 1
-        return added
+        """Read a local file.  Link extraction has been removed —
+        the crawler no longer follows discovered URLs."""
+        return 0
 
     def _resume_from_disk(self) -> int:
         """Scan output_dir for previously downloaded files."""
@@ -2115,62 +2102,9 @@ class Crawler:
                 self._track_video_url(url)
             self._maybe_git_push()
 
-        # Extract and enqueue links from parseable content
-        ct = ct_lower
-        is_parseable_ext = path_lower.endswith(
-            (".asp", ".aspx", ".jsp", ".php", ".html", ".htm",
-             ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
-             ".css", ".scss", ".sass", ".less",
-             ".json", ".xml", ".svg", ".rss", ".atom",
-             ".txt", ".csv", ".tsv", ".md", ".rst",
-             ".env", ".cfg", ".conf", ".config", ".hst",
-             ".ini", ".toml", ".yml", ".yaml",
-             ".log", ".sql",
-             ".py", ".rb", ".pl", ".sh", ".bat", ".ps1",
-             ".lua", ".go", ".rs", ".java", ".c", ".cpp", ".h",
-             ".vue", ".svelte",
-             ".htaccess", ".htpasswd",
-             ".gitignore", ".dockerignore", ".editorconfig")
-        )
-        if ct in CRAWLABLE_TYPES or is_parseable_ext:
-            new_links = extract_links(content, content_type, url, self.base)
-            # Resolve parameterised AJAX endpoints whose query value
-            # can be inferred from the current page URL.  For example,
-            # fetch('ajax_url.php?firmid=' + id) is extracted as the
-            # bare endpoint 'ajax_url.php?firmid='; we fill in the
-            # value from a matching query parameter on the page URL
-            # (e.g. firmwares.php?firm=27162 → firmid=27162).
-            new_links |= self._resolve_ajax_params(new_links, url)
-            # Follow resolved AJAX endpoints to discover external download
-            # URLs (Google Drive, OneDrive, Mega, etc.) and record them.
-            self._discover_download_links(new_links, url)
-            # Also scan for links to target download extensions
-            if self.download_extensions:
-                new_links |= self._extract_extension_links(
-                    content, url, self.download_extensions,
-                )
-            # Extract page & video metadata for discovered video URLs
-            if text is not None:
-                self._populate_video_meta(text, new_links)
-            added = 0
-            for link in new_links:
-                # Register external hosts from media URLs as CDN hosts
-                link_parsed = urllib.parse.urlparse(link)
-                if (self._allow_external
-                        and link_parsed.netloc
-                        and link_parsed.netloc != self.allowed_host):
-                    with self._lock:
-                        is_new_cdn = link_parsed.netloc not in self._cdn_hosts
-                        self._cdn_hosts.add(link_parsed.netloc)
-                    if is_new_cdn:
-                        log.info("  [CDN] Discovered media host: %s",
-                                 link_parsed.netloc)
-                k = url_key(link)
-                if k not in self._visited:
-                    self._enqueue(link, depth + 1, priority=True)
-                    added += 1
-            if added:
-                log.debug("  +%d new URLs enqueued", added)
+        # URL link crawling removed – the crawler now only downloads
+        # the pages/assets it is pointed at without following links.
+        # Use curl to inspect target pages and feed URLs directly.
 
         time.sleep(self.delay)
 
