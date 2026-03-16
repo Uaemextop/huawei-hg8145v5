@@ -133,6 +133,13 @@ def parse_args() -> argparse.Namespace:
              "Use 'all' to skip downloading every binary file and only record "
              "their links.",
     )
+    parser.add_argument(
+        "--extra-hosts", metavar="HOSTS", default="",
+        help="Comma-separated additional hostnames whose URLs are also "
+             "downloaded (e.g. ftp.hp.com,ftp.ext.hp.com,hpia.hpcloud.hp.com). "
+             "Files on these hosts are fetched directly without hidden-file "
+             "probing or link extraction.",
+    )
     return parser.parse_args()
 
 
@@ -219,6 +226,14 @@ def main() -> None:
     else:
         skip_dl_exts = None
 
+    # Parse extra hosts
+    extra_hosts_raw = getattr(args, "extra_hosts", "") or ""
+    extra_hosts: frozenset[str] = frozenset(
+        h.strip().lower() for h in extra_hosts_raw.split(",") if h.strip()
+    )
+    if extra_hosts:
+        log.info("Extra download hosts: %s", ", ".join(sorted(extra_hosts)))
+
     crawler = Crawler(
         start_url=target_url,
         output_dir=output_dir,
@@ -237,6 +252,7 @@ def main() -> None:
         allow_external=args.allow_external,
         skip_media_files=args.skip_media_files,
         skip_download_exts=skip_dl_exts,
+        extra_hosts=extra_hosts,
     )
 
     t0 = time.monotonic()

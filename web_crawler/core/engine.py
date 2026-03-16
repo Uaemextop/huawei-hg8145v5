@@ -135,6 +135,7 @@ class Crawler:
         allow_external: bool = True,
         skip_media_files: bool = False,
         skip_download_exts: frozenset[str] | None = None,
+        extra_hosts: frozenset[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -205,7 +206,9 @@ class Crawler:
         # CDN hosts: external domains discovered from media elements
         # (video/audio/source tags, Schema.org itemprop).  URLs on
         # these hosts are downloaded but NOT crawled for links.
-        self._cdn_hosts: set[str] = set()
+        # Seed with --extra-hosts so the crawler fetches files on those
+        # domains when it discovers links to them.
+        self._cdn_hosts: set[str] = set(extra_hosts or ())
         self._allow_external = allow_external
         self._video_urls: list[str] = []
         self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
