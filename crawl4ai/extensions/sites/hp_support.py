@@ -66,6 +66,7 @@ _INIT_URL = f"{_BASE}/wcc-services/s/init"
 _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
 
 _REQUEST_TIMEOUT = 30
+_MAX_DESCRIPTION_LENGTH = 200
 
 # Broad query used as last-resort fallback when no product OID is found.
 _DEFAULT_SEARCH_QUERY = "HP printer"
