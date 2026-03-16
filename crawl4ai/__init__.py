@@ -207,9 +207,14 @@ try:
         "LinkPreviewConfig"
     ]
 
-except (ImportError, ModuleNotFoundError):
-    # Core crawl4ai dependencies are not installed – that's OK, the
-    # extensions sub-package can still be used standalone.
+except (ImportError, ModuleNotFoundError) as _core_err:
+    # Core crawl4ai dependencies (playwright, lark, etc.) are not installed.
+    # The extensions sub-package (detection, bypass, downloader) can still be
+    # used standalone; only the async crawler/browser features are unavailable.
+    import logging as _logging
+    _logging.getLogger("crawl4ai").debug(
+        "crawl4ai core modules not available (%s) – extensions-only mode", _core_err,
+    )
     __all__ = []
 
 
