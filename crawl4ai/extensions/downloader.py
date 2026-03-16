@@ -177,7 +177,7 @@ DEFAULT_DOWNLOAD_EXTENSIONS: frozenset[str] = frozenset({
     "java", "kt", "kts", "scala", "groovy",
     "go", "rs", "swift", "m", "mm",
     "cs", "fs", "vb",
-    "r", "R", "jl", "matlab",
+    "r", "jl", "matlab",
     "asm", "s",
     # ── .NET / Windows ──
     "dll", "sys", "ocx", "lib", "obj", "pdb", "so", "dylib", "a",
