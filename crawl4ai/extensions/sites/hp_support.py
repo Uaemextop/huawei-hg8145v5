@@ -7,7 +7,7 @@ via the ``/wcc-services/`` JSON API.  This module:
 
 1. Detects ``support.hp.com`` URLs.
 2. Dynamically resolves product OID from the URL path, or discovers
-   products via HP's search API when no OID is present.
+   products via HP's navigation and search APIs when no OID is present.
 3. Dynamically fetches all available OS platforms and versions from the
    ``/wcc-services/swd-v2/osVersionData`` API.
 4. If the OS API returns no data, falls back to the
@@ -17,7 +17,8 @@ via the ``/wcc-services/`` JSON API.  This module:
    category, OS, description, download URL) for each software entry.
 
 **No static / hardcoded data** — all product OIDs, OS IDs, platform IDs,
-and file metadata are discovered at runtime via HP's own APIs.
+category names, and file metadata are discovered at runtime via HP's own
+APIs.  No predefined limits on the number of products processed.
 
 Instead of returning download URLs, this module returns a list of
 :class:`FileEntry` dicts that the downloader writes to a ``file_index.md``
@@ -69,23 +70,8 @@ _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
 _REQUEST_TIMEOUT = 30
 _MAX_DESCRIPTION_LENGTH = 200
 
-# Broad queries used to discover products when no OID is in the URL.
-# Each query returns up to ~200 products from HP's search API.
-_CATALOG_SEARCH_QUERIES = [
-    "HP printer",
-    "HP laptop",
-    "HP desktop",
-    "HP workstation",
-    "HP monitor",
-    "HP scanner",
-    "HP docking station",
-    "HP ink",
-    "HP toner",
-    "HP accessories",
-]
-
-# Maximum number of products to process when doing a full catalog crawl.
-_MAX_CATALOG_PRODUCTS = 50
+# Navigation API endpoint for discovering product categories dynamically.
+_NAV_URL = f"{_BASE}/wcc-services/navigation"
 
 _HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -131,8 +117,9 @@ class HPSupportModule(BaseSiteModule):
 
         When no product OID is found in the URL (e.g. the root page
         ``https://support.hp.com``), this method discovers products
-        dynamically via HP's search API using multiple broad queries
-        and processes each product found.
+        dynamically via HP's navigation and search APIs.  There is **no**
+        limit on the number of products processed — all discovered
+        products are scanned for files.
         """
         entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
@@ -152,8 +139,8 @@ class HPSupportModule(BaseSiteModule):
             log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
             self._collect_files_for_product(oid, cc, lc, entries)
         else:
-            # Catalog mode: discover products via broad search queries
-            log.info("[HP] No product OID — discovering catalog …")
+            # Catalog mode: discover products via navigation + search APIs
+            log.info("[HP] No product OID — discovering catalog dynamically …")
             product_oids = self._discover_catalog_products(cc, lc)
             log.info("[HP] Catalog: found %d products to scan", len(product_oids))
             for i, (prod_oid, prod_name) in enumerate(product_oids, 1):
@@ -181,29 +168,139 @@ class HPSupportModule(BaseSiteModule):
     def _discover_catalog_products(
         self, cc: str, lc: str,
     ) -> list[tuple[str, str]]:
-        """Search HP's product API with multiple queries to build a
-        product catalog.
+        """Dynamically discover products from HP's category navigation
+        and search APIs.
 
-        Returns a list of ``(oid, product_name)`` tuples, limited to
-        :data:`_MAX_CATALOG_PRODUCTS` unique products.
+        Returns a list of ``(oid, product_name)`` tuples with **no**
+        hard limit — all products found are returned.
+
+        Discovery flow:
+        1. Fetch category names from ``/wcc-services/navigation`` API.
+        2. For each category, query HP's search API to find products.
+        3. Collect all unique ``(oid, name)`` pairs across all categories.
         """
         seen_oids: set[str] = set()
         products: list[tuple[str, str]] = []
 
-        for query in _CATALOG_SEARCH_QUERIES:
-            if len(products) >= _MAX_CATALOG_PRODUCTS:
-                break
+        # Dynamically fetch category names from HP's navigation API
+        categories = self._fetch_navigation_categories(cc, lc)
+        if not categories:
+            # Fallback: fetch category keywords from the init API
+            categories = self._fetch_init_categories(cc, lc)
+
+        log.info("[HP] Discovered %d categories to scan", len(categories))
+
+        for query in categories:
             found = self._search_products(query, cc, lc)
             for oid, name in found:
                 if oid not in seen_oids:
                     seen_oids.add(oid)
                     products.append((oid, name))
-                    if len(products) >= _MAX_CATALOG_PRODUCTS:
-                        break
             log.debug("[HP] Query '%s' → %d products (total %d)",
                       query, len(found), len(products))
 
         return products
+
+    def _fetch_navigation_categories(
+        self, cc: str, lc: str,
+    ) -> list[str]:
+        """Dynamically fetch product categories from HP's navigation API.
+
+        Calls ``/wcc-services/navigation?cc=…&lc=…`` to get the site's
+        full category tree and extracts all category/sub-category names
+        to use as search queries.
+        """
+        sess = self._get_session()
+        categories: list[str] = []
+        try:
+            resp = sess.get(
+                _NAV_URL,
+                params={"cc": cc, "lc": lc},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return categories
+            data = resp.json()
+            # Walk the navigation tree to extract category names
+            nav_data = data.get("data", data)
+            self._walk_nav_tree(nav_data, categories)
+        except Exception as exc:
+            log.debug("[HP] Navigation API failed: %s", exc)
+        return categories
+
+    def _walk_nav_tree(self, node: dict | list, out: list[str]) -> None:
+        """Recursively walk a navigation tree and collect category names
+        suitable for product search queries."""
+        if isinstance(node, list):
+            for item in node:
+                self._walk_nav_tree(item, out)
+            return
+        if not isinstance(node, dict):
+            return
+
+        # Collect names from common navigation keys
+        for key in ("name", "categoryName", "label", "title"):
+            val = node.get(key, "")
+            if val and isinstance(val, str) and len(val) > 2:
+                out.append(val)
+
+        # Recurse into child structures
+        for key in ("children", "subCategories", "subCategoryList",
+                     "items", "categories", "navigationItems",
+                     "menuItems", "childNodes"):
+            child = node.get(key)
+            if child:
+                self._walk_nav_tree(child, out)
+
+    def _fetch_init_categories(
+        self, cc: str, lc: str,
+    ) -> list[str]:
+        """Fallback: derive search queries from the ``/s/init`` API.
+
+        The init response contains ``supportCategories`` and
+        ``productFinder`` data that can yield category keywords.
+        """
+        sess = self._get_session()
+        categories: list[str] = []
+        try:
+            resp = sess.get(
+                _INIT_URL,
+                params={"cc": cc, "lc": lc},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return categories
+            data = resp.json().get("data", {})
+            if data is None:
+                return categories
+
+            # Extract from supportCategories
+            for cat in data.get("supportCategories", []):
+                name = cat.get("name", "") or cat.get("label", "")
+                if name:
+                    categories.append(name)
+
+            # Extract from productFinder categories
+            pf = data.get("productFinder", {})
+            for cat in pf.get("categories", []):
+                name = cat.get("name", "") or cat.get("label", "")
+                if name:
+                    categories.append(name)
+                for sub in cat.get("subCategories", []):
+                    sub_name = sub.get("name", "") or sub.get("label", "")
+                    if sub_name:
+                        categories.append(sub_name)
+
+            # Extract from header/menu navigation
+            for nav in data.get("header", {}).get("navigation", []):
+                name = nav.get("name", "") or nav.get("label", "")
+                if name:
+                    categories.append(name)
+        except Exception as exc:
+            log.debug("[HP] /s/init category extraction failed: %s", exc)
+        return categories
 
     def _search_products(
         self, query: str, cc: str, lc: str,
