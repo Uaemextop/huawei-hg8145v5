@@ -178,6 +178,8 @@ class HPSupportModule(BaseSiteModule):
         1. Fetch category names from ``/wcc-services/navigation`` API.
         2. For each category, query HP's search API to find products.
         3. Collect all unique ``(oid, name)`` pairs across all categories.
+        4. If no products found from APIs, parse the support page HTML
+           for product links as a last resort.
         """
         seen_oids: set[str] = set()
         products: list[tuple[str, str]] = []
@@ -198,6 +200,16 @@ class HPSupportModule(BaseSiteModule):
                     products.append((oid, name))
             log.debug("[HP] Query '%s' → %d products (total %d)",
                       query, len(found), len(products))
+
+        # Last resort: parse the support page HTML for product links
+        if not products:
+            log.info("[HP] No products found from APIs — "
+                     "parsing support page HTML for product links")
+            html_products = self._discover_products_from_html(cc, lc)
+            for oid, name in html_products:
+                if oid not in seen_oids:
+                    seen_oids.add(oid)
+                    products.append((oid, name))
 
         return products
 
@@ -220,13 +232,16 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
+                log.info("[HP] Navigation API returned HTTP %d", resp.status_code)
                 return categories
             data = resp.json()
             # Walk the navigation tree to extract category names
             nav_data = data.get("data", data)
             self._walk_nav_tree(nav_data, categories)
+            if not categories:
+                log.info("[HP] Navigation API returned data but no categories extracted")
         except Exception as exc:
-            log.debug("[HP] Navigation API failed: %s", exc)
+            log.info("[HP] Navigation API failed: %s", exc)
         return categories
 
     def _walk_nav_tree(self, node: dict | list, out: list[str]) -> None:
@@ -271,8 +286,12 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
+                log.info("[HP] /s/init returned HTTP %d", resp.status_code)
                 return categories
-            data = resp.json().get("data", {})
+            raw = resp.json()
+            data = raw.get("data", raw)
+            if not isinstance(data, dict):
+                data = {}
 
             # Extract from supportCategories
             for cat in data.get("supportCategories", []):
@@ -282,22 +301,28 @@ class HPSupportModule(BaseSiteModule):
 
             # Extract from productFinder categories
             pf = data.get("productFinder", {})
-            for cat in pf.get("categories", []):
-                name = cat.get("name", "") or cat.get("label", "")
-                if name:
-                    categories.append(name)
-                for sub in cat.get("subCategories", []):
-                    sub_name = sub.get("name", "") or sub.get("label", "")
-                    if sub_name:
-                        categories.append(sub_name)
+            if isinstance(pf, dict):
+                for cat in pf.get("categories", []):
+                    name = cat.get("name", "") or cat.get("label", "")
+                    if name:
+                        categories.append(name)
+                    for sub in cat.get("subCategories", []):
+                        sub_name = sub.get("name", "") or sub.get("label", "")
+                        if sub_name:
+                            categories.append(sub_name)
 
             # Extract from header/menu navigation
-            for nav in data.get("header", {}).get("navigation", []):
-                name = nav.get("name", "") or nav.get("label", "")
-                if name:
-                    categories.append(name)
+            header = data.get("header", {})
+            if isinstance(header, dict):
+                for nav in header.get("navigation", []):
+                    name = nav.get("name", "") or nav.get("label", "")
+                    if name:
+                        categories.append(name)
+
+            if not categories:
+                log.info("[HP] /s/init returned data but no categories extracted")
         except Exception as exc:
-            log.debug("[HP] /s/init category extraction failed: %s", exc)
+            log.info("[HP] /s/init category extraction failed: %s", exc)
         return categories
 
     def _search_products(
@@ -315,8 +340,11 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
+                log.debug("[HP] Search '%s' returned HTTP %d", query, resp.status_code)
                 return results
             data = resp.json()
+
+            # Primary structure: data.kaaSResponse.data.searchResults.categories[]
             categories = (
                 data.get("data", {})
                 .get("kaaSResponse", {})
@@ -328,8 +356,64 @@ class HPSupportModule(BaseSiteModule):
                 self._extract_products_from_category(cat, results)
                 for sub in cat.get("subCategoryList") or []:
                     self._extract_products_from_category(sub, results)
+
+            # Fallback: try direct structure data.categories[]
+            if not results:
+                for cat in data.get("data", {}).get("categories", []):
+                    self._extract_products_from_category(cat, results)
+
+            # Fallback: try flat productList at top level
+            if not results:
+                for prod in data.get("data", {}).get("productList", []):
+                    target = prod.get("targetUrl", "")
+                    name = prod.get("productName", "")
+                    m = _OID_PRODUCT_RE.search(target) or _OID_LAST_RE.search(target)
+                    if m:
+                        results.append((m.group(1), name))
         except Exception as exc:
             log.debug("[HP] Product search '%s' failed: %s", query, exc)
+        return results
+
+    def _discover_products_from_html(
+        self, cc: str, lc: str,
+    ) -> list[tuple[str, str]]:
+        """Parse the HP support homepage HTML to find product page links.
+
+        This is a last-resort fallback when the JSON APIs return no
+        products.  It fetches the HTML of the support page and extracts
+        links matching product URL patterns.
+        """
+        sess = self._get_session()
+        results: list[tuple[str, str]] = []
+        try:
+            url = f"{_BASE}/{cc}-{lc}/"
+            resp = sess.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+            if not resp.ok:
+                log.info("[HP] Support page HTML fetch returned HTTP %d",
+                         resp.status_code)
+                return results
+            html = resp.text
+
+            # Find all links matching HP product/driver URL patterns
+            link_re = re.compile(
+                r'href=["\']([^"\']*?/(?:product|model|drivers)/'
+                r'[^"\']*?)["\']',
+                re.I,
+            )
+            for m in link_re.finditer(html):
+                link = m.group(1)
+                if not link.startswith("http"):
+                    link = _BASE + link
+                oid = self._extract_oid(link)
+                if oid:
+                    # Use last path segment as product name
+                    parts = urllib.parse.urlparse(link).path.strip("/").split("/")
+                    name = parts[-1] if parts else oid
+                    name = name.replace("-", " ").title()
+                    results.append((oid, name))
+            log.info("[HP] Found %d product links in HTML", len(results))
+        except Exception as exc:
+            log.info("[HP] HTML product discovery failed: %s", exc)
         return results
 
     @staticmethod
@@ -363,8 +447,8 @@ class HPSupportModule(BaseSiteModule):
                 os_entries = self._fetch_driver_entries(oid, os_info, cc, lc)
                 entries.extend(os_entries)
             except Exception as exc:
-                log.debug("[HP] Error fetching drivers for OS %s: %s",
-                          os_info.get("name", "?"), exc)
+                log.info("[HP] Error fetching drivers for OS %s: %s",
+                         os_info.get("name", "?"), exc)
 
     # ── Session helper ───────────────────────────────────────────────
 
@@ -507,9 +591,11 @@ class HPSupportModule(BaseSiteModule):
             if os_versions:
                 log.info("[HP] Found %d OS versions across %d platforms",
                          len(os_versions), len(platforms))
+            else:
+                log.info("[HP] OS version API returned no OS versions for OID=%s", oid)
             return os_versions
         except Exception as exc:
-            log.debug("[HP] OS version fetch failed: %s", exc)
+            log.info("[HP] OS version fetch failed for OID=%s: %s", oid, exc)
         return []
 
     def _detect_os_from_init(
@@ -546,7 +632,7 @@ class HPSupportModule(BaseSiteModule):
                 "platformName": "",
             }]
         except Exception as exc:
-            log.debug("[HP] /s/init OS detection failed: %s", exc)
+            log.info("[HP] /s/init OS detection failed: %s", exc)
         return []
 
     # ── Driver / software metadata collection ────────────────────────
@@ -584,6 +670,8 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
+                log.debug("[HP] driverDetails returned HTTP %d for OID=%s",
+                          resp.status_code, oid)
                 return entries
             data = resp.json().get("data", {})
             if data is None:
@@ -609,7 +697,7 @@ class HPSupportModule(BaseSiteModule):
                             sub, category, os_name, entries,
                         )
         except Exception as exc:
-            log.debug("[HP] driverDetails call failed: %s", exc)
+            log.info("[HP] driverDetails call failed for OID=%s: %s", oid, exc)
 
         return entries
 
