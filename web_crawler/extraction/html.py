@@ -37,22 +37,33 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
     """
     Extract every resource URL from HTML/ASP content using BeautifulSoup.
     Also parses inline ``<style>`` and ``<script>`` blocks.
+
+    Handles ``<base href="…">`` per HTML spec §4.2.3: relative URLs
+    are resolved against the base href instead of the page URL.
     """
     found: set[str] = set()
 
     if BeautifulSoup is None:
         return found
 
-    def _add(raw: str, *, allow_external: bool = False) -> None:
-        n = normalise_url(raw.strip(), page_url, base,
-                          allow_external=allow_external)
-        if n:
-            found.add(n)
-
     try:
         soup = BeautifulSoup(html, _BS4_PARSER)
     except Exception:
         return found
+
+    # Honour <base href="…"> — resolve relative URLs against it
+    import urllib.parse
+    resolve_base = page_url
+    base_tag = soup.find("base", href=True)
+    if base_tag:
+        href = base_tag["href"]
+        resolve_base = urllib.parse.urljoin(page_url, href)
+
+    def _add(raw: str, *, allow_external: bool = False) -> None:
+        n = normalise_url(raw.strip(), resolve_base, base,
+                          allow_external=allow_external)
+        if n:
+            found.add(n)
 
     # Tags whose media attributes may reference external CDNs
     _MEDIA_TAGS = {"video", "source", "audio", "track"}
@@ -111,11 +122,22 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
                         _add(content, allow_external=True)
 
     for style_el in soup.find_all("style"):
-        found |= extract_css_urls(style_el.get_text(), page_url, base)
+        found |= extract_css_urls(style_el.get_text(), resolve_base, base)
 
     for script_el in soup.find_all("script"):
         if not script_el.get("src"):
-            found |= extract_js_paths(script_el.get_text(), page_url, base)
+            found |= extract_js_paths(script_el.get_text(), resolve_base, base)
+
+    # Extract FTP/SFTP/FTPS links from anchor tags and other elements
+    _FTP_RE = re.compile(r'((?:ftp|ftps|sftp)://[^\s"\'<>]+)', re.I)
+    for m in _FTP_RE.finditer(html):
+        found.add(m.group(1).rstrip('.,;)'))
+
+    # Extract links with download attribute (explicit download links)
+    for a_el in soup.find_all("a", download=True):
+        href = a_el.get("href")
+        if href:
+            _add(href, allow_external=True)
 
     # Inline event-handler attributes (onclick, onmouseover, onsubmit, …)
     # contain JavaScript snippets that may navigate via window.location,
@@ -130,7 +152,7 @@ def extract_html_attrs(html: str, page_url: str, base: str) -> set[str]:
         for attr_name in _EVENT_ATTRS:
             handler = el.get(attr_name)
             if handler:
-                found |= extract_js_paths(handler, page_url, base)
+                found |= extract_js_paths(handler, resolve_base, base)
 
     # JSON-LD structured data – extract media URLs from VideoObject,
     # AudioObject and other Schema.org types that embed content URLs.

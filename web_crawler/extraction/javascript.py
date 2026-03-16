@@ -55,6 +55,27 @@ _STREAM_URL_RE = re.compile(
     re.I,
 )
 
+# FTP / SFTP / FTPS URLs embedded in JS strings
+_FTP_URL_RE = re.compile(
+    r"""['"`]((?:ftp|ftps|sftp)://[^'"`\s\n]{5,300})['"`]""",
+    re.I,
+)
+
+# Full absolute URLs on external HP-related or download domains
+# Captures driver/firmware download links on HP sub-domains and CDNs
+_EXTERNAL_DL_RE = re.compile(
+    r"""['"`](https?://(?:"""
+    r"ftp\.hp\.com|"
+    r"h[0-9]+\.www[0-9]*\.hp\.com|"
+    r"support\.hp\.com|"
+    r"drivers\.hp\.com|"
+    r"download\.hp\.com|"
+    r"[a-z0-9\-]+\.hpcloud\.hp\.com|"
+    r"[a-z0-9\-]+\.ext\.hp\.com"
+    r""")[^'"`\s\n]{1,500})['"`]""",
+    re.I,
+)
+
 # All root-relative quoted path strings: '/anything/here'
 _ABS_QUOTED_PATH_RE = re.compile(
     r"""['"`](/[a-zA-Z0-9_./%?&=+\-#][^'"`\n]{0,200})['"`]""",
@@ -195,6 +216,21 @@ def extract_js_paths(js: str, page_url: str, base: str) -> set[str]:
 
     # Extract absolute stream/media URLs (often on external CDN hosts)
     for m in _STREAM_URL_RE.finditer(js):
+        raw = m.group(1)
+        if "${" not in raw:
+            n = normalise_url(raw.strip(), page_url, base,
+                              allow_external=True)
+            if n:
+                found.add(n)
+
+    # Extract FTP/SFTP/FTPS URLs (external download servers)
+    for m in _FTP_URL_RE.finditer(js):
+        raw = m.group(1)
+        if "${" not in raw:
+            found.add(raw.strip())
+
+    # Extract HP-related external download domains
+    for m in _EXTERNAL_DL_RE.finditer(js):
         raw = m.group(1)
         if "${" not in raw:
             n = normalise_url(raw.strip(), page_url, base,

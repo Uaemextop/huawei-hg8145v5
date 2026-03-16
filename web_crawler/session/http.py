@@ -33,9 +33,55 @@ except ImportError:
 _CF_IMPERSONATE_PROFILES = ["chrome", "safari", "safari_ios"]
 
 
+def _client_hints_for_ua(ua: str) -> dict[str, str]:
+    """Derive ``sec-ch-ua*`` Client Hints headers from a User-Agent string.
+
+    Modern bot-detection systems (Akamai, Imperva, Cloudflare) expect
+    these headers from Chromium-based browsers.  Firefox and Safari do
+    **not** send them, so we only generate hints for Chrome/Edge/Opera UAs.
+    """
+    # Extract Chromium major version (e.g. "Chrome/131.0.0.0" → "131")
+    m = re.search(r"Chrome/(\d+)", ua)
+    if not m:
+        return {}  # Firefox / Safari – no Client Hints
+
+    ver = m.group(1)
+    brand = f'"Chromium";v="{ver}", "Not A(Brand";v="8"'
+
+    if "Edg/" in ua:
+        edge_ver = re.search(r"Edg/(\d+)", ua)
+        ev = edge_ver.group(1) if edge_ver else ver
+        brand += f', "Microsoft Edge";v="{ev}"'
+    elif "OPR/" in ua:
+        opr_ver = re.search(r"OPR/(\d+)", ua)
+        ov = opr_ver.group(1) if opr_ver else ver
+        brand += f', "Opera";v="{ov}"'
+    else:
+        brand += f', "Google Chrome";v="{ver}"'
+
+    mobile = "?1" if "Mobile" in ua else "?0"
+
+    if "Windows" in ua:
+        platform = '"Windows"'
+    elif "Macintosh" in ua:
+        platform = '"macOS"'
+    elif "Android" in ua:
+        platform = '"Android"'
+    elif "Linux" in ua:
+        platform = '"Linux"'
+    else:
+        platform = '""'
+
+    return {
+        "sec-ch-ua": brand,
+        "sec-ch-ua-mobile": mobile,
+        "sec-ch-ua-platform": platform,
+    }
+
+
 def build_session(verify_ssl: bool = True) -> requests.Session:
     """Return a ``requests.Session`` with retry logic, keep-alive,
-    randomised User-Agent, and cache-busting headers."""
+    randomised User-Agent, cache-busting headers, and Client Hints."""
     session = requests.Session()
     retry = Retry(
         total=MAX_RETRIES,
@@ -52,8 +98,9 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
-    session.headers.update({
-        "User-Agent": random.choice(USER_AGENTS),
+    ua = random.choice(USER_AGENTS)
+    headers = {
+        "User-Agent": ua,
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -68,7 +115,9 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
         "Connection": "keep-alive",
-    })
+    }
+    headers.update(_client_hints_for_ua(ua))
+    session.headers.update(headers)
     return session
 
 
@@ -89,7 +138,8 @@ def build_cf_session(verify_ssl: bool = True) -> "_cf_requests.Session | None":
 
 def random_headers(base_url: str = "") -> dict[str, str]:
     """Return a set of randomised browser headers for retry / bypass
-    attempts.  Includes cache-busting and Referer spoofing."""
+    attempts.  Includes cache-busting, Referer spoofing, and Client
+    Hints headers (required by Akamai/Imperva bot detection)."""
     ua = random.choice(USER_AGENTS)
     headers: dict[str, str] = {
         "User-Agent": ua,
@@ -113,6 +163,7 @@ def random_headers(base_url: str = "") -> dict[str, str]:
         "Upgrade-Insecure-Requests": "1",
         "Connection": "keep-alive",
     }
+    headers.update(_client_hints_for_ua(ua))
     if base_url:
         headers["Referer"] = base_url
         headers["Origin"] = base_url

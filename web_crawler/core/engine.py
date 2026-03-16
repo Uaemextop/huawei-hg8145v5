@@ -1117,6 +1117,7 @@ class Crawler:
     # ------------------------------------------------------------------
 
     @staticmethod
+    @staticmethod
     def detect_protection(headers: dict[str, str], body: str) -> list[str]:
         """Return a list of detected WAF/protection names from *headers* and
         *body* content.
@@ -1126,10 +1127,18 @@ class Crawler:
         large content pages may mention "captcha" or "cloudflare" deep
         in plugin configuration strings, causing false positives.
         """
-        # Exclude Permissions-Policy – it merely declares allowed origins
-        # (e.g. recaptcha.net, cloudflare.com) and is not a WAF indicator.
+        # Exclude headers that cause false positives:
+        # - Permissions-Policy: merely declares allowed origins
+        # - Akamai CDN headers: present on every Akamai-served page
+        # - Set-Cookie: Akamai bot-management cookies (ak_bmsc) are normal
+        _EXCLUDED_HEADERS = frozenset({
+            "permissions-policy",
+            "x-akamai-transformed",
+            "akamai-grn",
+            "set-cookie",
+        })
         filtered = {k: v for k, v in headers.items()
-                    if k.lower() != "permissions-policy"}
+                    if k.lower() not in _EXCLUDED_HEADERS}
         combined = " ".join(f"{k}: {v}" for k, v in filtered.items()).lower()
         combined += " " + body[:8192].lower()
         detected: list[str] = []

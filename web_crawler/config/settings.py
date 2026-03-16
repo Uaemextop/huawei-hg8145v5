@@ -185,10 +185,11 @@ WAF_SIGNATURES = {
         "_incapsula_",
     ],
     "akamai": [
-        "akamai",
-        "akamaighost",
-        "x-akamai-transformed",
-        "ak_bmsc",
+        # Only match on actual Akamai *block page* content – not on
+        # normal CDN headers like x-akamai-transformed, akamai-grn, or
+        # ak_bmsc cookies which appear on every Akamai-served page.
+        "access denied</title>",
+        "reference&#32;&#35;18",
     ],
     "shield_security": [
         "icwp-wpsf",
