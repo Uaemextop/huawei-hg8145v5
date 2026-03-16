@@ -6,10 +6,16 @@ general-purpose async crawling engine:
 
 * **detection** – WAF / CAPTCHA / soft-404 / WordPress fingerprinting
 * **extraction** – cloud-storage link, CSS url(), JS path, JSON path extraction
-* **session** – HTTP session helpers (Client Hints, SiteGround PoW, CF bypass)
+* **session_helpers** – HTTP session helpers (Client Hints, SiteGround PoW, CF bypass)
 * **storage** – on-disk file writing, content-hash dedup, Git integration
-* **huawei** – Huawei router firmware download enumeration
+* **huawei_crawler** – Huawei router firmware download enumeration
+* **settings** – Configuration constants & WAF signatures
+* **url_utils** – URL normalisation & deduplication
+* **log_utils** – Logging with ANSI colours & GitHub Actions support
 """
 
-from crawl4ai.extensions.detection import detect_all  # noqa: F401
-from crawl4ai.extensions.extraction import extract_all  # noqa: F401
+from .detection import detect_all  # noqa: F401
+from .extraction import extract_all  # noqa: F401
+from .huawei_crawler import HuaweiCrawler  # noqa: F401
+
+__all__ = ["detect_all", "extract_all", "HuaweiCrawler"]

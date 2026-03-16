@@ -225,6 +225,46 @@ __all__ = [
 #     # import warnings
 #     # print("Warning: Synchronous WebCrawler is not available. Install crawl4ai[sync] for synchronous support. However, please note that the synchronous version will be deprecated soon.")
 
+# ---------------------------------------------------------------------------
+# Extensions ported from the web_crawler package (Huawei HG8145V5 project)
+# ---------------------------------------------------------------------------
+from .extensions.huawei_crawler import HuaweiCrawler
+from .extensions.detection import (
+    BaseDetector,
+    CloudflareDetector,
+    SiteGroundDetector,
+    WAFDetector,
+    Soft404Detector,
+    WordPressDetector,
+    detect_all as detect_protection,
+)
+from .extensions.extraction import (
+    extract_all as extract_all_links,
+    extract_html_attrs,
+    extract_css_urls,
+    extract_js_paths,
+    extract_json_paths,
+    extract_cloud_links,
+)
+
+__all__ += [
+    # Huawei / web_crawler extensions
+    "HuaweiCrawler",
+    "BaseDetector",
+    "CloudflareDetector",
+    "SiteGroundDetector",
+    "WAFDetector",
+    "Soft404Detector",
+    "WordPressDetector",
+    "detect_protection",
+    "extract_all_links",
+    "extract_html_attrs",
+    "extract_css_urls",
+    "extract_js_paths",
+    "extract_json_paths",
+    "extract_cloud_links",
+]
+
 # Disable all Pydantic warnings
 warnings.filterwarnings("ignore", module="pydantic")
 # pydantic_warnings.filter_warnings()
