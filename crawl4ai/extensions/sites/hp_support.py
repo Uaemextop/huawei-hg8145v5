@@ -58,7 +58,11 @@ _OID_LAST_RE = re.compile(r"/(\d{5,})(?:[/?#]|$)")
 _SEO_NAME_RE = re.compile(r"/drivers/([a-z0-9][\w-]+)", re.I)
 # Locale: /us-en/
 _LOCALE_RE = re.compile(r"/([a-z]{2})-([a-z]{2})/")
-
+# Links matching HP product/driver URL patterns in HTML
+_HTML_PRODUCT_LINK_RE = re.compile(
+    r'href=["\']([^"\']*?/(?:product|model|drivers)/[^"\']*?)["\']',
+    re.I,
+)
 # ── API endpoints ────────────────────────────────────────────────────────
 
 _BASE = "https://support.hp.com"
@@ -340,7 +344,7 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
-                log.debug("[HP] Search '%s' returned HTTP %d", query, resp.status_code)
+                log.info("[HP] Search '%s' returned HTTP %d", query, resp.status_code)
                 return results
             data = resp.json()
 
@@ -395,22 +399,17 @@ class HPSupportModule(BaseSiteModule):
             html = resp.text
 
             # Find all links matching HP product/driver URL patterns
-            link_re = re.compile(
-                r'href=["\']([^"\']*?/(?:product|model|drivers)/'
-                r'[^"\']*?)["\']',
-                re.I,
-            )
-            for m in link_re.finditer(html):
+            for m in _HTML_PRODUCT_LINK_RE.finditer(html):
                 link = m.group(1)
                 if not link.startswith("http"):
                     link = _BASE + link
                 oid = self._extract_oid(link)
                 if oid:
-                    # Use last path segment as product name
+                    # Use last path segment as product name, or OID as fallback
                     parts = urllib.parse.urlparse(link).path.strip("/").split("/")
-                    name = parts[-1] if parts else oid
-                    name = name.replace("-", " ").title()
-                    results.append((oid, name))
+                    raw = parts[-1] if parts else ""
+                    name = raw.replace("-", " ").title() if raw else oid
+                    results.append((oid, name or oid))
             log.info("[HP] Found %d product links in HTML", len(results))
         except Exception as exc:
             log.info("[HP] HTML product discovery failed: %s", exc)
@@ -670,7 +669,7 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if not resp.ok:
-                log.debug("[HP] driverDetails returned HTTP %d for OID=%s",
+                log.info("[HP] driverDetails returned HTTP %d for OID=%s",
                           resp.status_code, oid)
                 return entries
             data = resp.json().get("data", {})
