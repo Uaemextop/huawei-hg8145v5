@@ -41,7 +41,9 @@ def _client_hints_for_ua(ua: str) -> dict[str, str]:
     them the request fingerprint looks like a plain HTTP client.
     """
     hints: dict[str, str] = {}
-    # Chrome / Chromium-based
+    # Chrome / Chromium-based browsers include a sec-ch-ua brand list.
+    # "Not_A Brand";v="8" is the standard greasing token that Chrome
+    # sends to prevent servers from relying on a fixed brand order.
     m = re.search(r"Chrome/(\d+)", ua)
     if m:
         ver = m.group(1)
@@ -55,7 +57,7 @@ def _client_hints_for_ua(ua: str) -> dict[str, str]:
         hints["sec-ch-ua"] = brand
     # Mobile flag
     hints["sec-ch-ua-mobile"] = "?1" if "Mobile" in ua else "?0"
-    # Platform
+    # Platform — order matters: iPhone/iPad must precede "Mac OS" match
     if "iPhone" in ua or "iPad" in ua:
         hints["sec-ch-ua-platform"] = '"iOS"'
     elif "Windows" in ua:
@@ -66,6 +68,8 @@ def _client_hints_for_ua(ua: str) -> dict[str, str]:
         hints["sec-ch-ua-platform"] = '"macOS"'
     elif "Linux" in ua:
         hints["sec-ch-ua-platform"] = '"Linux"'
+    else:
+        hints["sec-ch-ua-platform"] = '""'
     return hints
 
 
