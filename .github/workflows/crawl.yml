@@ -102,6 +102,11 @@ on:
         required: false
         default: ""
         type: string
+      extra_hosts:
+        description: "Additional hostnames to download from (comma-separated, e.g. ftp.hp.com,ftp.ext.hp.com,hpia.hpcloud.hp.com). Files on these hosts are fetched when discovered in crawled pages."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -283,6 +288,8 @@ jobs:
             EXTRA_ARGS="$EXTRA_ARGS --cf-clearance '${{ inputs.cf_clearance }}'"
           [ -n "${{ inputs.log_file }}" ] && \
             EXTRA_ARGS="$EXTRA_ARGS --log-file '${{ inputs.log_file }}'"
+          [ -n "${{ inputs.extra_hosts }}" ] && \
+            EXTRA_ARGS="$EXTRA_ARGS --extra-hosts '${{ inputs.extra_hosts }}'"
 
           # ── git push ────────────────────────────────────────────────────
           GIT_PUSH_ARG=""
