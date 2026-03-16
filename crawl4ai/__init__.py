@@ -229,6 +229,8 @@ __all__ = [
 # Extensions ported from the web_crawler package (Huawei HG8145V5 project)
 # ---------------------------------------------------------------------------
 from .extensions.huawei_crawler import HuaweiCrawler
+
+# Detection – individual modules in crawl4ai/extensions/detection/
 from .extensions.detection import (
     BaseDetector,
     CloudflareDetector,
@@ -236,8 +238,11 @@ from .extensions.detection import (
     WAFDetector,
     Soft404Detector,
     WordPressDetector,
+    CaptchaDetector,
     detect_all as detect_protection,
 )
+
+# Extraction
 from .extensions.extraction import (
     extract_all as extract_all_links,
     extract_html_attrs,
@@ -247,22 +252,54 @@ from .extensions.extraction import (
     extract_cloud_links,
 )
 
+# Bypass / correction – individual modules in crawl4ai/extensions/bypass/
+from .extensions.bypass import (
+    build_session,
+    build_cf_session,
+    random_headers,
+    cache_bust_url,
+    solve_sg_pow,
+    solve_sg_captcha,
+    is_sg_captcha_response,
+    is_s3_access_denied,
+    is_tomcat_ip_restricted,
+    is_cf_managed_challenge,
+    inject_cf_clearance,
+    solve_cf_challenge,
+)
+
 __all__ += [
     # Huawei / web_crawler extensions
     "HuaweiCrawler",
+    # Detection
     "BaseDetector",
     "CloudflareDetector",
     "SiteGroundDetector",
     "WAFDetector",
     "Soft404Detector",
     "WordPressDetector",
+    "CaptchaDetector",
     "detect_protection",
+    # Extraction
     "extract_all_links",
     "extract_html_attrs",
     "extract_css_urls",
     "extract_js_paths",
     "extract_json_paths",
     "extract_cloud_links",
+    # Bypass / correction
+    "build_session",
+    "build_cf_session",
+    "random_headers",
+    "cache_bust_url",
+    "solve_sg_pow",
+    "solve_sg_captcha",
+    "is_sg_captcha_response",
+    "is_s3_access_denied",
+    "is_tomcat_ip_restricted",
+    "is_cf_managed_challenge",
+    "inject_cf_clearance",
+    "solve_cf_challenge",
 ]
 
 # Disable all Pydantic warnings

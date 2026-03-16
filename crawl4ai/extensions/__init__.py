@@ -4,9 +4,26 @@ crawl4ai.extensions – Capabilities ported from the web_crawler package.
 These modules add specialised features that complement crawl4ai's
 general-purpose async crawling engine:
 
-* **detection** – WAF / CAPTCHA / soft-404 / WordPress fingerprinting
+Detection (individual modules in ``detection/``):
+
+* :mod:`detection.cloudflare` – Cloudflare Managed Challenge / Turnstile
+* :mod:`detection.siteground` – SiteGround Security CAPTCHA (PoW)
+* :mod:`detection.waf` – Generic WAF signature scanner
+* :mod:`detection.soft404` – Soft-404 page detection
+* :mod:`detection.wordpress` – WordPress fingerprinting
+* :mod:`detection.captcha` – CAPTCHA embed detection (reCAPTCHA, hCAPTCHA, …)
+
+Bypass / correction (individual modules in ``bypass/``):
+
+* :mod:`bypass.session` – HTTP session builder (retry, UA rotation, Client Hints)
+* :mod:`bypass.cloudflare` – CF challenge solver (curl_cffi + Playwright)
+* :mod:`bypass.siteground` – SiteGround PoW CAPTCHA solver
+* :mod:`bypass.s3` – Amazon S3 AccessDenied detection
+* :mod:`bypass.tomcat` – Apache Tomcat IP-restriction detection
+
+Other modules:
+
 * **extraction** – cloud-storage link, CSS url(), JS path, JSON path extraction
-* **session_helpers** – HTTP session helpers (Client Hints, SiteGround PoW, CF bypass)
 * **storage** – on-disk file writing, content-hash dedup, Git integration
 * **huawei_crawler** – Huawei router firmware download enumeration
 * **settings** – Configuration constants & WAF signatures
@@ -17,5 +34,39 @@ general-purpose async crawling engine:
 from .detection import detect_all  # noqa: F401
 from .extraction import extract_all  # noqa: F401
 from .huawei_crawler import HuaweiCrawler  # noqa: F401
+from .bypass import (  # noqa: F401
+    build_session,
+    build_cf_session,
+    random_headers,
+    cache_bust_url,
+    solve_sg_pow,
+    solve_sg_captcha,
+    is_sg_captcha_response,
+    is_s3_access_denied,
+    is_tomcat_ip_restricted,
+    is_cf_managed_challenge,
+    inject_cf_clearance,
+    solve_cf_challenge,
+)
 
-__all__ = ["detect_all", "extract_all", "HuaweiCrawler"]
+__all__ = [
+    # detection
+    "detect_all",
+    # extraction
+    "extract_all",
+    # crawler
+    "HuaweiCrawler",
+    # bypass / session
+    "build_session",
+    "build_cf_session",
+    "random_headers",
+    "cache_bust_url",
+    "solve_sg_pow",
+    "solve_sg_captcha",
+    "is_sg_captcha_response",
+    "is_s3_access_denied",
+    "is_tomcat_ip_restricted",
+    "is_cf_managed_challenge",
+    "inject_cf_clearance",
+    "solve_cf_challenge",
+]

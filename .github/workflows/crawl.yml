@@ -7,6 +7,11 @@ on:
         description: "URL to crawl (e.g. https://rsddownload-secure.lenovo.com)"
         required: true
         type: string
+      download_only:
+        description: "Only enumerate and record download URLs (skip full crawl)"
+        required: false
+        default: true
+        type: boolean
       depth:
         description: "Maximum crawl depth (0 = unlimited)"
         required: false
@@ -122,9 +127,13 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
           # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
           pip install curl_cffi
+          # Playwright – headless browser fallback for CF/CAPTCHA bypass
+          pip install playwright
+          python -m playwright install chromium firefox || true
           # Git LFS – for large binary files
           git lfs install
 
@@ -265,6 +274,7 @@ jobs:
 
           # ── Boolean flags ───────────────────────────────────────────────
           EXTRA_ARGS=""
+          [ "${{ inputs.download_only }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --download-only"
           [ "${{ inputs.no_robots }}"     = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-robots"
           [ "${{ inputs.no_verify_ssl }}" = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --no-verify-ssl"
           [ "${{ inputs.force }}"         = "true" ] && EXTRA_ARGS="$EXTRA_ARGS --force"
