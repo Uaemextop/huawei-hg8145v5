@@ -69,8 +69,23 @@ _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
 _REQUEST_TIMEOUT = 30
 _MAX_DESCRIPTION_LENGTH = 200
 
-# Broad query used as last-resort fallback when no product OID is found.
-_DEFAULT_SEARCH_QUERY = "HP printer"
+# Broad queries used to discover products when no OID is in the URL.
+# Each query returns up to ~200 products from HP's search API.
+_CATALOG_SEARCH_QUERIES = [
+    "HP printer",
+    "HP laptop",
+    "HP desktop",
+    "HP workstation",
+    "HP monitor",
+    "HP scanner",
+    "HP docking station",
+    "HP ink",
+    "HP toner",
+    "HP accessories",
+]
+
+# Maximum number of products to process when doing a full catalog crawl.
+_MAX_CATALOG_PRODUCTS = 50
 
 _HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -113,6 +128,11 @@ class HPSupportModule(BaseSiteModule):
         2. Extract or discover product OID(s).
         3. For each OID, fetch OS versions from the API.
         4. For each OS, POST to driverDetails and collect file metadata.
+
+        When no product OID is found in the URL (e.g. the root page
+        ``https://support.hp.com``), this method discovers products
+        dynamically via HP's search API using multiple broad queries
+        and processes each product found.
         """
         entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
@@ -127,29 +147,22 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP] No OID in URL — searching for '%s'", seo_name)
                 oid = self._resolve_oid_by_search(seo_name, cc, lc)
 
-        # 3. If still no OID, try the search API with a broad query
-        if not oid:
-            log.info("[HP] No product OID found — searching broadly")
-            oid = self._resolve_oid_by_search(_DEFAULT_SEARCH_QUERY, cc, lc)
-            if not oid:
-                return entries
-
-        log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
-
-        # 4. Fetch OS versions dynamically
-        os_list = self._fetch_os_versions(oid, cc, lc)
-        if not os_list:
-            # Fallback: detect user OS from /s/init API
-            os_list = self._detect_os_from_init(cc, lc)
-
-        # 5. For each OS, fetch driver/software metadata
-        for os_info in os_list:
-            try:
-                os_entries = self._fetch_driver_entries(oid, os_info, cc, lc)
-                entries.extend(os_entries)
-            except Exception as exc:
-                log.debug("[HP] Error fetching drivers for OS %s: %s",
-                          os_info.get("name", "?"), exc)
+        if oid:
+            # Single-product mode: fetch files for this one product
+            log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
+            self._collect_files_for_product(oid, cc, lc, entries)
+        else:
+            # Catalog mode: discover products via broad search queries
+            log.info("[HP] No product OID — discovering catalog …")
+            product_oids = self._discover_catalog_products(cc, lc)
+            log.info("[HP] Catalog: found %d products to scan", len(product_oids))
+            for i, (prod_oid, prod_name) in enumerate(product_oids, 1):
+                log.info("[HP] [%d/%d] %s (OID=%s)",
+                         i, len(product_oids), prod_name, prod_oid)
+                self._collect_files_for_product(
+                    prod_oid, cc, lc, entries,
+                    product_name=prod_name,
+                )
 
         # Deduplicate by URL
         seen_urls: set[str] = set()
@@ -160,8 +173,103 @@ class HPSupportModule(BaseSiteModule):
                 seen_urls.add(u)
                 unique.append(entry)
 
-        log.info("[HP] Discovered %d files for product %s", len(unique), oid)
+        log.info("[HP] Discovered %d unique files total", len(unique))
         return unique
+
+    # ── Catalog discovery ────────────────────────────────────────────
+
+    def _discover_catalog_products(
+        self, cc: str, lc: str,
+    ) -> list[tuple[str, str]]:
+        """Search HP's product API with multiple queries to build a
+        product catalog.
+
+        Returns a list of ``(oid, product_name)`` tuples, limited to
+        :data:`_MAX_CATALOG_PRODUCTS` unique products.
+        """
+        seen_oids: set[str] = set()
+        products: list[tuple[str, str]] = []
+
+        for query in _CATALOG_SEARCH_QUERIES:
+            if len(products) >= _MAX_CATALOG_PRODUCTS:
+                break
+            found = self._search_products(query, cc, lc)
+            for oid, name in found:
+                if oid not in seen_oids:
+                    seen_oids.add(oid)
+                    products.append((oid, name))
+                    if len(products) >= _MAX_CATALOG_PRODUCTS:
+                        break
+            log.debug("[HP] Query '%s' → %d products (total %d)",
+                      query, len(found), len(products))
+
+        return products
+
+    def _search_products(
+        self, query: str, cc: str, lc: str,
+    ) -> list[tuple[str, str]]:
+        """Search HP and return ``(oid, name)`` tuples for all products
+        found."""
+        sess = self._get_session()
+        results: list[tuple[str, str]] = []
+        try:
+            resp = sess.get(
+                f"{_SEARCH_URL}/{cc}-{lc}",
+                params={"q": query, "context": "pdp"},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return results
+            data = resp.json()
+            categories = (
+                data.get("data", {})
+                .get("kaaSResponse", {})
+                .get("data", {})
+                .get("searchResults", {})
+                .get("categories", [])
+            )
+            for cat in categories:
+                self._extract_products_from_category(cat, results)
+                for sub in cat.get("subCategoryList") or []:
+                    self._extract_products_from_category(sub, results)
+        except Exception as exc:
+            log.debug("[HP] Product search '%s' failed: %s", query, exc)
+        return results
+
+    @staticmethod
+    def _extract_products_from_category(
+        cat: dict, results: list[tuple[str, str]],
+    ) -> None:
+        """Extract ``(oid, name)`` pairs from a search category dict."""
+        for prod in cat.get("productList") or []:
+            target = prod.get("targetUrl", "")
+            name = prod.get("productName", "")
+            m = _OID_PRODUCT_RE.search(target) or _OID_LAST_RE.search(target)
+            if m:
+                results.append((m.group(1), name))
+
+    def _collect_files_for_product(
+        self,
+        oid: str,
+        cc: str,
+        lc: str,
+        entries: list[FileEntry],
+        product_name: str = "",
+    ) -> None:
+        """Fetch OS versions and driver metadata for a single product
+        and append discovered :class:`FileEntry` items to *entries*."""
+        os_list = self._fetch_os_versions(oid, cc, lc)
+        if not os_list:
+            os_list = self._detect_os_from_init(cc, lc)
+
+        for os_info in os_list:
+            try:
+                os_entries = self._fetch_driver_entries(oid, os_info, cc, lc)
+                entries.extend(os_entries)
+            except Exception as exc:
+                log.debug("[HP] Error fetching drivers for OS %s: %s",
+                          os_info.get("name", "?"), exc)
 
     # ── Session helper ───────────────────────────────────────────────
 
