@@ -36,12 +36,14 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterator
 
 import requests
+import urllib3
 
 from crawl4ai.extensions.bypass.session import build_session, random_headers
 from crawl4ai.extensions.detection import detect_all
@@ -66,7 +68,48 @@ from crawl4ai.extensions.settings import (
 
 __all__ = ["SiteDownloader"]
 
-log = logging.getLogger("crawl4ai.extensions.downloader")
+# ── Colored logging ──────────────────────────────────────────────────────
+_LOGGER_NAME = "crawl4ai.extensions.downloader"
+log = logging.getLogger(_LOGGER_NAME)
+
+
+def _setup_colored_logging(level: int = logging.INFO) -> None:
+    """Configure the module logger with coloured output via *colorlog*.
+
+    Falls back to plain ``logging`` when *colorlog* is not installed.
+
+    Side-effects (intentional for CLI / workflow usage):
+    * Suppresses verbose ``urllib3`` pool and retry log messages – the
+      downloader already logs retries and errors at its own level.
+    """
+    if log.handlers:
+        return  # already configured
+
+    try:
+        import colorlog  # noqa: WPS433
+
+        handler = colorlog.StreamHandler()
+        handler.setFormatter(colorlog.ColoredFormatter(
+            "%(log_color)s%(message)s%(reset)s",
+            log_colors={
+                "DEBUG":    "white",
+                "INFO":     "cyan",
+                "WARNING":  "yellow",
+                "ERROR":    "red",
+                "CRITICAL": "bold_red",
+            },
+        ))
+    except ImportError:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+    log.addHandler(handler)
+    log.setLevel(level)
+    log.propagate = False
+
+    # Quiet down noisy third-party loggers (urllib3 pool/retry messages)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # ── Network errors to catch ──────────────────────────────────────────────
 _NETWORK_ERRORS = (
@@ -209,6 +252,10 @@ class SiteDownloader:
         # Session
         self.session = build_session(verify_ssl=verify_ssl)
 
+        # Suppress noisy InsecureRequestWarning when TLS verification is off
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
         # Thread-safe state
         self._lock = threading.Lock()
         self._visited: set[str] = set()
@@ -223,7 +270,8 @@ class SiteDownloader:
 
     def run(self) -> dict:
         """Run the downloader.  Returns a summary dict."""
-        log.info("Starting download from %s → %s", self.start_url, self.output_dir)
+        _setup_colored_logging()
+        log.info("🔍 Starting download from %s → %s", self.start_url, self.output_dir)
         log.info("  depth=%d  concurrency=%d  delay=%.2fs",
                  self.max_depth, self.concurrency, self.delay)
         if self._target_exts:
@@ -277,7 +325,7 @@ class SiteDownloader:
             "elapsed_seconds": round(elapsed, 1),
             "output_dir": str(self.output_dir),
         }
-        log.info("Done: %d pages scanned, %d files downloaded, %d errors in %.1fs",
+        log.info("✅ Done: %d pages scanned, %d files downloaded, %d errors in %.1fs",
                  self._page_count, self._download_count, self._error_count, elapsed)
         return summary
 
@@ -336,7 +384,7 @@ class SiteDownloader:
         # Run detection
         detections = detect_all(resp.url, resp.status_code, dict(resp.headers), body)
         if detections:
-            log.info("[DETECT] %s: %s", url,
+            log.warning("🛡️  [DETECT] %s: %s", url,
                      ", ".join(d.get("type", "?") for d in detections))
 
         # Save the page HTML
@@ -402,13 +450,13 @@ class SiteDownloader:
                 new_page_links += 1
                 self._queue.append((abs_url, depth + 1))
 
-        log.info("[PAGE] %s → %d file links, %d page links",
+        log.info("📄 [PAGE] %s → %d file links, %d page links",
                  url, new_file_links, new_page_links)
         time.sleep(self.delay)
 
     def _download_file(self, url: str, content_type: str, content_length: int) -> None:
         """Download a file and save it locally."""
-        log.info("[DOWNLOAD] %s (%s, ~%s)",
+        log.info("⬇️  [DOWNLOAD] %s (%s, ~%s)",
                  url, content_type or "?",
                  self._human_size(content_length) if content_length else "?")
 
@@ -418,7 +466,7 @@ class SiteDownloader:
                 stream=True,
             )
         except _NETWORK_ERRORS as exc:
-            log.warning("[DOWNLOAD] Failed: %s – %s", url, exc)
+            log.warning("❌ [DOWNLOAD] Failed: %s – %s", url, exc)
             with self._lock:
                 self._error_count += 1
             return
@@ -464,7 +512,7 @@ class SiteDownloader:
             self._download_count += 1
             self._downloaded_files.append(local_path)
 
-        log.info("[SAVED] %s → %s (%s)",
+        log.info("💾 [SAVED] %s → %s (%s)",
                  url, local_path.relative_to(self.output_dir),
                  self._human_size(total))
 
@@ -601,15 +649,15 @@ class SiteDownloader:
                 ["git", "-c", "lfs.locksverify=false", "push"],
                 cwd=cwd, check=True, capture_output=True, timeout=300,
             )
-            log.info("[GIT] Pushed: %s", message)
+            log.info("📤 [GIT] Pushed: %s", message)
         except subprocess.CalledProcessError as exc:
             msg = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
-            log.warning("[GIT] Push failed: %s", msg)
+            log.warning("⚠️  [GIT] Push failed: %s", msg)
         except FileNotFoundError:
-            log.warning("[GIT] git not found – disabling push")
+            log.warning("⚠️  [GIT] git not found – disabling push")
             self.git_push_every = 0
         except Exception as exc:
-            log.warning("[GIT] Error: %s", exc)
+            log.warning("⚠️  [GIT] Error: %s", exc)
 
     @staticmethod
     def _git_lfs_track_large_files(cwd: str) -> None:
@@ -665,7 +713,7 @@ class SiteDownloader:
                     except Exception:
                         fh.write(f"| {i} | `{fp.name}` | ? |\n")
 
-        log.info("Summary written → %s", summary_path)
+        log.info("📊 Summary written → %s", summary_path)
 
     # ── Helpers ──────────────────────────────────────────────────────
 

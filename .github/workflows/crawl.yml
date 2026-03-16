@@ -250,9 +250,6 @@ jobs:
           [ "${{ inputs.allow_external_urls }}" = "false" ] && ALLOW_EXT="False"
 
           python3 -c "
-          import logging, sys
-          logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stdout)
-
           from crawl4ai.extensions.downloader import SiteDownloader
 
           exts = '${{ inputs.download_extensions }}'.split(',')

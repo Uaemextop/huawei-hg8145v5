@@ -105,8 +105,9 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     )
     adapter = HTTPAdapter(
         max_retries=retry,
-        pool_connections=20,
-        pool_maxsize=20,
+        pool_connections=50,
+        pool_maxsize=50,
+        pool_block=True,
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
