@@ -81,7 +81,12 @@ def _client_hints_for_ua(ua: str) -> dict[str, str]:
 
 def build_session(verify_ssl: bool = True) -> requests.Session:
     """Return a ``requests.Session`` with retry logic, keep-alive,
-    randomised User-Agent, cache-busting headers, and Client Hints."""
+    randomised User-Agent, cache-busting headers, and Client Hints.
+
+    Prefers Chrome-based UAs because Akamai/Imperva bot detection
+    requires ``sec-ch-ua`` Client Hints headers (only sent by
+    Chromium-based browsers).
+    """
     session = requests.Session()
     retry = Retry(
         total=MAX_RETRIES,
@@ -98,7 +103,10 @@ def build_session(verify_ssl: bool = True) -> requests.Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.verify = verify_ssl
-    ua = random.choice(USER_AGENTS)
+    # Prefer Chrome/Edge UAs (they generate sec-ch-ua Client Hints).
+    # Firefox/Safari don't send Client Hints and get blocked by Akamai.
+    chrome_uas = [ua for ua in USER_AGENTS if "Chrome/" in ua]
+    ua = random.choice(chrome_uas or USER_AGENTS)
     headers = {
         "User-Agent": ua,
         "Accept": (
@@ -139,8 +147,12 @@ def build_cf_session(verify_ssl: bool = True) -> "_cf_requests.Session | None":
 def random_headers(base_url: str = "") -> dict[str, str]:
     """Return a set of randomised browser headers for retry / bypass
     attempts.  Includes cache-busting, Referer spoofing, and Client
-    Hints headers (required by Akamai/Imperva bot detection)."""
-    ua = random.choice(USER_AGENTS)
+    Hints headers (required by Akamai/Imperva bot detection).
+
+    Prefers Chrome-based UAs to guarantee ``sec-ch-ua`` headers.
+    """
+    chrome_uas = [ua for ua in USER_AGENTS if "Chrome/" in ua]
+    ua = random.choice(chrome_uas or USER_AGENTS)
     headers: dict[str, str] = {
         "User-Agent": ua,
         "Accept": (

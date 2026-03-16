@@ -265,6 +265,10 @@ class Crawler:
         # time on robots.txt and soft-404 probing.
         self._check_cf_managed_challenge()
 
+        # Detect Akamai Bot Manager and try bypass via curl_cffi / Playwright.
+        # Must run before robots.txt and soft-404 probing.
+        self._check_akamai_protection()
+
         # Load robots.txt (uses our session with the captcha cookie)
         if self._respect_robots:
             self._load_robots()
@@ -806,6 +810,104 @@ class Crawler:
             pass
         log.warning("[CF] Cookies did not bypass the challenge")
         return False
+
+    # ------------------------------------------------------------------
+    # Akamai Bot Manager detection & bypass
+    # ------------------------------------------------------------------
+
+    def _check_akamai_protection(self) -> None:
+        """Detect Akamai Bot Manager and auto-bypass via curl_cffi or
+        Playwright.
+
+        Akamai-protected sites (``server: AkamaiGHost``) run a JavaScript
+        challenge on first visit that sets ``ak_bmsc`` / ``bm_sv`` cookies.
+        Without those cookies, API endpoints (e.g. ``/wcc-services/``)
+        return 403.
+
+        Strategy:
+        1. Detect Akamai via response headers (``server``, ``akamai-grn``).
+        2. Disable hidden-file probing (Akamai returns 200 for everything,
+           making probes useless — the main source of wasted requests).
+        3. Try ``curl_cffi`` TLS impersonation to get real cookies.
+        4. Fallback to Playwright headless browser for JS challenge.
+        """
+        try:
+            resp = self.session.get(
+                self.start_url, timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+        except _NETWORK_ERRORS:
+            return
+
+        server = resp.headers.get("server", "").lower()
+        has_akamai = (
+            "akamaighost" in server
+            or resp.headers.get("akamai-grn", "")
+            or resp.headers.get("x-akamai-transformed", "")
+        )
+        if not has_akamai:
+            log.info("No Akamai protection detected")
+            return
+
+        log.info("[AKAMAI] Akamai Bot Manager detected (server: %s)",
+                 resp.headers.get("server", "?"))
+        # Akamai returns 200 with SPA shell for ALL non-existent URLs,
+        # making hidden-file probing completely useless (every probe
+        # appears to "succeed" but is just the SPA shell).
+        self._probing_disabled = True
+        log.info("[AKAMAI] Hidden-file probing DISABLED (Akamai returns 200 for all)")
+
+        # Try curl_cffi first – much faster than Playwright
+        cf_session = build_cf_session(verify_ssl=self.session.verify)
+        if cf_session is not None:
+            for cookie in self.session.cookies:
+                cf_session.cookies.set(
+                    cookie.name, cookie.value,
+                    domain=cookie.domain, path=cookie.path,
+                )
+            try:
+                check = cf_session.get(
+                    self.start_url, timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if check.ok:
+                    # Check if we got the real Akamai sensor cookies
+                    cookie_names = [c.name for c in cf_session.cookies]
+                    has_ak_cookies = any(
+                        n.startswith(("ak_bmsc", "bm_sv", "bm_sz"))
+                        for n in cookie_names
+                    )
+                    if has_ak_cookies:
+                        self.session = cf_session
+                        self._cf_bypass_done = True
+                        log.info("[AKAMAI] curl_cffi bypass OK – %d cookies (%s)",
+                                 len(cookie_names),
+                                 ", ".join(n for n in cookie_names if n.startswith(("ak_", "bm_"))))
+                        return
+                    log.debug("[AKAMAI] curl_cffi got 200 but no ak_bmsc cookies")
+            except Exception as exc:
+                log.debug("[AKAMAI] curl_cffi failed: %s", exc)
+
+        # Fallback: Playwright headless browser
+        log.info("[AKAMAI] Trying Playwright headless browser …")
+        result = solve_cf_challenge(self.start_url)
+        if result:
+            cookies, browser_ua = result
+            parsed = urllib.parse.urlparse(self.start_url)
+            for name, value in cookies.items():
+                self.session.cookies.set(
+                    name, value,
+                    domain=parsed.netloc, path="/",
+                )
+            self.session.headers["User-Agent"] = browser_ua
+            log.info("[AKAMAI] Playwright bypass OK – %d cookies injected",
+                     len(cookies))
+            self._cf_bypass_done = True
+        else:
+            log.warning(
+                "[AKAMAI] Auto-bypass failed. The crawler will still work "
+                "for static assets but API endpoints may return 403."
+            )
 
     # ------------------------------------------------------------------
     # Soft-404 detection
