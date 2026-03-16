@@ -55,7 +55,6 @@ from crawl4ai.extensions.storage import (
     save_file,
     stream_to_file,
     smart_local_path,
-    content_hash,
 )
 from crawl4ai.extensions.settings import (
     REQUEST_TIMEOUT,
@@ -254,14 +253,12 @@ class SiteDownloader:
                     break
 
                 # Wait for at least one to complete
-                done, _ = as_completed(futures), None
-                for fut in list(done):
+                for fut in as_completed(futures):
                     try:
-                        fut.result(timeout=0.1)
+                        fut.result()
                     except Exception:
                         pass
-                    if fut in futures:
-                        del futures[fut]
+                    del futures[fut]
                     break  # Process one and loop to submit more
 
         elapsed = time.time() - t0
@@ -435,31 +432,33 @@ class SiteDownloader:
         ct = resp.headers.get("Content-Type", content_type or "application/octet-stream")
         cd = resp.headers.get("Content-Disposition", "")
         local_path = smart_local_path(resp.url, self.output_dir, ct, cd)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Deduplicate by content hash (first chunk)
-        first_chunk = None
-        chunks: list[bytes] = []
-        for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK):
-            if chunk:
-                chunks.append(chunk)
-                if first_chunk is None:
-                    first_chunk = chunk
-
-        if not chunks:
+        # Stream to disk while computing content hash for dedup
+        hasher = hashlib.sha256()
+        total = 0
+        try:
+            with local_path.open("wb") as fh:
+                for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK):
+                    if chunk:
+                        fh.write(chunk)
+                        hasher.update(chunk)
+                        total += len(chunk)
+        finally:
             resp.close()
+
+        if total == 0:
+            # Empty file – remove it
+            local_path.unlink(missing_ok=True)
             return
 
-        full_data = b"".join(chunks)
-        h = content_hash(full_data)
+        h = hasher.hexdigest()[:16]
         with self._lock:
             if h in self._seen_hashes:
-                log.debug("[DOWNLOAD] Duplicate content – skipping %s", url)
+                log.debug("[DOWNLOAD] Duplicate content – removing %s", url)
+                local_path.unlink(missing_ok=True)
                 return
             self._seen_hashes.add(h)
-
-        # Save
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        save_file(local_path, full_data)
 
         with self._lock:
             self._download_count += 1
@@ -467,7 +466,7 @@ class SiteDownloader:
 
         log.info("[SAVED] %s → %s (%s)",
                  url, local_path.relative_to(self.output_dir),
-                 self._human_size(len(full_data)))
+                 self._human_size(total))
 
         # Periodic git push
         if self.git_repo_dir and self.git_push_every > 0:
