@@ -7,11 +7,6 @@ on:
         description: "URL to crawl (e.g. https://rsddownload-secure.lenovo.com)"
         required: true
         type: string
-      download_only:
-        description: "Only enumerate and record download URLs (skip full crawl)"
-        required: false
-        default: true
-        type: boolean
       depth:
         description: "Maximum crawl depth (0 = unlimited)"
         required: false
@@ -27,51 +22,21 @@ on:
         required: false
         default: "auto"
         type: string
-      no_robots:
-        description: "Ignore robots.txt restrictions"
+      download_extensions:
+        description: "Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk or 'all' to download every discovered file)."
         required: false
-        default: true
-        type: boolean
+        default: "zip,exe,rar,bin,7z,apk,jar,msi,img,iso,deb,rpm"
+        type: string
       no_verify_ssl:
         description: "Disable TLS certificate verification"
         required: false
         default: true
         type: boolean
-      force:
-        description: "Re-download files even if they already exist on disk"
-        required: false
-        default: true
-        type: boolean
-      download_extensions:
-        description: "Extensions to actively seek and queue (comma-separated: zip,exe,rar,bin,7z,apk or 'all' to download every discovered file."
-        required: false
-        default: "zip,exe,rar,bin,7z,apk,jar,msi,img,iso,deb,rpm"
-        type: string
-      skip_download_exts:
-        description: "Extensions to SKIP downloading (comma-separated: zip,exe,rar) or 'all' for every binary. Matching files are NOT saved to disk — instead a ready-to-run curl/wget command (with all auth headers) is recorded in download_links.txt. Leave empty to download everything normally."
-        required: false
-        default: ""
-        type: string
-      skip_media_files:
-        description: "Skip downloading video/audio files but record their URLs in video_urls.txt"
-        required: false
-        default: false
-        type: boolean
-      skip_captcha:
-        description: "Disable WAF/CAPTCHA detection – save pages even if captcha signatures found"
-        required: false
-        default: false
-        type: boolean
       allow_external_urls:
-        description: "Download media files from external CDN hosts discovered in crawled pages"
+        description: "Download files from external CDN hosts discovered in crawled pages"
         required: false
         default: true
         type: boolean
-      cf_clearance:
-        description: "Cloudflare cf_clearance cookie from a browser session. Use to bypass Cloudflare Managed Challenges."
-        required: false
-        default: ""
-        type: string
       create_repo:
         description: "Create a new GitHub repository and push crawled files there live"
         required: false
@@ -82,31 +47,26 @@ on:
         required: false
         default: "Uaemextop"
         type: string
+      private_repo:
+        description: "Create the crawl repository as private"
+        required: false
+        default: false
+        type: boolean
       git_push_every:
         description: "Push every N saved files to the live repo (0 = only push at end)"
         required: false
         default: "100"
         type: string
       upload_extensions:
-        description: "Extensions to include in git pushes (comma-separated: zip,bin,rar) or 'all' to upload every file.  Use this to avoid pushing huge binaries."
+        description: "Extensions to include in git pushes (comma-separated: zip,bin,rar) or 'all' to upload every file."
         required: false
         default: "all"
         type: string
-      private_repo:
-        description: "Create the crawl repository as private"
-        required: false
-        default: false
-        type: boolean
       debug:
         description: "Verbose logging + save HTTP response headers (.headers files) to repo"
         required: false
         default: false
         type: boolean
-      log_file:
-        description: "Write detailed DEBUG logs to this filename (e.g. crawl.log, saved in output dir)"
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: write
@@ -247,10 +207,10 @@ jobs:
           | Depth | ${{ inputs.depth }} |
           | Delay | ${{ inputs.delay }}s |
           | Download extensions | ${{ inputs.download_extensions }} |
-          | Skip download extensions | ${{ inputs.skip_download_exts || '(none – download all)' }} |
           | Upload extensions | ${{ inputs.upload_extensions }} |
           | Concurrency | ${{ inputs.concurrency }} workers |
-          | Skip media files | ${{ inputs.skip_media_files }} |
+          | Git push every | ${{ inputs.git_push_every }} files |
+          | Debug | ${{ inputs.debug }} |
           | Run | #${{ github.run_number }} |
           | Status | 🔄 Crawling in progress… |
           EOF
@@ -431,21 +391,18 @@ jobs:
             | **URL** | ${{ inputs.url }} |
             | **Depth** | ${{ inputs.depth }} |
             | **Delay** | ${{ inputs.delay }}s |
-            | **robots.txt ignored** | ${{ inputs.no_robots }} |
             | **SSL verification disabled** | ${{ inputs.no_verify_ssl }} |
-            | **Force re-download** | ${{ inputs.force }} |
             | **Download extensions** | ${{ inputs.download_extensions }} |
-            | **Skip download extensions** | ${{ inputs.skip_download_exts || '(none – download all)' }} |
             | **Upload extensions** | ${{ inputs.upload_extensions }} |
             | **Concurrency** | ${{ inputs.concurrency }} workers |
-            | **Skip media files** | ${{ inputs.skip_media_files }} |
-            | **Skip CAPTCHA check** | ${{ inputs.skip_captcha }} |
+            | **Allow external URLs** | ${{ inputs.allow_external_urls }} |
+            | **Git push every** | ${{ inputs.git_push_every }} files |
             | **Debug mode** | ${{ inputs.debug }} |
             | **Run** | #${{ github.run_number }} |
             ${{ steps.create_repo.outputs.repo_ready == 'true' && format('| **Live repo** | https://github.com/{0} |', steps.create_repo.outputs.repo_full) || '' }}
 
             ### Notes
-            - `download_links.txt` — ready-to-run `curl`/`wget` commands for skipped files (incl. auth headers)
+            - `download_summary.md` — table of all downloaded files with sizes
           files: |
             crawl-${{ steps.reponame.outputs.name }}.zip
             videos-${{ steps.reponame.outputs.name }}.zip
