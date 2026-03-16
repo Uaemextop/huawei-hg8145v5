@@ -44,7 +44,7 @@ _CF_IMPERSONATE_PROFILES = ["chrome", "safari", "safari_ios"]
 _CF_MAX_ATTEMPTS = 3
 
 
-def build_cf_session(verify_ssl: bool = True):
+def build_cf_session(verify_ssl: bool = True) -> object | None:
     """Return a ``curl_cffi`` session with Chrome TLS impersonation.
 
     This session bypasses Cloudflare Managed Challenges by
