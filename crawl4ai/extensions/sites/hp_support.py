@@ -31,7 +31,7 @@ import itertools
 import logging
 import re
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .base import BaseSiteModule, FileEntry
 
@@ -76,6 +76,13 @@ _MAX_DESCRIPTION_LENGTH = 200
 
 # Navigation API endpoint for discovering product categories dynamically.
 _NAV_URL = f"{_BASE}/wcc-services/navigation"
+
+# Keys used to traverse HP's navigation tree structures recursively.
+_NAV_CHILD_KEYS = (
+    "children", "subCategories", "subCategoryList",
+    "items", "categories", "navigationItems",
+    "menuItems", "childNodes",
+)
 
 _HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -214,7 +221,7 @@ class HPSupportModule(BaseSiteModule):
         node: dict | list,
         cc: str,
         lc: str,
-        add_fn: "callable",
+        add_fn: Callable[[str], None],
     ) -> None:
         """Recursively walk nav tree and add page URLs."""
         if isinstance(node, list):
@@ -233,9 +240,7 @@ class HPSupportModule(BaseSiteModule):
                 add_fn(val)
 
         # Recurse into child structures
-        for key in ("children", "subCategories", "subCategoryList",
-                     "items", "categories", "navigationItems",
-                     "menuItems", "childNodes"):
+        for key in _NAV_CHILD_KEYS:
             child = node.get(key)
             if child:
                 self._collect_nav_page_urls(child, cc, lc, add_fn)
@@ -253,9 +258,11 @@ class HPSupportModule(BaseSiteModule):
 
         Discovery flow:
         1. Fetch category names from ``/wcc-services/navigation`` API.
-        2. For each category, query HP's search API to find products.
-        3. Collect all unique ``(oid, name)`` pairs across all categories.
-        4. If no products found from APIs, parse the support page HTML
+        2. If that fails, extract search terms from the Angular main.js
+           bundle (product type names used in the product finder).
+        3. For each category, query HP's search API to find products.
+        4. Collect all unique ``(oid, name)`` pairs across all categories.
+        5. If no products found from APIs, parse the support page HTML
            for product links as a last resort.
         """
         seen_oids: set[str] = set()
@@ -267,6 +274,10 @@ class HPSupportModule(BaseSiteModule):
             # Fallback: fetch category keywords from the init API
             categories = self._fetch_init_categories(cc, lc)
 
+        if not categories:
+            # Fallback: extract product type names from the Angular JS
+            categories = self._extract_search_terms_from_js(cc, lc)
+
         log.info("[HP] Discovered %d categories to scan", len(categories))
 
         for query in categories:
@@ -275,8 +286,8 @@ class HPSupportModule(BaseSiteModule):
                 if oid not in seen_oids:
                     seen_oids.add(oid)
                     products.append((oid, name))
-            log.debug("[HP] Query '%s' → %d products (total %d)",
-                      query, len(found), len(products))
+            log.info("[HP] Query '%s' → %d new products (total %d)",
+                     query, len(found), len(products))
 
         # Last resort: parse the support page HTML for product links
         if not products:
@@ -338,9 +349,7 @@ class HPSupportModule(BaseSiteModule):
                 out.append(val)
 
         # Recurse into child structures
-        for key in ("children", "subCategories", "subCategoryList",
-                     "items", "categories", "navigationItems",
-                     "menuItems", "childNodes"):
+        for key in _NAV_CHILD_KEYS:
             child = node.get(key)
             if child:
                 self._walk_nav_tree(child, out)
@@ -401,6 +410,87 @@ class HPSupportModule(BaseSiteModule):
         except Exception as exc:
             log.info("[HP] /s/init category extraction failed: %s", exc)
         return categories
+
+    def _extract_search_terms_from_js(
+        self, cc: str, lc: str,
+    ) -> list[str]:
+        """Extract product type search terms from the Angular main.js bundle.
+
+        Downloads the support page HTML to find the main.js URL, then
+        downloads and scans the JS bundle for product-type names
+        (Laptop, Printer, Desktop, etc.) that HP uses in its product
+        finder.
+
+        This is a dynamic fallback: the terms come from the live JS
+        bundle, not from a static list.
+        """
+        sess = self._get_session()
+        terms: list[str] = []
+        try:
+            # 1. Fetch the main page to discover the main.js bundle URL
+            resp = sess.get(
+                f"{_BASE}/{cc}-{lc}/",
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+            if not resp.ok:
+                log.info("[HP] Could not fetch support page for JS analysis")
+                return terms
+
+            # Find main.*.js script tag
+            main_js_match = re.search(
+                r'src="(/wcc-assets/main\.[a-f0-9]+\.js)"', resp.text,
+            )
+            if not main_js_match:
+                log.info("[HP] Could not find main.js bundle in page HTML")
+                return terms
+
+            main_js_url = f"{_BASE}{main_js_match.group(1)}"
+            log.info("[HP] Downloading Angular bundle: %s", main_js_url)
+
+            # 2. Fetch main.js with proper headers
+            js_resp = sess.get(
+                main_js_url,
+                headers={
+                    **_HEADERS,
+                    "Accept": "*/*",
+                    "Referer": f"{_BASE}/{cc}-{lc}/",
+                },
+                timeout=60,
+            )
+            if not js_resp.ok:
+                log.info("[HP] main.js download failed: HTTP %d", js_resp.status_code)
+                return terms
+
+            js_text = js_resp.text
+
+            # 3. Extract product type names from the JS bundle.
+            #    The Angular app references product types like Laptop,
+            #    Printer, Desktop, Monitor, etc. in its code.  We search
+            #    for these case-insensitively and normalise to singular
+            #    lowercase form for use as search queries.
+            _PRODUCT_TYPE_RE = re.compile(
+                r'(?:Laptop|Printer|Desktop|Monitor|Scanner|Server|'
+                r'Tablet|Workstation|Chromebook|All.in.One|'
+                r'Notebook|Plotter|Projector|Docking Station|'
+                r'Thin Client|Point of Sale)s?',
+                re.I,
+            )
+            seen: set[str] = set()
+            for m in _PRODUCT_TYPE_RE.finditer(js_text):
+                raw = m.group(0)
+                # Normalise: lowercase, strip trailing 's'
+                normalised = raw.lower().rstrip("s")
+                if normalised not in seen:
+                    seen.add(normalised)
+                    terms.append(normalised)
+
+            log.info("[HP] Extracted %d product-type search terms from JS",
+                     len(terms))
+        except Exception as exc:
+            log.info("[HP] JS bundle analysis failed: %s", exc)
+        return terms
 
     def _search_products(
         self, query: str, cc: str, lc: str,
