@@ -256,7 +256,7 @@ class SiteDownloader:
         allow_external: bool = True,
         git_repo_dir: str | Path | None = None,
         git_push_every: int = 0,
-        future_timeout: float = 60,
+        future_timeout: float = 300,
     ) -> None:
         parsed = urllib.parse.urlparse(url)
         if not parsed.scheme or not parsed.netloc:
@@ -352,6 +352,24 @@ class SiteDownloader:
             except Exception as exc:
                 log.warning("⚠️  %s error: %s", _c(mod.name, "yellow"), exc)
 
+            # Add extra page URLs discovered by the site module
+            try:
+                extra_pages = mod.page_urls(self.start_url)
+                if extra_pages:
+                    added = 0
+                    for page_url in extra_pages:
+                        key = self._url_key(page_url)
+                        with self._lock:
+                            if key not in self._visited:
+                                self._queue.append((page_url, 0))
+                                added += 1
+                    if added:
+                        log.info("🔌 %s: added %s page URLs to crawl queue",
+                                 _c(mod.name, "magenta"),
+                                 _c(added, "green"))
+            except Exception as exc:
+                log.debug("🔌 %s page_urls error: %s", mod.name, exc)
+
         t0 = time.time()
 
         # Maximum time to wait for any single future before cycling (seconds).
@@ -391,15 +409,15 @@ class SiteDownloader:
                 except TimeoutError:
                     pass
 
-                # If we timed out (no future completed), cancel the oldest
-                # stalled futures to avoid getting stuck forever.
-                if not done:
-                    stalled = list(futures.keys())[:self.concurrency]
-                    for sf in stalled:
-                        sf.cancel()
-                        url_info = futures.pop(sf, ("?", 0))
-                        log.warning("⚠️  Cancelled stalled request: %s",
-                                    _c(url_info[0] if isinstance(url_info, tuple) else url_info, "yellow"))
+                # If we timed out (no future completed), just continue —
+                # slow requests are not cancelled; they keep running.
+                # The loop will cycle back to check for completions and
+                # submit new work.  This avoids killing legitimate slow
+                # pages (e.g. HP support document pages).
+                if not done and futures:
+                    log.debug("⏳ %d requests still running (none completed "
+                              "in %ds) — continuing …",
+                              len(futures), _FUTURE_TIMEOUT)
 
         elapsed = time.time() - t0
 

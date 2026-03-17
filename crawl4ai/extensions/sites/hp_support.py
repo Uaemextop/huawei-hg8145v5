@@ -167,6 +167,79 @@ class HPSupportModule(BaseSiteModule):
         log.info("[HP] Discovered %d unique files total", len(unique))
         return unique
 
+    def page_urls(self, url: str) -> list[str]:
+        """Discover HP support page URLs for deeper crawling.
+
+        Parses the support page HTML and HP's navigation API to find
+        product pages, category pages, and document pages that the
+        regular HTML link extractor cannot see (because support.hp.com
+        is an Angular SPA).
+        """
+        cc, lc = self._extract_locale(url)
+        pages: list[str] = []
+        seen: set[str] = set()
+
+        def _add(u: str) -> None:
+            if u and u not in seen:
+                seen.add(u)
+                pages.append(u)
+
+        # 1. Discover product pages from the HTML
+        for oid, name in self._discover_products_from_html(cc, lc):
+            _add(f"{_BASE}/{cc}-{lc}/drivers/{oid}")
+
+        # 2. Add category page links from the navigation API
+        sess = self._get_session()
+        try:
+            resp = sess.get(
+                _NAV_URL,
+                params={"cc": cc, "lc": lc},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if resp.ok:
+                data = resp.json()
+                self._collect_nav_page_urls(
+                    data.get("data", data), cc, lc, _add,
+                )
+        except Exception as exc:
+            log.debug("[HP] Navigation page URL discovery failed: %s", exc)
+
+        log.info("[HP] Discovered %d additional page URLs for crawling",
+                 len(pages))
+        return pages
+
+    def _collect_nav_page_urls(
+        self,
+        node: dict | list,
+        cc: str,
+        lc: str,
+        add_fn: "callable",
+    ) -> None:
+        """Recursively walk nav tree and add page URLs."""
+        if isinstance(node, list):
+            for item in node:
+                self._collect_nav_page_urls(item, cc, lc, add_fn)
+            return
+        if not isinstance(node, dict):
+            return
+
+        # Check for URL/href/link keys
+        for key in ("url", "href", "link", "targetUrl"):
+            val = node.get(key, "")
+            if val and isinstance(val, str):
+                if not val.startswith("http"):
+                    val = _BASE + val
+                add_fn(val)
+
+        # Recurse into child structures
+        for key in ("children", "subCategories", "subCategoryList",
+                     "items", "categories", "navigationItems",
+                     "menuItems", "childNodes"):
+            child = node.get(key)
+            if child:
+                self._collect_nav_page_urls(child, cc, lc, add_fn)
+
     # ── Catalog discovery ────────────────────────────────────────────
 
     def _discover_catalog_products(

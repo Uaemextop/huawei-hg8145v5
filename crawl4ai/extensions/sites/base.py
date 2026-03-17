@@ -85,3 +85,20 @@ class BaseSiteModule(abc.ABC):
         list[FileEntry]
             One entry per discoverable file.
         """
+
+    def page_urls(self, url: str) -> list[str]:
+        """Return extra page URLs for the crawler to visit.
+
+        Site modules can override this to dynamically discover additional
+        pages (product pages, category pages, etc.) that the regular HTML
+        link extraction might miss — for example, pages rendered by a SPA
+        framework where links are in JavaScript, not in ``<a href>`` tags.
+
+        The returned URLs are added to the crawler queue at depth 0.
+
+        Returns
+        -------
+        list[str]
+            Additional page URLs to crawl.  Default is an empty list.
+        """
+        return []
