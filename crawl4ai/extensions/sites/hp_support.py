@@ -1294,8 +1294,6 @@ class HPSupportModule(BaseSiteModule):
         version = latest.get("version", "")
         size = latest.get("fileSize", "")
         release = latest.get("releaseDate", "")
-        severity = latest.get("severityFlag", "")
-        software_id = latest.get("softwareItemId", "")
 
         desc_html = (latest.get("detailInformation") or {}).get("description", "")
         # Strip HTML tags for plain-text description
@@ -1317,9 +1315,14 @@ class HPSupportModule(BaseSiteModule):
 
             # Use the human-readable title as the display name, with the
             # SoftPaq filename appended in parentheses for reference.
+            # Only append filename if it differs from the title (compare
+            # the base name without extension to avoid redundancy).
             display_name = drv_name or fname
-            if drv_name and fname and fname.lower() != drv_name.lower():
-                display_name = f"{drv_name} ({fname})"
+            if drv_name and fname:
+                fname_base = fname.rsplit(".", 1)[0].lower()
+                drv_base = drv_name.lower()
+                if fname_base != drv_base and fname_base not in drv_base:
+                    display_name = f"{drv_name} ({fname})"
 
             entries.append(FileEntry(
                 name=display_name or file_url.rsplit("/", 1)[-1],
@@ -1374,7 +1377,15 @@ class HPSupportModule(BaseSiteModule):
         )
         if file_url and file_url.startswith("http"):
             fname = file_url.rsplit("/", 1)[-1].split("?")[0]
-            display = f"{item_name} ({fname})" if item_name else fname
+            # Only append filename if it differs from the item name
+            if item_name:
+                fname_base = fname.rsplit(".", 1)[0].lower()
+                if fname_base not in item_name.lower():
+                    display = f"{item_name} ({fname})"
+                else:
+                    display = item_name
+            else:
+                display = fname
             entries.append(FileEntry(
                 name=display,
                 url=file_url,
@@ -1391,7 +1402,14 @@ class HPSupportModule(BaseSiteModule):
             fu = f.get("fileUrl", "")
             if fu and fu.startswith("http"):
                 sf_name = f.get("fileName", fu.rsplit("/", 1)[-1])
-                sf_display = f"{item_name} ({sf_name})" if item_name else sf_name
+                if item_name:
+                    sf_base = sf_name.rsplit(".", 1)[0].lower()
+                    if sf_base not in item_name.lower():
+                        sf_display = f"{item_name} ({sf_name})"
+                    else:
+                        sf_display = item_name
+                else:
+                    sf_display = sf_name
                 entries.append(FileEntry(
                     name=sf_display,
                     url=fu,
