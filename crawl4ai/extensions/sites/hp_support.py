@@ -223,10 +223,15 @@ class HPSupportModule(BaseSiteModule):
         if oid:
             # Single-product mode: fetch files for this one product
             log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
-            self._collect_files_for_product(oid, cc, lc, entries)
+            prod_name = self._extract_seo_name(url) or oid
+            prod_name = prod_name.replace("-", " ").title()
+            self._collect_files_for_product(oid, cc, lc, entries,
+                                            product_name=prod_name)
             # Also fetch manuals and security alerts for this product
-            entries.extend(self._fetch_manuals(oid, cc, lc))
-            entries.extend(self._fetch_security_alerts(oid, cc, lc))
+            entries.extend(self._fetch_manuals(oid, cc, lc,
+                                              product_name=prod_name))
+            entries.extend(self._fetch_security_alerts(oid, cc, lc,
+                                                      product_name=prod_name))
         else:
             # Catalog mode: discover products via navigation + search APIs
             log.info("[HP] No product OID — discovering catalog dynamically …")
@@ -239,8 +244,10 @@ class HPSupportModule(BaseSiteModule):
                     prod_oid, cc, lc, entries,
                     product_name=prod_name,
                 )
-                entries.extend(self._fetch_manuals(prod_oid, cc, lc))
-                entries.extend(self._fetch_security_alerts(prod_oid, cc, lc))
+                entries.extend(self._fetch_manuals(prod_oid, cc, lc,
+                                                  product_name=prod_name))
+                entries.extend(self._fetch_security_alerts(
+                    prod_oid, cc, lc, product_name=prod_name))
 
         # Collect HP diagnostics tools and HPSA framework downloads
         entries.extend(self._collect_diagnostics_tools())
@@ -720,7 +727,10 @@ class HPSupportModule(BaseSiteModule):
 
         for os_info in os_list:
             try:
-                os_entries = self._fetch_driver_entries(oid, os_info, cc, lc)
+                os_entries = self._fetch_driver_entries(
+                    oid, os_info, cc, lc,
+                    product_name=product_name,
+                )
                 entries.extend(os_entries)
             except Exception as exc:
                 log.info("[HP] Error fetching drivers for OS %s: %s",
@@ -730,6 +740,7 @@ class HPSupportModule(BaseSiteModule):
 
     def _fetch_manuals(
         self, oid: str, cc: str, lc: str,
+        product_name: str = "",
     ) -> list[FileEntry]:
         """Fetch product manuals from ``/wcc-services/pdp/manuals/getManuals``.
 
@@ -767,6 +778,8 @@ class HPSupportModule(BaseSiteModule):
                         category="Manual",
                         os="",
                         description=m.get("fileType", ""),
+                        source="pdp/manuals/getManuals",
+                        product=product_name,
                     ))
             if entries:
                 log.info("[HP] Found %d manuals for OID=%s", len(entries), oid)
@@ -778,6 +791,7 @@ class HPSupportModule(BaseSiteModule):
 
     def _fetch_security_alerts(
         self, oid: str, cc: str, lc: str,
+        product_name: str = "",
     ) -> list[FileEntry]:
         """Fetch security advisories from
         ``/wcc-services/pdp/securityalerts/{locale}/{oid}``.
@@ -817,6 +831,8 @@ class HPSupportModule(BaseSiteModule):
                         category="Security Advisory",
                         os="",
                         description=f"Severity: {a.get('severity', 'N/A')}",
+                        source="pdp/securityalerts",
+                        product=product_name,
                     ))
             if entries:
                 log.info("[HP] Found %d security alerts for OID=%s",
@@ -841,7 +857,7 @@ class HPSupportModule(BaseSiteModule):
         entries: list[FileEntry] = []
         seen_urls: set[str] = set()
 
-        def _add(url: str, name: str, cat: str) -> None:
+        def _add(url: str, name: str, cat: str, src: str = "") -> None:
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 entries.append(FileEntry(
@@ -853,6 +869,8 @@ class HPSupportModule(BaseSiteModule):
                     category=cat,
                     os="",
                     description="HP Support diagnostics tool",
+                    source=src,
+                    product="",
                 ))
 
         # 1. Parse SUDF scripts for download URLs
@@ -869,6 +887,7 @@ class HPSupportModule(BaseSiteModule):
                         f"{_SUDF_RESOURCES}/DMDScripts/{script_name}",
                         script_name,
                         "Diagnostics Script",
+                        "sudf-resources.hpcloud.hp.com",
                     )
                     # Extract ftp.hp.com download URLs from the script.
                     # Only accept URLs under the known /pub/softlib/ path.
@@ -876,7 +895,8 @@ class HPSupportModule(BaseSiteModule):
                         r'https://ftp\.hp\.com/pub/softlib/[^\s"\'<>]+\.exe',
                         resp.text,
                     ):
-                        _add(m.group(0), "", "Diagnostics Tool")
+                        _add(m.group(0), "", "Diagnostics Tool",
+                             "ftp.hp.com (from SUDF script)")
             except Exception as exc:
                 log.debug("[HP] SUDF script %s fetch failed: %s",
                           script_name, exc)
@@ -898,6 +918,8 @@ class HPSupportModule(BaseSiteModule):
                             category="Diagnostics Tool",
                             os="",
                             description="HP Support Solutions Framework",
+                            source="ftp.hp.com",
+                            product="",
                         ))
                         seen_urls.add(url)
                 except Exception:
@@ -946,6 +968,8 @@ class HPSupportModule(BaseSiteModule):
                         category="Staging/QA Endpoint",
                         os="",
                         description=f"HTTP {resp.status_code} — {resp.headers.get('server', 'unknown')}",
+                        source="main.js bundle (staging probe)",
+                        product="",
                     ))
                     log.info("[HP] Staging host accessible: %s (HTTP %d)",
                              host, resp.status_code)
@@ -976,6 +1000,8 @@ class HPSupportModule(BaseSiteModule):
                     category="API Endpoint",
                     os="",
                     description=f"HTTP {resp.status_code} — {resp.headers.get('server', 'unknown')}",
+                    source="main.js bundle (API probe)",
+                    product="",
                 ))
                 log.info("[HP] Methone endpoint reachable: %s (HTTP %d)",
                          methone_url, resp.status_code)
@@ -1181,12 +1207,14 @@ class HPSupportModule(BaseSiteModule):
         os_info: dict,
         cc: str,
         lc: str,
+        product_name: str = "",
     ) -> list[FileEntry]:
         """POST to ``/wcc-services/swd-v2/driverDetails`` and extract
         file metadata from the response.
 
         Returns a list of :class:`FileEntry` dicts with name, size,
-        version, release date, category, OS, description, and URL.
+        version, release date, category, OS, description, source,
+        product, and URL.
         """
         sess = self._get_session()
         payload = {
@@ -1224,15 +1252,18 @@ class HPSupportModule(BaseSiteModule):
                 for drv in sw_type.get("softwareDriversList", []):
                     self._collect_entries_from_driver(
                         drv, category, os_name, entries,
+                        product_name=product_name,
                     )
                 # Fallback structure: softwareList[]
                 for item in sw_type.get("softwareList", []):
                     self._collect_entries_from_item(
                         item, category, os_name, entries,
+                        product_name=product_name,
                     )
                     for sub in item.get("subCategory", {}).get("softwareList", []):
                         self._collect_entries_from_item(
                             sub, category, os_name, entries,
+                            product_name=product_name,
                         )
         except Exception as exc:
             log.info("[HP] driverDetails call failed for OID=%s: %s", oid, exc)
@@ -1245,13 +1276,27 @@ class HPSupportModule(BaseSiteModule):
         category: str,
         os_name: str,
         entries: list[FileEntry],
+        product_name: str = "",
     ) -> None:
         """Extract file entries from a ``softwareDriversList`` item."""
         latest = driver.get("latestVersionDriver") or {}
-        drv_name = latest.get("name", driver.get("name", ""))
+
+        # The real driver name is in ``title``, NOT ``name`` (which is
+        # typically "N/A" in HP's API).  Fallback chain:
+        #   title → name (if not "N/A") → detailInformation.fileName → URL
+        drv_title = latest.get("title", "").strip()
+        drv_name_raw = latest.get("name", "").strip()
+        drv_name = drv_title or (
+            drv_name_raw if drv_name_raw and drv_name_raw.upper() != "N/A"
+            else driver.get("name", "")
+        )
+
         version = latest.get("version", "")
         size = latest.get("fileSize", "")
         release = latest.get("releaseDate", "")
+        severity = latest.get("severityFlag", "")
+        software_id = latest.get("softwareItemId", "")
+
         desc_html = (latest.get("detailInformation") or {}).get("description", "")
         # Strip HTML tags for plain-text description
         description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:_MAX_DESCRIPTION_LENGTH]
@@ -1264,11 +1309,20 @@ class HPSupportModule(BaseSiteModule):
                 fname = sub_files[0].get("fileName", "")
                 fsize = sub_files[0].get("fileSize", size)
             else:
-                fname = file_url.rsplit("/", 1)[-1].split("?")[0]
+                detail_info = latest.get("detailInformation") or {}
+                fname = detail_info.get("fileName", "")
+                if not fname:
+                    fname = file_url.rsplit("/", 1)[-1].split("?")[0]
                 fsize = size
 
+            # Use the human-readable title as the display name, with the
+            # SoftPaq filename appended in parentheses for reference.
+            display_name = drv_name or fname
+            if drv_name and fname and fname.lower() != drv_name.lower():
+                display_name = f"{drv_name} ({fname})"
+
             entries.append(FileEntry(
-                name=fname or drv_name or file_url.rsplit("/", 1)[-1],
+                name=display_name or file_url.rsplit("/", 1)[-1],
                 url=file_url,
                 size=str(fsize) if fsize else "",
                 version=str(version) if version else "",
@@ -1276,14 +1330,18 @@ class HPSupportModule(BaseSiteModule):
                 category=category,
                 os=os_name,
                 description=description,
+                source="swd-v2/driverDetails",
+                product=product_name,
             ))
 
             # Additional sub-files with different URLs
             for sf in itertools.islice(sub_files, 1, None):
                 sf_url = sf.get("fileUrl", "")
                 if sf_url and sf_url.startswith("http") and sf_url != file_url:
+                    sf_name = sf.get("fileName", sf_url.rsplit("/", 1)[-1])
+                    sf_display = f"{drv_name} ({sf_name})" if drv_name else sf_name
                     entries.append(FileEntry(
-                        name=sf.get("fileName", sf_url.rsplit("/", 1)[-1]),
+                        name=sf_display,
                         url=sf_url,
                         size=str(sf.get("fileSize", "")) if sf.get("fileSize") else "",
                         version=str(version) if version else "",
@@ -1291,6 +1349,8 @@ class HPSupportModule(BaseSiteModule):
                         category=category,
                         os=os_name,
                         description=description,
+                        source="swd-v2/driverDetails",
+                        product=product_name,
                     ))
 
     @staticmethod
@@ -1299,12 +1359,24 @@ class HPSupportModule(BaseSiteModule):
         category: str,
         os_name: str,
         entries: list[FileEntry],
+        product_name: str = "",
     ) -> None:
         """Extract file entries from a generic software item dict."""
         file_url = item.get("fileUrl", "")
+        # Prefer ``title`` over ``name`` — HP's API uses ``title`` for
+        # human-readable names (e.g., "Intel RSTO Driver") while ``name``
+        # is often "N/A" or the raw SoftPaq filename.
+        item_title = item.get("title", "").strip()
+        item_name_raw = item.get("name", "").strip()
+        item_name = item_title or (
+            item_name_raw if item_name_raw and item_name_raw.upper() != "N/A"
+            else ""
+        )
         if file_url and file_url.startswith("http"):
+            fname = file_url.rsplit("/", 1)[-1].split("?")[0]
+            display = f"{item_name} ({fname})" if item_name else fname
             entries.append(FileEntry(
-                name=item.get("name", file_url.rsplit("/", 1)[-1]),
+                name=display,
                 url=file_url,
                 size=str(item.get("fileSize", "")) if item.get("fileSize") else "",
                 version=str(item.get("version", "")) if item.get("version") else "",
@@ -1312,12 +1384,16 @@ class HPSupportModule(BaseSiteModule):
                 category=category,
                 os=os_name,
                 description="",
+                source="swd-v2/driverDetails",
+                product=product_name,
             ))
         for f in item.get("productSoftwareFileList", []):
             fu = f.get("fileUrl", "")
             if fu and fu.startswith("http"):
+                sf_name = f.get("fileName", fu.rsplit("/", 1)[-1])
+                sf_display = f"{item_name} ({sf_name})" if item_name else sf_name
                 entries.append(FileEntry(
-                    name=f.get("fileName", fu.rsplit("/", 1)[-1]),
+                    name=sf_display,
                     url=fu,
                     size=str(f.get("fileSize", "")) if f.get("fileSize") else "",
                     version="",
@@ -1325,4 +1401,6 @@ class HPSupportModule(BaseSiteModule):
                     category=category,
                     os=os_name,
                     description="",
+                    source="swd-v2/driverDetails",
+                    product=product_name,
                 ))

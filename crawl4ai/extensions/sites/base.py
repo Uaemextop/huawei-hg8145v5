@@ -39,6 +39,8 @@ class FileEntry(TypedDict, total=False):
     category: str
     os: str
     description: str
+    source: str       # Which API/endpoint discovered this file
+    product: str      # Which product this file belongs to
 
 
 class BaseSiteModule(abc.ABC):

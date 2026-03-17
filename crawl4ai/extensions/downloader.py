@@ -843,9 +843,9 @@ class SiteDownloader:
             fh.write(f"Generated from: `{self.start_url}`\n\n")
             fh.write(f"**{len(entries)} files discovered**\n\n")
             fh.write("| # | Name | Version | Size | Release Date "
-                     "| Category | OS | Download URL |\n")
+                     "| Category | OS | Source | Product | Download URL |\n")
             fh.write("|---|------|---------|------|-------------- "
-                     "|----------|----|--------------|\n")
+                     "|----------|----|---------|---------|--------------|\n")
             for i, entry in enumerate(entries, 1):
                 name = entry.get("name", "").replace("|", "\\|")
                 version = entry.get("version", "")
@@ -853,10 +853,13 @@ class SiteDownloader:
                 release = entry.get("release_date", "")
                 category = entry.get("category", "").replace("|", "\\|")
                 os_name = entry.get("os", "")
+                source = entry.get("source", "").replace("|", "\\|")
+                product = entry.get("product", "").replace("|", "\\|")
                 url = entry.get("url", "")
                 fh.write(
                     f"| {i} | {name} | {version} | {size} | {release} "
-                    f"| {category} | {os_name} | {url} |\n"
+                    f"| {category} | {os_name} | {source} | {product} "
+                    f"| {url} |\n"
                 )
 
             # Optional: description section for entries that have one
