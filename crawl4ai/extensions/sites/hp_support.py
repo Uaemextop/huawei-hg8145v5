@@ -63,6 +63,15 @@ _HTML_PRODUCT_LINK_RE = re.compile(
     r'href=["\']([^"\']*?/(?:product|model|drivers)/[^"\']*?)["\']',
     re.I,
 )
+
+# Product type names to search for in the Angular JS bundle.
+_PRODUCT_TYPE_RE = re.compile(
+    r'(?:Laptop|Printer|Desktop|Monitor|Scanner|Server|'
+    r'Tablet|Workstation|Chromebook|All.in.One|'
+    r'Notebook|Plotter|Projector|Docking Station|'
+    r'Thin Client|Point of Sale)s?',
+    re.I,
+)
 # ── API endpoints ────────────────────────────────────────────────────────
 
 _BASE = "https://support.hp.com"
@@ -286,8 +295,8 @@ class HPSupportModule(BaseSiteModule):
                 if oid not in seen_oids:
                     seen_oids.add(oid)
                     products.append((oid, name))
-            log.info("[HP] Query '%s' → %d new products (total %d)",
-                     query, len(found), len(products))
+            log.debug("[HP] Query '%s' → %d new products (total %d)",
+                      query, len(found), len(products))
 
         # Last resort: parse the support page HTML for product links
         if not products:
@@ -470,18 +479,13 @@ class HPSupportModule(BaseSiteModule):
             #    Printer, Desktop, Monitor, etc. in its code.  We search
             #    for these case-insensitively and normalise to singular
             #    lowercase form for use as search queries.
-            _PRODUCT_TYPE_RE = re.compile(
-                r'(?:Laptop|Printer|Desktop|Monitor|Scanner|Server|'
-                r'Tablet|Workstation|Chromebook|All.in.One|'
-                r'Notebook|Plotter|Projector|Docking Station|'
-                r'Thin Client|Point of Sale)s?',
-                re.I,
-            )
             seen: set[str] = set()
             for m in _PRODUCT_TYPE_RE.finditer(js_text):
                 raw = m.group(0)
-                # Normalise: lowercase, strip trailing 's'
-                normalised = raw.lower().rstrip("s")
+                # Normalise: lowercase, remove a single trailing 's'
+                normalised = raw.lower()
+                if normalised.endswith("s"):
+                    normalised = normalised[:-1]
                 if normalised not in seen:
                     seen.add(normalised)
                     terms.append(normalised)

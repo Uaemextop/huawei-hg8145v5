@@ -372,9 +372,10 @@ class SiteDownloader:
 
         t0 = time.time()
 
-        # Maximum time to wait for any single future before cycling (seconds).
-        # This prevents the main loop from stalling indefinitely when
-        # requests hang without raising exceptions.
+        # Maximum time to wait for futures before cycling back to check
+        # for new work.  Set high (300s default) because slow pages
+        # (e.g. HP support documents) should NOT be cancelled — the
+        # timeout only controls how often we cycle, not when we cancel.
         _FUTURE_TIMEOUT = self.future_timeout
 
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
