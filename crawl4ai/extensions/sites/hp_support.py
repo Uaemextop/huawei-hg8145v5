@@ -761,7 +761,7 @@ class HPSupportModule(BaseSiteModule):
                     entries.append(FileEntry(
                         name=m.get("title", url.rsplit("/", 1)[-1]),
                         url=url,
-                        size=str(m.get("fileSize", "")) if m.get("fileSize") else "",
+                        size=str(m.get("fileSize") or ""),
                         version="",
                         release_date="",
                         category="Manual",
@@ -795,6 +795,8 @@ class HPSupportModule(BaseSiteModule):
             if not resp.ok:
                 return entries
             data = resp.json()
+            # HP API returns code=200 on success or code=204 when the
+            # endpoint has no data.  Both are valid JSON responses.
             if data.get("code") not in (200, 204, None):
                 return entries
             alerts = (data.get("data") or {}).get("securityAlerts", [])
@@ -808,7 +810,10 @@ class HPSupportModule(BaseSiteModule):
                         url=link,
                         size="",
                         version="",
-                        release_date=a.get("contentUpdateDate", "").split("T")[0],
+                        release_date=(
+                            a.get("contentUpdateDate", "").split("T")[0]
+                            if a.get("contentUpdateDate") else ""
+                        ),
                         category="Security Advisory",
                         os="",
                         description=f"Severity: {a.get('severity', 'N/A')}",
@@ -865,9 +870,11 @@ class HPSupportModule(BaseSiteModule):
                         script_name,
                         "Diagnostics Script",
                     )
-                    # Extract ftp.hp.com download URLs from the script
+                    # Extract ftp.hp.com download URLs from the script.
+                    # Only accept URLs under the known /pub/softlib/ path.
                     for m in re.finditer(
-                        r'https?://ftp\.hp\.com/[^\s"\'<>]+\.exe', resp.text,
+                        r'https://ftp\.hp\.com/pub/softlib/[^\s"\'<>]+\.exe',
+                        resp.text,
                     ):
                         _add(m.group(0), "", "Diagnostics Tool")
             except Exception as exc:
