@@ -5,3 +5,23 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Motorola Downloader - Sensitive configuration and generated files
+motorola_downloader/config.ini
+motorola_downloader/logs/
+motorola_downloader/downloads/
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
