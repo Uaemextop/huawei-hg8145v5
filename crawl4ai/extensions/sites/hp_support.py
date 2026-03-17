@@ -15,6 +15,15 @@ via the ``/wcc-services/`` JSON API.  This module:
 5. POSTs to ``/wcc-services/swd-v2/driverDetails`` for every OS version
    and collects file metadata (name, size, version, release date,
    category, OS, description, download URL) for each software entry.
+6. Fetches product **manuals** (user guides, setup docs) from the
+   ``/wcc-services/pdp/manuals/getManuals`` API.
+7. Fetches **security advisories** from the
+   ``/wcc-services/pdp/securityalerts/`` API.
+8. Discovers **HP diagnostics tools** and **HPSA framework** downloads
+   from ``ftp.hp.com`` and ``sudf-resources.hpcloud.hp.com``.
+9. Probes **staging / QA / developer** endpoints dynamically from the
+   Angular JS bundle (``qa2.houston.hp.com``,
+   ``stage.portalshell.int.hp.com``, ``stg.cd.id.hp.com``).
 
 **No static / hardcoded data** — all product OIDs, OS IDs, platform IDs,
 category names, and file metadata are discovered at runtime via HP's own
@@ -44,7 +53,14 @@ log = logging.getLogger(__name__)
 
 # ── Hosts ────────────────────────────────────────────────────────────────
 
-_HP_HOSTS = {"support.hp.com", "h30434.www3.hp.com", "ftp.hp.com"}
+_HP_HOSTS = {
+    "support.hp.com",
+    "h30434.www3.hp.com",
+    "ftp.hp.com",
+    "sudf-resources.hpcloud.hp.com",
+    "h30318.www3.hp.com",
+    "kaas.hpcloud.hp.com",
+}
 
 # ── URL patterns ─────────────────────────────────────────────────────────
 
@@ -79,6 +95,56 @@ _SWD_DRIVERS_URL = f"{_BASE}/wcc-services/swd-v2/driverDetails"
 _SWD_OS_URL = f"{_BASE}/wcc-services/swd-v2/osVersionData"
 _INIT_URL = f"{_BASE}/wcc-services/s/init"
 _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
+
+# Product detail page (PDP) endpoints — manuals, security alerts, specs
+_PDP_MANUALS_URL = f"{_BASE}/wcc-services/pdp/manuals/getManuals"
+_PDP_MANUAL_LANGS_URL = f"{_BASE}/wcc-services/pdp/manuals/getManualDropdownList"
+_PDP_SECURITY_ALERTS_URL = f"{_BASE}/wcc-services/pdp/securityalerts"
+_PDP_CATEGORY_URL = f"{_BASE}/wcc-services/pdp/category"
+_PDP_CATEGORY_DETAILS_URL = f"{_BASE}/wcc-services/pdp/category-details"
+_PDP_SPECS_URL = f"{_BASE}/wcc-services/pdp/specifications"
+
+# CMS content, sitemap, product category, and methone virtual-agent endpoints
+_CMS_URL = f"{_BASE}/wcc-services/cms-v2"
+_SITEMAP_URL = f"{_BASE}/wcc-services/sitemap/href"
+_PROD_CATEGORY_URL = f"{_BASE}/wcc-services/prodcategory/getProductCategoriesBySeoName"
+_METHONE_URL = f"{_BASE}/wcc-services/methone/va-url"
+
+# HP diagnostics / tool download sources (discovered from Angular JS bundle)
+_FTP_HP = "https://ftp.hp.com"
+_SUDF_RESOURCES = "https://sudf-resources.hpcloud.hp.com"
+
+# Known staging / QA / developer endpoints (discovered from main.js bundle).
+# These are probed dynamically — only accessible ones are used.
+_STAGING_HOSTS = (
+    # QA environments (internal — usually unreachable from public internet)
+    "qa2.houston.hp.com",
+    "ppssupport-qa2.houston.hp.com",
+    # Staging portal (CloudFront-backed — sometimes 403)
+    "stage.portalshell.int.hp.com",
+    "myaccount.stage.portalshell.int.hp.com",
+    # CD staging (publicly accessible HP account staging)
+    "stg.cd.id.hp.com",
+    "account.stg.cd.id.hp.com",
+    "myaccount.stg.cd.id.hp.com",
+)
+
+# Methone virtual-agent API endpoints (discovered from SSF HPWPD/HPDIA scripts)
+_METHONE_PROD = "https://api2-methone.hpcloud.hp.com/v4"
+_METHONE_ITG = "https://api2-itg-methone.hpcloud.hp.com/v2"
+
+# SUDF diagnostic tool scripts
+_SUDF_SCRIPTS = (
+    "SSF.Common.js",
+    "SSF.HPDIA.js",
+    "SSF.HPWPD.js",
+)
+
+# Known direct-download tool files on ftp.hp.com (discovered from SUDF scripts)
+_FTP_TOOL_PATHS = (
+    "pub/softlib/software13/HPSA/HPSupportSolutionsFramework-13.0.1.131.exe",
+    "pub/softlib/software13/HPSA/HPSupportSolutionsFramework-12.15.14.3.exe",
+)
 
 _REQUEST_TIMEOUT = 30
 _MAX_DESCRIPTION_LENGTH = 200
@@ -158,6 +224,9 @@ class HPSupportModule(BaseSiteModule):
             # Single-product mode: fetch files for this one product
             log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
             self._collect_files_for_product(oid, cc, lc, entries)
+            # Also fetch manuals and security alerts for this product
+            entries.extend(self._fetch_manuals(oid, cc, lc))
+            entries.extend(self._fetch_security_alerts(oid, cc, lc))
         else:
             # Catalog mode: discover products via navigation + search APIs
             log.info("[HP] No product OID — discovering catalog dynamically …")
@@ -170,6 +239,14 @@ class HPSupportModule(BaseSiteModule):
                     prod_oid, cc, lc, entries,
                     product_name=prod_name,
                 )
+                entries.extend(self._fetch_manuals(prod_oid, cc, lc))
+                entries.extend(self._fetch_security_alerts(prod_oid, cc, lc))
+
+        # Collect HP diagnostics tools and HPSA framework downloads
+        entries.extend(self._collect_diagnostics_tools())
+
+        # Probe staging/QA endpoints from JS bundle for additional files
+        entries.extend(self._probe_staging_endpoints(cc, lc))
 
         # Deduplicate by URL
         seen_urls: set[str] = set()
@@ -220,6 +297,39 @@ class HPSupportModule(BaseSiteModule):
                 )
         except Exception as exc:
             log.debug("[HP] Navigation page URL discovery failed: %s", exc)
+
+        # 3. Add sitemap URLs from HP's sitemap API
+        try:
+            resp = sess.get(
+                _SITEMAP_URL,
+                params={"cc": cc, "lc": lc},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if resp.ok:
+                sdata = resp.json().get("data", {})
+                if isinstance(sdata, dict):
+                    for _key, urls in sdata.items():
+                        if isinstance(urls, list):
+                            for u in urls:
+                                if isinstance(u, str):
+                                    _add(u if u.startswith("http") else _BASE + u)
+                                elif isinstance(u, dict):
+                                    _add(u.get("href", "") or u.get("url", ""))
+                elif isinstance(sdata, list):
+                    for u in sdata:
+                        if isinstance(u, str):
+                            _add(u if u.startswith("http") else _BASE + u)
+        except Exception as exc:
+            log.debug("[HP] Sitemap page URL discovery failed: %s", exc)
+
+        # 4. Add FTP and diagnostics resource pages
+        _add(f"{_FTP_HP}/pub/softlib/")
+        _add(f"{_SUDF_RESOURCES}/DMDScripts/")
+
+        # 5. Probe known staging/QA hosts
+        for host in _STAGING_HOSTS:
+            _add(f"https://{host}/")
 
         log.info("[HP] Discovered %d additional page URLs for crawling",
                  len(pages))
@@ -615,6 +725,261 @@ class HPSupportModule(BaseSiteModule):
             except Exception as exc:
                 log.info("[HP] Error fetching drivers for OS %s: %s",
                          os_info.get("name", "?"), exc)
+
+    # ── Manuals endpoint ─────────────────────────────────────────────
+
+    def _fetch_manuals(
+        self, oid: str, cc: str, lc: str,
+    ) -> list[FileEntry]:
+        """Fetch product manuals from ``/wcc-services/pdp/manuals/getManuals``.
+
+        Returns :class:`FileEntry` dicts for each manual PDF/document.
+        """
+        sess = self._get_session()
+        entries: list[FileEntry] = []
+        try:
+            resp = sess.get(
+                _PDP_MANUALS_URL,
+                params={
+                    "productID": oid,
+                    "countryCode": cc,
+                    "languageCode": lc,
+                    "browserLangCode": lc,
+                },
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return entries
+            data = resp.json()
+            if data.get("code") not in (200, None):
+                return entries
+            manuals = (data.get("data") or {}).get("manuals", [])
+            for m in manuals:
+                url = m.get("url", "")
+                if url and url.startswith("http"):
+                    entries.append(FileEntry(
+                        name=m.get("title", url.rsplit("/", 1)[-1]),
+                        url=url,
+                        size=str(m.get("fileSize", "")) if m.get("fileSize") else "",
+                        version="",
+                        release_date="",
+                        category="Manual",
+                        os="",
+                        description=m.get("fileType", ""),
+                    ))
+            if entries:
+                log.info("[HP] Found %d manuals for OID=%s", len(entries), oid)
+        except Exception as exc:
+            log.debug("[HP] Manuals fetch failed for OID=%s: %s", oid, exc)
+        return entries
+
+    # ── Security alerts endpoint ─────────────────────────────────────
+
+    def _fetch_security_alerts(
+        self, oid: str, cc: str, lc: str,
+    ) -> list[FileEntry]:
+        """Fetch security advisories from
+        ``/wcc-services/pdp/securityalerts/{locale}/{oid}``.
+
+        Returns :class:`FileEntry` dicts for alerts that have links.
+        """
+        sess = self._get_session()
+        entries: list[FileEntry] = []
+        try:
+            resp = sess.get(
+                f"{_PDP_SECURITY_ALERTS_URL}/{cc}-{lc}/{oid}",
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return entries
+            data = resp.json()
+            if data.get("code") not in (200, 204, None):
+                return entries
+            alerts = (data.get("data") or {}).get("securityAlerts", [])
+            for a in alerts:
+                link = a.get("link", "") or a.get("renderLink", "")
+                if link:
+                    if not link.startswith("http"):
+                        link = _BASE + link
+                    entries.append(FileEntry(
+                        name=a.get("title", link.rsplit("/", 1)[-1]),
+                        url=link,
+                        size="",
+                        version="",
+                        release_date=a.get("contentUpdateDate", "").split("T")[0],
+                        category="Security Advisory",
+                        os="",
+                        description=f"Severity: {a.get('severity', 'N/A')}",
+                    ))
+            if entries:
+                log.info("[HP] Found %d security alerts for OID=%s",
+                         len(entries), oid)
+        except Exception as exc:
+            log.debug("[HP] Security alerts fetch failed for OID=%s: %s",
+                      oid, exc)
+        return entries
+
+    # ── Diagnostics tools ────────────────────────────────────────────
+
+    def _collect_diagnostics_tools(self) -> list[FileEntry]:
+        """Discover HP diagnostics tool downloads from SUDF scripts
+        and ftp.hp.com.
+
+        Dynamically downloads the SSF JavaScript files from
+        ``sudf-resources.hpcloud.hp.com`` and extracts download URLs
+        for HP Support Solutions Framework and other diagnostic tools.
+        Also probes the known FTP tool paths.
+        """
+        sess = self._get_session()
+        entries: list[FileEntry] = []
+        seen_urls: set[str] = set()
+
+        def _add(url: str, name: str, cat: str) -> None:
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                entries.append(FileEntry(
+                    name=name or url.rsplit("/", 1)[-1],
+                    url=url,
+                    size="",
+                    version="",
+                    release_date="",
+                    category=cat,
+                    os="",
+                    description="HP Support diagnostics tool",
+                ))
+
+        # 1. Parse SUDF scripts for download URLs
+        for script_name in _SUDF_SCRIPTS:
+            try:
+                resp = sess.get(
+                    f"{_SUDF_RESOURCES}/DMDScripts/{script_name}",
+                    headers={**_HEADERS, "Accept": "*/*"},
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                if resp.ok:
+                    # Add the script itself
+                    _add(
+                        f"{_SUDF_RESOURCES}/DMDScripts/{script_name}",
+                        script_name,
+                        "Diagnostics Script",
+                    )
+                    # Extract ftp.hp.com download URLs from the script
+                    for m in re.finditer(
+                        r'https?://ftp\.hp\.com/[^\s"\'<>]+\.exe', resp.text,
+                    ):
+                        _add(m.group(0), "", "Diagnostics Tool")
+            except Exception as exc:
+                log.debug("[HP] SUDF script %s fetch failed: %s",
+                          script_name, exc)
+
+        # 2. Probe known FTP tool paths
+        for path in _FTP_TOOL_PATHS:
+            url = f"{_FTP_HP}/{path}"
+            if url not in seen_urls:
+                try:
+                    head = sess.head(url, timeout=10, allow_redirects=True)
+                    if head.ok:
+                        size = head.headers.get("Content-Length", "")
+                        entries.append(FileEntry(
+                            name=path.rsplit("/", 1)[-1],
+                            url=url,
+                            size=size,
+                            version="",
+                            release_date="",
+                            category="Diagnostics Tool",
+                            os="",
+                            description="HP Support Solutions Framework",
+                        ))
+                        seen_urls.add(url)
+                except Exception:
+                    pass
+
+        if entries:
+            log.info("[HP] Found %d diagnostics tools/scripts", len(entries))
+        return entries
+
+    # ── Staging / QA / developer endpoint probing ────────────────────
+
+    def _probe_staging_endpoints(
+        self, cc: str, lc: str,
+    ) -> list[FileEntry]:
+        """Dynamically probe staging / QA / developer HP endpoints.
+
+        Discovered from the Angular main.js bundle:
+        - ``qa2.houston.hp.com`` — internal QA
+        - ``ppssupport-qa2.houston.hp.com`` — internal QA
+        - ``stage.portalshell.int.hp.com`` — staging portal (CloudFront)
+        - ``stg.cd.id.hp.com`` / ``account.stg.cd.id.hp.com`` — staging
+        - ``api2-methone.hpcloud.hp.com`` — Methone virtual-agent (prod)
+        - ``api2-itg-methone.hpcloud.hp.com`` — Methone (ITG staging)
+
+        Only accessible endpoints generate entries.  Unreachable hosts
+        are silently skipped.
+        """
+        sess = self._get_session()
+        entries: list[FileEntry] = []
+
+        for host in _STAGING_HOSTS:
+            try:
+                resp = sess.get(
+                    f"https://{host}/",
+                    headers=_HEADERS,
+                    timeout=10,
+                    allow_redirects=True,
+                )
+                if resp.ok:
+                    entries.append(FileEntry(
+                        name=f"{host} (staging/QA)",
+                        url=f"https://{host}/",
+                        size=str(len(resp.content)),
+                        version="",
+                        release_date="",
+                        category="Staging/QA Endpoint",
+                        os="",
+                        description=f"HTTP {resp.status_code} — {resp.headers.get('server', 'unknown')}",
+                    ))
+                    log.info("[HP] Staging host accessible: %s (HTTP %d)",
+                             host, resp.status_code)
+                else:
+                    log.debug("[HP] Staging host %s returned HTTP %d",
+                              host, resp.status_code)
+            except Exception as exc:
+                log.debug("[HP] Staging host %s unreachable: %s", host, exc)
+
+        # Probe Methone API endpoints
+        for methone_url, label in (
+            (_METHONE_PROD, "Methone API (prod)"),
+            (_METHONE_ITG, "Methone API (ITG staging)"),
+        ):
+            try:
+                resp = sess.get(
+                    methone_url,
+                    headers=_HEADERS,
+                    timeout=10,
+                )
+                # Even 403 means the endpoint exists and is reachable
+                entries.append(FileEntry(
+                    name=label,
+                    url=methone_url,
+                    size="",
+                    version="",
+                    release_date="",
+                    category="API Endpoint",
+                    os="",
+                    description=f"HTTP {resp.status_code} — {resp.headers.get('server', 'unknown')}",
+                ))
+                log.info("[HP] Methone endpoint reachable: %s (HTTP %d)",
+                         methone_url, resp.status_code)
+            except Exception as exc:
+                log.debug("[HP] Methone endpoint %s unreachable: %s",
+                          methone_url, exc)
+
+        if entries:
+            log.info("[HP] Found %d accessible staging/QA/API endpoints",
+                     len(entries))
+        return entries
 
     # ── Session helper ───────────────────────────────────────────────
 
