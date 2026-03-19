@@ -137,7 +137,7 @@ def _extract_next_data_urls(base_url: str, body: str) -> list[str]:
         pages = set()
         build_manifest = data.get("buildManifest", {})
         for page in build_manifest.get("pages", {}):
-            if page != "/_app" and page != "/_error":
+            if page not in ("/_app", "/_error"):
                 pages.add(page)
         # Props may contain API endpoints
         props = data.get("props", {}).get("pageProps", {})

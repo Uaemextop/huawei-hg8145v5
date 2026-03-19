@@ -119,8 +119,7 @@ def _identify_cdn(headers: dict) -> str | None:
 def _discover_origin(headers: dict) -> str | None:
     """Attempt to find the origin server from CDN headers."""
     # X-Origin-Server, X-Backend-Server, X-Served-By sometimes leak origin
-    for key in ("x-origin-server", "x-backend-server", "x-served-by",
-                "x-amz-cf-id"):
+    for key in ("x-origin-server", "x-backend-server", "x-served-by"):
         value = headers.get(key)
         if value:
             return value

@@ -70,8 +70,13 @@ class RateLimiterHandler(BaseHandler):
                 )
 
             if limit is not None and limit > 0 and delay is None:
-                # Spread requests evenly across the window
-                delay = max(_MIN_DELAY, 60.0 / limit)
+                # Spread requests across the window (assume 60 s if no
+                # window header is present – most APIs use per-minute limits)
+                window = _int_header(
+                    headers,
+                    "X-RateLimit-Window", "X-Rate-Limit-Window",
+                ) or 60
+                delay = max(_MIN_DELAY, float(window) / limit)
                 actions.append(
                     f"Rate limit {limit}/window → {delay:.1f} s between requests"
                 )
