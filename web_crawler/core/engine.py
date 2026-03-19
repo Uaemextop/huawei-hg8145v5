@@ -135,6 +135,7 @@ class Crawler:
         allow_external: bool = True,
         skip_media_files: bool = False,
         skip_download_exts: frozenset[str] | None = None,
+        extra_hosts: frozenset[str] | None = None,
     ) -> None:
         parsed = urllib.parse.urlparse(start_url)
         self.start_url = start_url
@@ -205,7 +206,9 @@ class Crawler:
         # CDN hosts: external domains discovered from media elements
         # (video/audio/source tags, Schema.org itemprop).  URLs on
         # these hosts are downloaded but NOT crawled for links.
-        self._cdn_hosts: set[str] = set()
+        # Seed with --extra-hosts so the crawler fetches files on those
+        # domains when it discovers links to them.
+        self._cdn_hosts: set[str] = set(extra_hosts or ())
         self._allow_external = allow_external
         self._video_urls: list[str] = []
         self._video_meta: dict[str, dict[str, str]] = {}  # url → {title, author, thumbnail, duration, upload_date}
@@ -1116,6 +1119,19 @@ class Crawler:
     # WAF / Cloudflare / CAPTCHA detection
     # ------------------------------------------------------------------
 
+    # Headers that indicate CDN / infrastructure metadata, not WAF blocking.
+    # Including them in detection causes false positives on every page served
+    # through a CDN (e.g. Akamai, Cloudflare) because the header names or
+    # values innocuously contain WAF-signature substrings.
+    _DETECTION_EXCLUDED_HEADERS: frozenset[str] = frozenset({
+        "permissions-policy",      # declares allowed feature origins
+        "server",                  # CDN / web-server software identifier
+        "x-akamai-transformed",    # Akamai content-transformation info
+        "akamai-grn",              # Akamai Ghost Reference Number (tracking)
+        "x-akamai-request-id",     # Akamai per-request tracing
+        "x-akamai-session-info",   # Akamai session metadata
+    })
+
     @staticmethod
     def detect_protection(headers: dict[str, str], body: str) -> list[str]:
         """Return a list of detected WAF/protection names from *headers* and
@@ -1126,10 +1142,10 @@ class Crawler:
         large content pages may mention "captcha" or "cloudflare" deep
         in plugin configuration strings, causing false positives.
         """
-        # Exclude Permissions-Policy – it merely declares allowed origins
-        # (e.g. recaptcha.net, cloudflare.com) and is not a WAF indicator.
+        # Exclude CDN-informational headers that merely identify the
+        # infrastructure rather than indicate active WAF blocking.
         filtered = {k: v for k, v in headers.items()
-                    if k.lower() != "permissions-policy"}
+                    if k.lower() not in Crawler._DETECTION_EXCLUDED_HEADERS}
         combined = " ".join(f"{k}: {v}" for k, v in filtered.items()).lower()
         combined += " " + body[:8192].lower()
         detected: list[str] = []
