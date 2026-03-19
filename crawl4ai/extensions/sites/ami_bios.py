@@ -156,9 +156,46 @@ _WP_AJAX_URL = "https://www.ami.com/wp-admin/admin-ajax.php"
 
 _RESOURCE_TYPES = ("support-docs", "data-sheets", "white-papers")
 
-# ── Known HubSpot CDN paths to probe for binaries ────────────────────────
+# ── Known HubSpot CDN binary files (confirmed accessible) ────────────────
+# These are direct download URLs for AMI tools and utilities that are behind
+# Divi popup license-acceptance dialogs.  Probing them directly ensures we
+# capture every binary even if the JS redirect is missed during HTML scan.
 
-_HUBSPOT_PROBE_PATHS = (
+_HUBSPOT_CDN_BASE = (
+    "https://9443417.fs1.hubspotusercontent-na1.net/hubfs/9443417"
+)
+
+_KNOWN_CDN_BINARIES: tuple[tuple[str, str, str], ...] = (
+    # (path, name, category)
+    ("Support/BIOS_Firmware_Update/Aptio_V_AMI_Firmware_Update_Utility.zip",
+     "Aptio V AFU (Firmware Update Utility)", "Firmware Utility"),
+    ("Support/BIOS_Firmware_Update/Aptio4_AMI_Firmware_Update_Utility.zip",
+     "Aptio 4 AFU (Firmware Update Utility)", "Firmware Utility"),
+    ("Support/BIOS_Firmware_Update/AMIBIOS8_AMI_Firmware_Update_Utility.zip",
+     "AMIBIOS8 AFU (Firmware Update Utility)", "Firmware Utility"),
+    ("Support/BIOS_Firmware_Update/Encryption_Public_Key.zip",
+     "Encryption Public Key", "Security Key"),
+    ("Support/AMI_Debug_Rx/AMI_Debug_Rx_Firmware_Version_3.4.2.zip",
+     "AMI Debug Rx Firmware v3.4.2", "Debug Tool"),
+    ("Support/AMI_Debug_Rx/AMI_Debug_Rx_Firmware_Version_2.3.6.zip",
+     "AMI Debug Rx Firmware v2.3.6", "Debug Tool"),
+    ("Support/AMI_Debug_Rx/AMI_Debug_Rx_Supplemental_Files_Version_3.4.2.zip",
+     "AMI Debug Rx Supplemental Files v3.4.2", "Debug Tool"),
+    ("Support/AMI_Debug_Rx/AMI_Debug_Rx_Supplemental_Files_Version_2.3.6.zip",
+     "AMI Debug Rx Supplemental Files v2.3.6", "Debug Tool"),
+    ("Support/NwJsBin/NwJsBinWin64.zip",
+     "NwJs Binary (Windows 64-bit)", "Runtime Binary"),
+    ("Support/NwJsBin/NwJsBinWin32.zip",
+     "NwJs Binary (Windows 32-bit)", "Runtime Binary"),
+    ("Support/NwJsBin/NwJsBinLnx64.zip",
+     "NwJs Binary (Linux 64-bit)", "Runtime Binary"),
+    ("Support/Motherboard_ID_Tool/Motherboard_ID_Tool.zip",
+     "Motherboard ID Tool", "Diagnostic Tool"),
+)
+
+# ── Directory paths on HubSpot CDN to probe for listings ─────────────────
+
+_HUBSPOT_PROBE_DIRS = (
     "Support/BIOS_Firmware_Update/",
     "Support/AMI_Debug_Rx/",
     "Support/BIOS_Checkpoint_and_Beep_Codes/",
@@ -207,25 +244,15 @@ class AMIBiosModule(BaseSiteModule):
     def generate_index(self, url: str) -> list[FileEntry]:
         """Discover all downloadable files from AMI's website.
 
-        **Primary strategy:** The WP REST API ``content.rendered`` field
-        already contains the full rendered HTML for each resource page,
-        including all HubSpot download URLs and JS redirect targets.
-        This lets us scan 460+ pages with just 6 API requests (100
-        items/page) instead of 460 individual HTTP GETs.
-
         Discovery flow:
-        1. WP REST API ``/wp-json/wp/v2/project`` — scan ``content.rendered``
-           for download URLs across all 460+ resource pages.
-        2. WP REST API ``/wp-json/wp/v2/pages`` — same for product pages.
-        3. WP REST API ``/wp-json/wp/v2/media`` — scan media library for
-           downloadable attachments (exe, zip, tar, etc.).
-        4. WP AJAX ``query_resources`` — discover resources by taxonomy.
-        5. Full HTML scan for pages where API returned empty/short content.
-        6. ``/security-advisories/`` page — AMI-SA-* advisory PDFs.
-        7. GitHub repository links from community-edition pages.
-        8. Subdomain probing (meridian, eip, account, cp, go).
-        9. HubSpot CDN directory probing for known paths.
-        10. Deduplicate by download URL.
+        1. Known HubSpot CDN binaries (confirmed ZIPs: AFU, Debug Rx, NwJs, etc.)
+        2. Security advisories page (AMI-SA-* PDFs + ZIP)
+        3. WP REST API projects + pages (content.rendered scan)
+        4. WP AJAX resource queries (paginated JSON → resource page URLs)
+        5. Full HTML scan for pages with missing/short API content
+        6. GitHub repository links
+        7. Subdomain probing
+        8. HubSpot CDN directory probing (catch new files)
         """
         sess = self._get_session()
         entries: list[FileEntry] = []
@@ -234,7 +261,42 @@ class AMIBiosModule(BaseSiteModule):
         log.info("[AMI] ── Starting AMI file discovery ──")
         log.info("[AMI] URL: %s", url)
 
-        # 1–2. Scan WP REST API content for downloads (projects + pages)
+        # 1. Known CDN binaries — these are the confirmed downloadable tools
+        # (AFU, Debug Rx, NwJs, Motherboard ID Tool, Encryption Key)
+        cdn_binary_count = 0
+        for path, name, category in _KNOWN_CDN_BINARIES:
+            file_url = f"{_HUBSPOT_CDN_BASE}/{path}"
+            if file_url in seen_urls:
+                continue
+            try:
+                resp = sess.head(
+                    file_url, timeout=10, allow_redirects=True,
+                    headers=_HEADERS,
+                )
+                if resp.status_code == 200:
+                    ct = resp.headers.get("Content-Type", "")
+                    if "html" not in ct.lower():
+                        cl = resp.headers.get("Content-Length", "")
+                        seen_urls.add(file_url)
+                        entries.append(FileEntry(
+                            name=name,
+                            url=file_url,
+                            size=self._format_size(cl),
+                            category=category,
+                            source="hubspot-cdn-known",
+                            product="AMI",
+                        ))
+                        cdn_binary_count += 1
+            except Exception:
+                pass
+        log.info("[AMI] Known CDN binaries → %d files", cdn_binary_count)
+
+        # 2. Security advisories — scan BEFORE WP API to avoid seen_urls collision
+        sec_entries = self._scan_security_advisories(sess, seen_urls)
+        log.info("[AMI] Security advisories → %d files", len(sec_entries))
+        entries.extend(sec_entries)
+
+        # 3. Scan WP REST API content for downloads (projects + pages)
         no_content_pages: list[dict[str, str]] = []
         api_entries, no_content_pages = self._scan_wp_api_content(sess, seen_urls)
         log.info(
@@ -243,12 +305,7 @@ class AMIBiosModule(BaseSiteModule):
         )
         entries.extend(api_entries)
 
-        # 3. WP Media Library — discover uploaded attachments
-        media_entries = self._scan_wp_media(sess, seen_urls)
-        log.info("[AMI] WP Media Library → %d files", len(media_entries))
-        entries.extend(media_entries)
-
-        # 4. WP AJAX resource queries by taxonomy
+        # 4. WP AJAX resource queries — paginated, extracts resource page URLs
         ajax_entries = self._scan_wp_ajax_resources(sess, seen_urls)
         log.info("[AMI] WP AJAX resources → %d files", len(ajax_entries))
         entries.extend(ajax_entries)
@@ -272,24 +329,19 @@ class AMIBiosModule(BaseSiteModule):
                     entries.extend(page_entries)
                 time.sleep(_REQUEST_DELAY)
 
-        # 6. Security advisories page (too complex for API content scan)
-        sec_entries = self._scan_security_advisories(sess, seen_urls)
-        log.info("[AMI] Security advisories → %d files", len(sec_entries))
-        entries.extend(sec_entries)
-
-        # 7. GitHub repositories
+        # 6. GitHub repositories
         gh_entries = self._discover_github_repos(sess, seen_urls)
         if gh_entries:
             log.info("[AMI] GitHub repositories → %d entries", len(gh_entries))
             entries.extend(gh_entries)
 
-        # 8. Subdomain probing
+        # 7. Subdomain probing
         sub_entries = self._probe_subdomains(sess, seen_urls)
         if sub_entries:
             log.info("[AMI] Subdomains → %d entries", len(sub_entries))
             entries.extend(sub_entries)
 
-        # 9. HubSpot CDN directory probing
+        # 8. HubSpot CDN directory probing (catch new files)
         cdn_entries = self._probe_hubspot_cdn(sess, seen_urls)
         if cdn_entries:
             log.info("[AMI] HubSpot CDN probing → %d entries", len(cdn_entries))
@@ -705,52 +757,101 @@ class AMIBiosModule(BaseSiteModule):
         sess: "requests.Session",
         seen_urls: set[str],
     ) -> list[FileEntry]:
-        """Query the WP AJAX ``query_resources`` endpoint for each taxonomy.
+        """Query the WP AJAX ``query_resources`` endpoint with pagination.
 
-        This discovers resources filtered by type (support-docs, data-sheets,
-        white-papers) that may not appear in the REST API content.
+        The AJAX response is JSON with an ``html`` field containing rendered
+        resource cards and resource page URLs.  We:
+        1. Parse the JSON to get the HTML fragment
+        2. Extract resource page URLs from the HTML
+        3. Scan each resource page for download links
+        4. Paginate through all pages (12 items/page, up to 39 pages)
         """
         entries: list[FileEntry] = []
+        resource_page_urls: set[str] = set()
 
         for resource_type in _RESOURCE_TYPES:
-            try:
-                resp = sess.post(
-                    _WP_AJAX_URL,
-                    data={
-                        "action": "query_resources",
-                        "resource_type": resource_type,
-                        "paged": 1,
-                    },
-                    headers={
-                        **_HEADERS,
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                    timeout=_REQUEST_TIMEOUT,
-                )
-                if resp.status_code != 200:
-                    log.info(
-                        "[AMI] AJAX %s → HTTP %d", resource_type, resp.status_code,
+            page_num = 1
+            max_pages = 1  # updated after first response
+            while page_num <= max_pages:
+                try:
+                    resp = sess.post(
+                        _WP_AJAX_URL,
+                        data={
+                            "action": "query_resources",
+                            "resource_type": resource_type,
+                            "paged": page_num,
+                        },
+                        headers={
+                            **_HEADERS,
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                        timeout=_REQUEST_TIMEOUT,
                     )
-                    continue
-                resp.encoding = "utf-8"
-                html = resp.text
+                    if resp.status_code != 200:
+                        break
+                    resp.encoding = "utf-8"
 
-                # Extract download URLs from AJAX response HTML
-                found = self._extract_downloads_from_html(
-                    html,
-                    f"AJAX {resource_type}",
-                    f"ajax-{resource_type}",
-                    seen_urls,
-                    entries,
-                )
-                if found:
-                    log.info(
-                        "[AMI] AJAX %s → %d new files", resource_type, found,
+                    # Parse JSON response
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        break
+
+                    if not isinstance(data, dict):
+                        break
+
+                    max_pages = int(data.get("total_pages", 1) or 1)
+                    html = data.get("html", "")
+
+                    # Extract resource page URLs from AJAX HTML
+                    for m in re.finditer(
+                        r'href="(https://www\.ami\.com/resource/[^"]+)"',
+                        html,
+                    ):
+                        resource_page_urls.add(m.group(1))
+
+                    # Also extract any direct download URLs from AJAX HTML
+                    self._extract_downloads_from_html(
+                        html,
+                        f"AJAX {resource_type}",
+                        f"ajax-{resource_type}",
+                        seen_urls,
+                        entries,
                     )
-                time.sleep(_REQUEST_DELAY * 2)
-            except Exception as exc:
-                log.info("[AMI] AJAX %s error: %s", resource_type, exc)
+
+                    page_num += 1
+                    time.sleep(_REQUEST_DELAY)
+                except Exception as exc:
+                    log.info("[AMI] AJAX %s error: %s", resource_type, exc)
+                    break
+
+            log.info(
+                "[AMI] AJAX %s: %d pages, %d resource URLs",
+                resource_type, min(page_num - 1, max_pages),
+                len(resource_page_urls),
+            )
+
+        # Scan discovered resource pages for downloads
+        if resource_page_urls:
+            log.info(
+                "[AMI] ── Scanning %d AJAX resource pages ──",
+                len(resource_page_urls),
+            )
+            for i, page_url in enumerate(sorted(resource_page_urls), 1):
+                page_title = page_url.rstrip("/").split("/")[-1]
+                page_entries = self._scan_page_for_downloads(
+                    sess, page_url, page_title,
+                    "ajax-resource", seen_urls,
+                )
+                if page_entries:
+                    entries.extend(page_entries)
+                if i % 20 == 0:
+                    log.info(
+                        "[AMI]   AJAX pages: %d/%d scanned, %d total files",
+                        i, len(resource_page_urls), len(entries),
+                    )
+                time.sleep(_REQUEST_DELAY)
 
         return entries
 
@@ -761,16 +862,16 @@ class AMIBiosModule(BaseSiteModule):
         sess: "requests.Session",
         seen_urls: set[str],
     ) -> list[FileEntry]:
-        """Probe known HubSpot CDN paths for directory listings and files.
+        """Probe HubSpot CDN directory paths for additional files.
 
-        HubSpot CDN sometimes returns directory-like HTML pages for folder
-        paths, containing links to individual files.  This probes known
-        AMI content paths to discover files not linked from any page.
+        HubSpot CDN sometimes returns HTML pages for folder paths containing
+        links to individual files.  This probes known AMI content directories
+        to discover files not linked from any page.
         """
         entries: list[FileEntry] = []
 
         base_cdn = "https://f.hubspotusercontent10.net/hubfs/9443417"
-        for path in _HUBSPOT_PROBE_PATHS:
+        for path in _HUBSPOT_PROBE_DIRS:
             probe_url = f"{base_cdn}/{path}"
             if probe_url in seen_urls:
                 continue
@@ -869,6 +970,21 @@ class AMIBiosModule(BaseSiteModule):
         sess.headers.update(_HEADERS)
         self.session = sess
         return sess
+
+    @staticmethod
+    def _format_size(content_length: str) -> str:
+        """Format a Content-Length header value as a human-readable size."""
+        try:
+            size = int(content_length)
+        except (ValueError, TypeError):
+            return ""
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        if size < 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        return f"{size / (1024 * 1024 * 1024):.2f} GB"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
