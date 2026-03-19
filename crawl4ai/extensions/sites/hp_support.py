@@ -233,6 +233,9 @@ class HPSupportModule(BaseSiteModule):
         """
         entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
+        log.info("[HP] ── Starting HP support file discovery ──")
+        log.info("[HP] URL: %s", url)
+        log.info("[HP] Locale: %s-%s", cc, lc)
 
         # 1. Try extracting OID directly from the URL
         oid = self._extract_oid(url)
@@ -241,43 +244,62 @@ class HPSupportModule(BaseSiteModule):
         if not oid:
             seo_name = self._extract_seo_name(url)
             if seo_name:
-                log.info("[HP] No OID in URL — searching for '%s'", seo_name)
+                log.info("[HP] No OID in URL — searching for '%s' …", seo_name)
                 oid = self._resolve_oid_by_search(seo_name, cc, lc)
+            else:
+                log.info("[HP] No OID and no SEO name in URL — will scan full catalog")
 
         if oid:
             # Single-product mode: fetch files for this one product
-            log.info("[HP] Product OID=%s  locale=%s-%s", oid, cc, lc)
+            log.info("[HP] ── Single-product mode: OID=%s ──", oid)
             prod_name = self._extract_seo_name(url) or oid
             prod_name = prod_name.replace("-", " ").title()
+            before = len(entries)
             self._collect_files_for_product(oid, cc, lc, entries,
                                             product_name=prod_name)
+            log.info("[HP] Drivers/software: %d files found", len(entries) - before)
             # Also fetch manuals and security alerts for this product
-            entries.extend(self._fetch_manuals(oid, cc, lc,
-                                              product_name=prod_name))
-            entries.extend(self._fetch_security_alerts(oid, cc, lc,
-                                                      product_name=prod_name))
+            manuals = self._fetch_manuals(oid, cc, lc,
+                                          product_name=prod_name)
+            entries.extend(manuals)
+            alerts = self._fetch_security_alerts(oid, cc, lc,
+                                                 product_name=prod_name)
+            entries.extend(alerts)
+            log.info("[HP] Product total: %d files (drivers) + %d manuals + %d alerts",
+                     len(entries) - len(manuals) - len(alerts), len(manuals), len(alerts))
         else:
             # Catalog mode: discover products via navigation + search APIs
-            log.info("[HP] No product OID — discovering catalog dynamically …")
+            log.info("[HP] ── Catalog mode: discovering all products dynamically ──")
             product_oids = self._discover_catalog_products(cc, lc)
             log.info("[HP] Catalog: found %d products to scan", len(product_oids))
             for i, (prod_oid, prod_name) in enumerate(product_oids, 1):
-                log.info("[HP] [%d/%d] %s (OID=%s)",
+                before = len(entries)
+                log.info("[HP] [%d/%d] Scanning: %s (OID=%s) …",
                          i, len(product_oids), prod_name, prod_oid)
                 self._collect_files_for_product(
                     prod_oid, cc, lc, entries,
                     product_name=prod_name,
                 )
-                entries.extend(self._fetch_manuals(prod_oid, cc, lc,
-                                                  product_name=prod_name))
-                entries.extend(self._fetch_security_alerts(
-                    prod_oid, cc, lc, product_name=prod_name))
+                manuals = self._fetch_manuals(prod_oid, cc, lc,
+                                              product_name=prod_name)
+                entries.extend(manuals)
+                alerts = self._fetch_security_alerts(
+                    prod_oid, cc, lc, product_name=prod_name)
+                entries.extend(alerts)
+                added = len(entries) - before
+                if added:
+                    log.info("[HP] [%d/%d] → %d files found (total so far: %d)",
+                             i, len(product_oids), added, len(entries))
 
         # Collect HP diagnostics tools and HPSA framework downloads
-        entries.extend(self._collect_diagnostics_tools())
+        log.info("[HP] ── Collecting diagnostics tools & HPSA framework ──")
+        diag = self._collect_diagnostics_tools()
+        entries.extend(diag)
 
         # Probe staging/QA endpoints from JS bundle for additional files
-        entries.extend(self._probe_staging_endpoints(cc, lc))
+        log.info("[HP] ── Probing staging/QA/developer endpoints ──")
+        staging = self._probe_staging_endpoints(cc, lc)
+        entries.extend(staging)
 
         # Deduplicate by URL
         seen_urls: set[str] = set()
@@ -288,7 +310,8 @@ class HPSupportModule(BaseSiteModule):
                 seen_urls.add(u)
                 unique.append(entry)
 
-        log.info("[HP] Discovered %d unique files total", len(unique))
+        log.info("[HP] ── Discovery complete: %d unique files from %d total ──",
+                 len(unique), len(entries))
         return unique
 
     def page_urls(self, url: str) -> list[str]:
@@ -422,10 +445,12 @@ class HPSupportModule(BaseSiteModule):
         categories = self._fetch_navigation_categories(cc, lc)
         if not categories:
             # Fallback: fetch category keywords from the init API
+            log.info("[HP] Navigation API empty — trying /s/init fallback …")
             categories = self._fetch_init_categories(cc, lc)
 
         if not categories:
             # Fallback: extract product type names from the Angular JS
+            log.info("[HP] Init API empty — extracting from Angular JS bundle …")
             categories = self._extract_search_terms_from_js(cc, lc)
 
         # Supplement with device types from CMS product finder
@@ -436,14 +461,17 @@ class HPSupportModule(BaseSiteModule):
 
         log.info("[HP] Discovered %d categories to scan", len(categories))
 
-        for query in categories:
+        for idx, query in enumerate(categories, 1):
             found = self._search_products(query, cc, lc)
+            new_count = 0
             for oid, name in found:
                 if oid not in seen_oids:
                     seen_oids.add(oid)
                     products.append((oid, name))
-            log.debug("[HP] Query '%s' → %d new products (total %d)",
-                      query, len(found), len(products))
+                    new_count += 1
+            if new_count:
+                log.info("[HP] Category [%d/%d] '%s' → %d new products (total %d)",
+                         idx, len(categories), query, new_count, len(products))
 
         # Additional discovery: fetch popular printers (has OIDs in URLs)
         popular = self._fetch_popular_products(cc, lc)
@@ -479,6 +507,7 @@ class HPSupportModule(BaseSiteModule):
         sess = self._get_session()
         categories: list[str] = []
         try:
+            log.info("[HP] Fetching categories from /wcc-services/navigation …")
             resp = sess.get(
                 _NAV_URL,
                 params={"cc": cc, "lc": lc},
@@ -494,6 +523,8 @@ class HPSupportModule(BaseSiteModule):
             self._walk_nav_tree(nav_data, categories)
             if not categories:
                 log.info("[HP] Navigation API returned data but no categories extracted")
+            else:
+                log.info("[HP] Navigation API: extracted %d categories", len(categories))
         except Exception as exc:
             log.info("[HP] Navigation API failed: %s", exc)
         return categories
@@ -766,8 +797,8 @@ class HPSupportModule(BaseSiteModule):
                                 seen.add(m.group(1))
 
             except Exception as exc:
-                log.debug("[HP] Product search '%s' (ctx=%s) failed: %s",
-                          query, ctx, exc)
+                log.info("[HP] Product search '%s' (ctx=%s) failed: %s",
+                         query, ctx, exc)
 
         # Deduplicate
         unique: list[tuple[str, str]] = []
@@ -950,7 +981,12 @@ class HPSupportModule(BaseSiteModule):
 
         os_list = self._fetch_os_versions(oid, cc, lc)
         if not os_list:
+            log.info("[HP]   No OS versions from API — trying /s/init fallback")
             os_list = self._detect_os_from_init(cc, lc)
+        if os_list:
+            log.info("[HP]   Querying %d OS versions for drivers …", len(os_list))
+        else:
+            log.info("[HP]   No OS versions available — skipping driver fetch")
 
         # Enrich OS info dicts with product-specific fields from specs
         for os_info in os_list:
@@ -961,6 +997,7 @@ class HPSupportModule(BaseSiteModule):
             if specs.get("productNameOid"):
                 os_info.setdefault("productNameOid", specs["productNameOid"])
 
+        total_os_entries = 0
         for os_info in os_list:
             try:
                 os_entries = self._fetch_driver_entries(
@@ -968,9 +1005,16 @@ class HPSupportModule(BaseSiteModule):
                     product_name=product_name,
                 )
                 entries.extend(os_entries)
+                total_os_entries += len(os_entries)
+                if os_entries:
+                    log.info("[HP]   OS '%s' → %d drivers/software",
+                             os_info.get("name", "?"), len(os_entries))
             except Exception as exc:
-                log.info("[HP] Error fetching drivers for OS %s: %s",
+                log.info("[HP]   Error fetching drivers for OS %s: %s",
                          os_info.get("name", "?"), exc)
+        if total_os_entries:
+            log.info("[HP]   Product total: %d driver/software entries",
+                     total_os_entries)
 
     # ── Manuals endpoint ─────────────────────────────────────────────
 
@@ -1112,6 +1156,7 @@ class HPSupportModule(BaseSiteModule):
         # 1. Parse SUDF scripts for download URLs
         for script_name in _SUDF_SCRIPTS:
             try:
+                log.info("[HP] Fetching SUDF script: %s", script_name)
                 resp = sess.get(
                     f"{_SUDF_RESOURCES}/DMDScripts/{script_name}",
                     headers={**_HEADERS, "Accept": "*/*"},
@@ -1134,10 +1179,11 @@ class HPSupportModule(BaseSiteModule):
                         _add(m.group(0), "", "Diagnostics Tool",
                              "ftp.hp.com (from SUDF script)")
             except Exception as exc:
-                log.debug("[HP] SUDF script %s fetch failed: %s",
-                          script_name, exc)
+                log.info("[HP] SUDF script %s fetch failed: %s",
+                         script_name, exc)
 
         # 2. Probe known FTP tool paths
+        log.info("[HP] Probing %d FTP tool paths …", len(_FTP_TOOL_PATHS))
         for path in _FTP_TOOL_PATHS:
             url = f"{_FTP_HP}/{path}"
             if url not in seen_urls:
@@ -1185,6 +1231,8 @@ class HPSupportModule(BaseSiteModule):
         """
         sess = self._get_session()
         entries: list[FileEntry] = []
+        log.info("[HP] Probing %d staging/QA hosts + 2 Methone APIs …",
+                 len(_STAGING_HOSTS))
 
         for host in _STAGING_HOSTS:
             try:
@@ -1210,10 +1258,10 @@ class HPSupportModule(BaseSiteModule):
                     log.info("[HP] Staging host accessible: %s (HTTP %d)",
                              host, resp.status_code)
                 else:
-                    log.debug("[HP] Staging host %s returned HTTP %d",
-                              host, resp.status_code)
-            except Exception as exc:
-                log.debug("[HP] Staging host %s unreachable: %s", host, exc)
+                    log.info("[HP] Staging host %s → HTTP %d (restricted)",
+                             host, resp.status_code)
+            except Exception:
+                log.info("[HP] Staging host %s → unreachable", host)
 
         # Probe Methone API endpoints
         for methone_url, label in (
@@ -1241,9 +1289,8 @@ class HPSupportModule(BaseSiteModule):
                 ))
                 log.info("[HP] Methone endpoint reachable: %s (HTTP %d)",
                          methone_url, resp.status_code)
-            except Exception as exc:
-                log.debug("[HP] Methone endpoint %s unreachable: %s",
-                          methone_url, exc)
+            except Exception:
+                log.info("[HP] Methone endpoint %s → unreachable", methone_url)
 
         if entries:
             log.info("[HP] Found %d accessible staging/QA/API endpoints",
