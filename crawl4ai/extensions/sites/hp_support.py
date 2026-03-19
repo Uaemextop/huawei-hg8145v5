@@ -160,6 +160,8 @@ _FTP_TOOL_PATHS = (
 
 _REQUEST_TIMEOUT = 30
 _MAX_DESCRIPTION_LENGTH = 200
+# Max length for device-type names from CMS (filters out long HTML blobs)
+_MAX_DEVICE_TYPE_LENGTH = 40
 
 # Navigation API endpoint for discovering product categories dynamically.
 _NAV_URL = f"{_BASE}/wcc-services/navigation"
@@ -180,6 +182,19 @@ _HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
 }
+
+
+def _strip_bom(text: str | None) -> str:
+    """Strip BOM (U+FEFF) and whitespace from a string.
+
+    HP's API often returns driver titles with a BOM prefix character
+    (observed in HAR traffic for localized responses).
+    """
+    return (text or "").strip().lstrip("\ufeff").strip()
+
+
+# Placeholder values the HP API may return instead of real data.
+_PLACEHOLDER_VALUES = frozenset({"n/a", "none", "null", ""})
 
 
 class HPSupportModule(BaseSiteModule):
@@ -594,7 +609,7 @@ class HPSupportModule(BaseSiteModule):
                         continue
                     for key in ("toolTipTitle", "deviceType", "title"):
                         val = (item.get(key) or "").strip()
-                        if val and val.lower() not in seen and len(val) < 40:
+                        if val and val.lower() not in seen and len(val) < _MAX_DEVICE_TYPE_LENGTH:
                             seen.add(val.lower())
                             types.append(val)
             except Exception:
@@ -928,8 +943,10 @@ class HPSupportModule(BaseSiteModule):
         # Resolve real product name from specs API when only a URL-derived
         # name is available (e.g. "hp-pavilion-gaming" → "HP Pavilion - 15-ec0004la")
         specs = self._fetch_product_specs(oid, cc, lc)
+        # Replace the product name with the real one from specs if the
+        # current name looks URL-derived (contains hyphens) or is missing
         if specs.get("productName") and (
-            not product_name or product_name == product_name.replace("-", " ").title()
+            not product_name or "-" in product_name
         ):
             product_name = specs["productName"]
             log.info("[HP] Resolved product name: %s", product_name)
@@ -1538,12 +1555,12 @@ class HPSupportModule(BaseSiteModule):
         #
         # Fallback chain:
         #   title → name (if not "N/A"/None) → detailInformation.fileName → URL
-        drv_title = (latest.get("title") or "").strip().lstrip("\ufeff").strip()
-        drv_name_raw = (latest.get("name") or "").strip().lstrip("\ufeff").strip()
-        outer_name = (driver.get("name") or "").strip().lstrip("\ufeff").strip()
+        drv_title = _strip_bom(latest.get("title"))
+        drv_name_raw = _strip_bom(latest.get("name"))
+        outer_name = _strip_bom(driver.get("name"))
         drv_name = drv_title or (
-            drv_name_raw if drv_name_raw and drv_name_raw.upper() != "N/A"
-            else outer_name if outer_name and outer_name.upper() != "N/A"
+            drv_name_raw if drv_name_raw.lower() not in _PLACEHOLDER_VALUES
+            else outer_name if outer_name.lower() not in _PLACEHOLDER_VALUES
             else ""
         )
 
@@ -1566,8 +1583,8 @@ class HPSupportModule(BaseSiteModule):
             else:
                 detail_info = latest.get("detailInformation") or {}
                 fname = detail_info.get("fileName") or ""
-                # HAR shows fileName can be None string "None" — skip those
-                if fname and fname.lower() == "none":
+                # HP API may return placeholder strings as fileName
+                if fname.lower() in _PLACEHOLDER_VALUES:
                     fname = ""
                 if not fname:
                     fname = file_url.rsplit("/", 1)[-1].split("?")[0]
