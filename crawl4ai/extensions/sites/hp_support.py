@@ -159,9 +159,6 @@ _FTP_TOOL_PATHS = (
 )
 
 _REQUEST_TIMEOUT = 30
-_MAX_DESCRIPTION_LENGTH = 200
-# Max length for device-type names from CMS (filters out long HTML blobs)
-_MAX_DEVICE_TYPE_LENGTH = 40
 
 # Navigation API endpoint for discovering product categories dynamically.
 _NAV_URL = f"{_BASE}/wcc-services/navigation"
@@ -609,7 +606,7 @@ class HPSupportModule(BaseSiteModule):
                         continue
                     for key in ("toolTipTitle", "deviceType", "title"):
                         val = (item.get(key) or "").strip()
-                        if val and val.lower() not in seen and len(val) < _MAX_DEVICE_TYPE_LENGTH:
+                        if val and val.lower() not in seen:
                             seen.add(val.lower())
                             types.append(val)
             except Exception:
@@ -1571,7 +1568,7 @@ class HPSupportModule(BaseSiteModule):
 
         desc_html = (latest.get("detailInformation") or {}).get("description", "")
         # Strip HTML tags for plain-text description
-        description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:_MAX_DESCRIPTION_LENGTH]
+        description = re.sub(r"<[^>]+>", " ", desc_html).strip()
 
         file_url = latest.get("fileUrl") or ""
         if file_url and file_url.startswith("http"):

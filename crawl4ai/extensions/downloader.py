@@ -208,9 +208,6 @@ _META_REFRESH_RE = re.compile(
 # ── Chunk size for streaming ─────────────────────────────────────────────
 _STREAM_CHUNK = 524_288  # 512 KiB
 
-# ── File-index limits ────────────────────────────────────────────────────
-_MAX_DESCRIPTIONS_IN_INDEX = 50
-
 
 class SiteDownloader:
     """Download pages and files from a website, saving locally and optionally
@@ -869,7 +866,7 @@ class SiteDownloader:
             ]
             if descs:
                 fh.write("\n## Descriptions\n\n")
-                for name, desc in descs[:_MAX_DESCRIPTIONS_IN_INDEX]:
+                for name, desc in descs:
                     fh.write(f"**{name}**: {desc}\n\n")
 
         # Track the catalog index separately from regular downloads
