@@ -11,11 +11,12 @@ via the ``/wcc-services/`` JSON API.  This module:
 3. Dynamically fetches all available OS platforms and versions from the
    ``/wcc-services/swd-v2/osVersionData`` API, parsing three response
    structures (``osPlatforms``, ``platformList``, ``osversions``).
-4. If the OS API returns no data, falls back to the
-   ``/wcc-services/s/init`` API to detect the user's OS dynamically.
-   If that also fails, reuses cached OS versions from a previously
-   successful product (common during large catalog crawls where some
-   API calls are rate-limited).
+4. Maintains a **global OS platform registry** that merges all platforms
+   and versions seen across products (Windows, Mac OS, Linux, Android,
+   iOS, Chrome OS, OS Independent, etc.).  When ``osVersionData`` fails
+   for a product (e.g. rate-limited during large catalog crawls), the
+   full registry is used as fallback — all known platform types are
+   queried, not just one cached result.
 5. POSTs to ``/wcc-services/swd-v2/driverDetails`` for every OS version
    and collects file metadata (name, size, version, release date,
    category, OS, description, download URL) for each software entry.
@@ -237,8 +238,13 @@ class HPSupportModule(BaseSiteModule):
         """
         entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
-        # Reset OS version cache for this run
-        self._os_version_cache: list[dict] = []
+        # Global OS platform registry — merges ALL platforms/versions
+        # from every successful osVersionData call.  When the API fails
+        # for a product (e.g. rate-limited during large crawls), the
+        # full registry is used as fallback so ALL platform types
+        # (Windows, Mac OS, Linux, Android, iOS, Chrome OS, etc.) are
+        # queried — not just the last successful product's platforms.
+        self._global_os_registry: dict[str, list[dict]] = {}
         log.info("[HP] ── Starting HP support file discovery ──")
         log.info("[HP] URL: %s", url)
         log.info("[HP] Locale: %s-%s", cc, lc)
@@ -276,6 +282,10 @@ class HPSupportModule(BaseSiteModule):
         else:
             # Catalog mode: discover products via navigation + search APIs
             log.info("[HP] ── Catalog mode: discovering all products dynamically ──")
+            # Seed the global OS registry from a multi-platform product
+            # (e.g. a printer) so ALL platforms (Mac OS, Android, iOS,
+            # Windows, Linux, Chrome OS, etc.) are available from the start.
+            self._seed_global_os_registry(cc, lc)
             product_oids = self._discover_catalog_products(cc, lc)
             log.info("[HP] Catalog: found %d products to scan", len(product_oids))
             for i, (prod_oid, prod_name) in enumerate(product_oids, 1):
@@ -315,6 +325,26 @@ class HPSupportModule(BaseSiteModule):
             if u and u not in seen_urls:
                 seen_urls.add(u)
                 unique.append(entry)
+
+        # Log platform registry summary
+        if self._global_os_registry:
+            plat_names = sorted(self._global_os_registry.keys())
+            total_versions = sum(
+                len(v) for v in self._global_os_registry.values()
+            )
+            log.info(
+                "[HP] OS platforms discovered: %d platforms, %d total versions",
+                len(plat_names), total_versions,
+            )
+            for pname in plat_names:
+                versions = self._global_os_registry[pname]
+                sample = ", ".join(
+                    v.get("name", "?") for v in versions[:3]
+                )
+                if len(versions) > 3:
+                    sample += f" … (+{len(versions) - 3} more)"
+                log.info("[HP]   %s: %d versions — %s",
+                         pname, len(versions), sample)
 
         log.info("[HP] ── Discovery complete: %d unique files from %d total ──",
                  len(unique), len(entries))
@@ -991,12 +1021,26 @@ class HPSupportModule(BaseSiteModule):
         if not os_list:
             log.info("[HP]   No OS versions from API — trying /s/init fallback")
             os_list = self._detect_os_from_init(cc, lc)
-        if not os_list and self._os_version_cache:
-            log.info("[HP]   Using cached OS versions from a previous product (%d entries)",
-                     len(self._os_version_cache))
-            os_list = list(self._os_version_cache)
+        if not os_list and self._global_os_registry:
+            # Use ALL accumulated platforms from previous products
+            os_list = self._flatten_global_registry()
+            plat_names = sorted(self._global_os_registry.keys())
+            log.info(
+                "[HP]   Using global OS registry: %d versions across %d "
+                "platforms [%s]",
+                len(os_list), len(plat_names), ", ".join(plat_names),
+            )
         if os_list:
-            log.info("[HP]   Querying %d OS versions for drivers …", len(os_list))
+            # Summarise platforms being queried
+            plat_counts: dict[str, int] = {}
+            for v in os_list:
+                pn = v.get("platformName") or "Unknown"
+                plat_counts[pn] = plat_counts.get(pn, 0) + 1
+            log.info(
+                "[HP]   Querying %d OS versions across %d platforms: %s",
+                len(os_list), len(plat_counts),
+                ", ".join(f"{n} ({c})" for n, c in plat_counts.items()),
+            )
         else:
             log.info("[HP]   No OS versions available — skipping driver fetch")
 
@@ -1472,12 +1516,19 @@ class HPSupportModule(BaseSiteModule):
                         })
 
             if os_versions:
-                log.info("[HP]   Found %d OS versions across %d platforms",
-                         len(os_versions),
-                         len(platforms) or len(data.get("osversions", [])))
-                # Cache for reuse as fallback by other products
-                if not self._os_version_cache or len(os_versions) > len(self._os_version_cache):
-                    self._os_version_cache = list(os_versions)
+                # Collect platform names for logging
+                plat_names: dict[str, int] = {}
+                for v in os_versions:
+                    pn = v.get("platformName") or "Unknown"
+                    plat_names[pn] = plat_names.get(pn, 0) + 1
+                plat_summary = ", ".join(
+                    f"{name} ({cnt})" for name, cnt in plat_names.items()
+                )
+                log.info("[HP]   Found %d OS versions across %d platforms: %s",
+                         len(os_versions), len(plat_names), plat_summary)
+                # Merge into global registry so ALL platforms/versions
+                # accumulated across products are available as fallback.
+                self._merge_into_global_registry(os_versions)
             else:
                 log.info("[HP]   osVersionData returned empty for OID=%s", oid)
             return os_versions
@@ -1522,6 +1573,110 @@ class HPSupportModule(BaseSiteModule):
         except Exception as exc:
             log.info("[HP]   /s/init OS detection failed: %s", exc)
         return []
+
+    def _merge_into_global_registry(
+        self, os_versions: list[dict],
+    ) -> None:
+        """Merge OS versions into the global platform registry.
+
+        The registry maps ``platformName`` → list of unique version dicts.
+        Each successful ``osVersionData`` call adds new platforms and
+        versions not yet seen.  This way the registry accumulates ALL
+        known platform types (Windows, Mac OS, Linux, Android, iOS,
+        Chrome OS, OS Independent, etc.) across products.
+
+        When ``osVersionData`` fails for a later product (e.g. rate-limited
+        during large catalog crawls), the full registry is used as fallback
+        so the product is queried for ALL platform types — not just the
+        last successful product's platforms.
+        """
+        registry = self._global_os_registry
+        for v in os_versions:
+            platform = v.get("platformName") or "Unknown"
+            if platform not in registry:
+                registry[platform] = []
+            # Avoid duplicate version IDs within the same platform
+            existing_ids = {
+                existing.get("id") for existing in registry[platform]
+            }
+            if v.get("id") and v["id"] not in existing_ids:
+                registry[platform].append(dict(v))
+
+    def _flatten_global_registry(self) -> list[dict]:
+        """Return all OS versions from the global registry as a flat list.
+
+        Used when ``osVersionData`` fails for a product — the product is
+        queried for ALL platforms accumulated from previous products.
+        """
+        result: list[dict] = []
+        for versions in self._global_os_registry.values():
+            result.extend(versions)
+        return result
+
+    def _seed_global_os_registry(self, cc: str, lc: str) -> None:
+        """Pre-populate the global OS registry with all platform types.
+
+        Fetches OS data from a multi-platform product (popular printer)
+        so the registry has ALL platform types (Windows, Mac OS, Android,
+        iOS, Linux, Chrome OS, OS Independent, etc.) from the start.
+
+        This ensures that when ``osVersionData`` fails for later products
+        during large catalog crawls, the fallback includes ALL platforms —
+        not just Windows from the first laptop product.
+
+        The printer product OID is discovered dynamically from HP's
+        ``popularPrinters`` API — no hardcoded IDs.
+        """
+        if self._global_os_registry:
+            return  # Already seeded
+
+        log.info("[HP] Seeding global OS registry from multi-platform product …")
+        # Discover a printer OID from the popularPrinters API
+        seed_oid = self._find_seed_product_oid(cc, lc)
+        if not seed_oid:
+            log.info("[HP]   No seed product found — registry will build up from scanned products")
+            return
+
+        os_versions = self._fetch_os_versions(seed_oid, cc, lc)
+        if os_versions:
+            plat_names = sorted(self._global_os_registry.keys())
+            log.info(
+                "[HP] Global OS registry seeded: %d versions across %d "
+                "platforms [%s]",
+                len(os_versions), len(plat_names), ", ".join(plat_names),
+            )
+        else:
+            log.info("[HP]   Seed product returned no OS data")
+
+    def _find_seed_product_oid(self, cc: str, lc: str) -> str | None:
+        """Find a multi-platform product OID for seeding the OS registry.
+
+        Printers typically have the most platform diversity (Windows,
+        Mac OS, Android, iOS).  Uses the ``popularPrinters`` API to find
+        one dynamically.
+        """
+        sess = self._get_session()
+        try:
+            resp = sess.get(
+                f"{_SWD_POPULAR_PRINTERS_URL}/{cc}-{lc}",
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return None
+            data = resp.json().get("data", {})
+            if data is None:
+                return None
+            # popularPrinters returns HTML with product links containing h_product=<OID>
+            content = data if isinstance(data, str) else str(data)
+            oid_match = re.search(r'h_product[=:](\d+)', content)
+            if oid_match:
+                log.info("[HP]   Seed product OID from popularPrinters: %s",
+                         oid_match.group(1))
+                return oid_match.group(1)
+        except Exception as exc:
+            log.info("[HP]   popularPrinters fetch failed: %s", exc)
+        return None
 
     # ── Driver / software metadata collection ────────────────────────
 
