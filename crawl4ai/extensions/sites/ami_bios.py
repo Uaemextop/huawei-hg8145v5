@@ -46,6 +46,14 @@ HubSpot CDN structure (``/hubfs/9443417/``):
 - ``Data_Sheets/Security_Solutions/`` — Trust Center brochure
 - ``Security Advisories/`` — AMI-SA-2022* through AMI-SA-2025* PDFs
 - ``Whitepapers/`` — security features, firmware whitepapers
+
+Login-protected tools (NOT publicly downloadable — require EIP portal account):
+- **AMIBCP** — only data sheet PDF available publicly
+- **MMTool** — only data sheet PDF available publicly
+- **VeB (Visual eBIOS)** — only data sheet PDF available publicly
+These tools are distributed through ``eip.ami.com`` (Tomcat/Kendo UI portal)
+after customer authentication.  The public pages only offer the data sheet
+PDF through a Divi popup ``window.location.href`` JS redirect.
 """
 
 from __future__ import annotations
@@ -471,8 +479,12 @@ class AMIBiosModule(BaseSiteModule):
                         )
                         page_found += found
 
-                        # Queue pages with missing/short content for full scan
-                        if link and (not content or len(content) < 100):
+                        # Queue ALL resource pages for full HTML scan.
+                        # The WP API content.rendered excludes Divi popup
+                        # modules which contain window.location.href JS
+                        # redirects to download URLs (ZIPs, PDFs).  Only
+                        # a full page GET captures these popup downloads.
+                        if link and "/resource/" in link:
                             no_content_pages.append({"url": link, "title": title})
 
                     log.info(
@@ -922,6 +934,9 @@ class AMIBiosModule(BaseSiteModule):
         Discovered infrastructure:
         - ``meridian.ami.com`` — nginx/1.29.4, Vue SPA, /api/ returns 403
         - ``eip.ami.com`` — Apache/Tomcat, Kendo UI login, /eip/myStart.do
+          All ``.do`` endpoints (download.do, swDownload.do, amibcp.do,
+          mmtool.do, veb.do, afu.do, etc.) exist but require J2EE FORM-
+          based auth (j_security_check) — no bypass possible.
         - ``account.ami.com`` — SharePoint/IIS, public account retrieval
         - ``cp.ami.com`` — SharePoint/IIS, NTLM 401
         - ``go.ami.com`` — HubSpot CMS/redirector
@@ -960,6 +975,57 @@ class AMIBiosModule(BaseSiteModule):
                     source="subdomain-probe",
                     product="AMI Infrastructure",
                 ))
+
+        # Probe EIP portal .do endpoints for unauthenticated access.
+        # All .do actions use J2EE FORM-based auth (j_security_check).
+        # HTTP 400 = endpoint exists but needs session; this discovers
+        # the full list of actions available behind the login.
+        eip_base = "https://eip.ami.com/eip"
+        _EIP_ACTIONS = (
+            "download.do", "swDownload.do", "saDownload.do",
+            "fileDownload.do", "toolDownload.do",
+            "softwareRelease.do", "swRelease.do", "swList.do",
+            "productList.do", "downloadList.do", "downloadCenter.do",
+            "biosTools.do", "biosUtility.do", "aptioTools.do",
+            "amibcp.do", "mmtool.do", "veb.do", "afu.do",
+            "securityAdvisory.do", "search.do", "product.do",
+        )
+        eip_found = 0
+        for action in _EIP_ACTIONS:
+            action_url = f"{eip_base}/{action}"
+            if action_url in seen_urls:
+                continue
+            try:
+                resp = sess.get(
+                    action_url, timeout=8, allow_redirects=False,
+                    headers=_HEADERS,
+                )
+                if resp.status_code == 400:
+                    # Endpoint exists but requires auth parameters
+                    seen_urls.add(action_url)
+                    eip_found += 1
+                elif resp.status_code == 200:
+                    has_login = "j_security_check" in resp.text[:1000]
+                    if not has_login:
+                        # Unauthenticated access! Record it.
+                        seen_urls.add(action_url)
+                        entries.append(FileEntry(
+                            name=f"EIP {action} (unauthenticated)",
+                            url=action_url,
+                            category="Subdomain/Portal",
+                            description=f"EIP portal action accessible without login",
+                            source="eip-probe",
+                            product="AMI EIP Portal",
+                        ))
+                        eip_found += 1
+            except Exception:
+                pass
+
+        if eip_found:
+            log.info(
+                "[AMI] EIP portal: %d .do endpoints discovered (auth-protected)",
+                eip_found,
+            )
 
         return entries
 
