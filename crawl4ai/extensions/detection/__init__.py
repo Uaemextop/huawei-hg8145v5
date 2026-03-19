@@ -1,5 +1,5 @@
 """
-crawl4ai.extensions.detection – WAF / CAPTCHA / soft-404 / WordPress detection.
+crawl4ai.extensions.detection – technology / framework detection.
 
 Individual detector modules:
 
@@ -9,6 +9,52 @@ Individual detector modules:
 * :mod:`.soft404` – Soft-404 page detection
 * :mod:`.wordpress` – WordPress fingerprinting
 * :mod:`.captcha` – CAPTCHA embed detection (reCAPTCHA, hCAPTCHA, Turnstile, …)
+* :mod:`.react` – React.js detection
+* :mod:`.angular` – Angular detection
+* :mod:`.vue` – Vue.js detection
+* :mod:`.nextjs` – Next.js detection
+* :mod:`.nuxt` – Nuxt.js detection
+* :mod:`.svelte` – Svelte / SvelteKit detection
+* :mod:`.ember` – Ember.js detection
+* :mod:`.jquery` – jQuery detection
+* :mod:`.bootstrap` – Bootstrap detection
+* :mod:`.tailwind` – Tailwind CSS detection
+* :mod:`.gatsby` – Gatsby detection
+* :mod:`.backbone` – Backbone.js detection
+* :mod:`.typescript` – TypeScript build-artifact detection
+* :mod:`.drupal` – Drupal CMS detection
+* :mod:`.joomla` – Joomla CMS detection
+* :mod:`.shopify` – Shopify detection
+* :mod:`.magento` – Magento / Adobe Commerce detection
+* :mod:`.ghost` – Ghost CMS detection
+* :mod:`.squarespace` – Squarespace detection
+* :mod:`.wix` – Wix detection
+* :mod:`.nginx` – Nginx server detection
+* :mod:`.apache` – Apache HTTP Server detection
+* :mod:`.iis` – Microsoft IIS detection
+* :mod:`.django` – Django framework detection
+* :mod:`.flask` – Flask / Werkzeug detection
+* :mod:`.rails` – Ruby on Rails detection
+* :mod:`.laravel` – Laravel PHP framework detection
+* :mod:`.aspnet` – ASP.NET detection
+* :mod:`.express` – Express.js (Node) detection
+* :mod:`.hugo` – Hugo static site generator detection
+* :mod:`.jekyll` – Jekyll static site generator detection
+* :mod:`.cloudfront` – AWS CloudFront CDN detection
+* :mod:`.fastly` – Fastly CDN detection
+* :mod:`.vercel` – Vercel platform detection
+* :mod:`.netlify` – Netlify platform detection
+* :mod:`.google_analytics` – Google Analytics / GTM detection
+* :mod:`.facebook_pixel` – Facebook / Meta Pixel detection
+* :mod:`.hotjar` – Hotjar analytics detection
+* :mod:`.aws_waf` – AWS WAF detection
+* :mod:`.ddos_guard` – DDoS-Guard detection
+* :mod:`.azure_front_door` – Azure Front Door CDN detection
+* :mod:`.spring` – Spring Framework (Java) detection
+* :mod:`.graphql` – GraphQL API detection
+* :mod:`.firebase` – Firebase detection
+* :mod:`.amp` – Google AMP detection
+* :mod:`.pwa` – Progressive Web App detection
 """
 
 from __future__ import annotations
@@ -20,6 +66,52 @@ from .waf import WAFDetector, WAF_SIGNATURES
 from .soft404 import Soft404Detector
 from .wordpress import WordPressDetector
 from .captcha import CaptchaDetector
+from .react import ReactDetector
+from .angular import AngularDetector
+from .vue import VueDetector
+from .nextjs import NextjsDetector
+from .nuxt import NuxtDetector
+from .svelte import SvelteDetector
+from .ember import EmberDetector
+from .jquery import JQueryDetector
+from .bootstrap import BootstrapDetector
+from .tailwind import TailwindDetector
+from .gatsby import GatsbyDetector
+from .backbone import BackboneDetector
+from .typescript import TypeScriptDetector
+from .drupal import DrupalDetector
+from .joomla import JoomlaDetector
+from .shopify import ShopifyDetector
+from .magento import MagentoDetector
+from .ghost import GhostDetector
+from .squarespace import SquarespaceDetector
+from .wix import WixDetector
+from .nginx import NginxDetector
+from .apache import ApacheDetector
+from .iis import IISDetector
+from .django import DjangoDetector
+from .flask import FlaskDetector
+from .rails import RailsDetector
+from .laravel import LaravelDetector
+from .aspnet import AspNetDetector
+from .express import ExpressDetector
+from .hugo import HugoDetector
+from .jekyll import JekyllDetector
+from .cloudfront import CloudFrontDetector
+from .fastly import FastlyDetector
+from .vercel import VercelDetector
+from .netlify import NetlifyDetector
+from .google_analytics import GoogleAnalyticsDetector
+from .facebook_pixel import FacebookPixelDetector
+from .hotjar import HotjarDetector
+from .aws_waf import AWSWAFDetector
+from .ddos_guard import DDoSGuardDetector
+from .azure_front_door import AzureFrontDoorDetector
+from .spring import SpringDetector
+from .graphql import GraphQLDetector
+from .firebase import FirebaseDetector
+from .amp import AMPDetector
+from .pwa import PWADetector
 
 ALL_DETECTORS: list[BaseDetector] = [
     CloudflareDetector(),
@@ -28,6 +120,52 @@ ALL_DETECTORS: list[BaseDetector] = [
     Soft404Detector(),
     WordPressDetector(),
     CaptchaDetector(),
+    ReactDetector(),
+    AngularDetector(),
+    VueDetector(),
+    NextjsDetector(),
+    NuxtDetector(),
+    SvelteDetector(),
+    EmberDetector(),
+    JQueryDetector(),
+    BootstrapDetector(),
+    TailwindDetector(),
+    GatsbyDetector(),
+    BackboneDetector(),
+    TypeScriptDetector(),
+    DrupalDetector(),
+    JoomlaDetector(),
+    ShopifyDetector(),
+    MagentoDetector(),
+    GhostDetector(),
+    SquarespaceDetector(),
+    WixDetector(),
+    NginxDetector(),
+    ApacheDetector(),
+    IISDetector(),
+    DjangoDetector(),
+    FlaskDetector(),
+    RailsDetector(),
+    LaravelDetector(),
+    AspNetDetector(),
+    ExpressDetector(),
+    HugoDetector(),
+    JekyllDetector(),
+    CloudFrontDetector(),
+    FastlyDetector(),
+    VercelDetector(),
+    NetlifyDetector(),
+    GoogleAnalyticsDetector(),
+    FacebookPixelDetector(),
+    HotjarDetector(),
+    AWSWAFDetector(),
+    DDoSGuardDetector(),
+    AzureFrontDoorDetector(),
+    SpringDetector(),
+    GraphQLDetector(),
+    FirebaseDetector(),
+    AMPDetector(),
+    PWADetector(),
 ]
 
 
@@ -58,6 +196,52 @@ __all__ = [
     "Soft404Detector",
     "WordPressDetector",
     "CaptchaDetector",
+    "ReactDetector",
+    "AngularDetector",
+    "VueDetector",
+    "NextjsDetector",
+    "NuxtDetector",
+    "SvelteDetector",
+    "EmberDetector",
+    "JQueryDetector",
+    "BootstrapDetector",
+    "TailwindDetector",
+    "GatsbyDetector",
+    "BackboneDetector",
+    "TypeScriptDetector",
+    "DrupalDetector",
+    "JoomlaDetector",
+    "ShopifyDetector",
+    "MagentoDetector",
+    "GhostDetector",
+    "SquarespaceDetector",
+    "WixDetector",
+    "NginxDetector",
+    "ApacheDetector",
+    "IISDetector",
+    "DjangoDetector",
+    "FlaskDetector",
+    "RailsDetector",
+    "LaravelDetector",
+    "AspNetDetector",
+    "ExpressDetector",
+    "HugoDetector",
+    "JekyllDetector",
+    "CloudFrontDetector",
+    "FastlyDetector",
+    "VercelDetector",
+    "NetlifyDetector",
+    "GoogleAnalyticsDetector",
+    "FacebookPixelDetector",
+    "HotjarDetector",
+    "AWSWAFDetector",
+    "DDoSGuardDetector",
+    "AzureFrontDoorDetector",
+    "SpringDetector",
+    "GraphQLDetector",
+    "FirebaseDetector",
+    "AMPDetector",
+    "PWADetector",
     "ALL_DETECTORS",
     "WAF_SIGNATURES",
 ]

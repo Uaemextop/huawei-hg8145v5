@@ -47,6 +47,7 @@ import urllib3
 
 from crawl4ai.extensions.bypass.session import build_session, random_headers
 from crawl4ai.extensions.detection import detect_all
+from crawl4ai.extensions.handlers import dispatch as dispatch_handlers
 from crawl4ai.extensions.sites import get_matching_modules
 from crawl4ai.extensions.extraction import (
     extract_html_attrs,
@@ -521,6 +522,31 @@ class SiteDownloader:
                      _c(url, "cyan"),
                      _c(", ".join(d.get("type", "?") for d in detections), "yellow"))
 
+        # Run handlers/corrections for detected technologies
+        handler_extra_urls: set[str] = set()
+        if detections:
+            try:
+                handler_results = dispatch_handlers(
+                    resp.url, self.session, resp, detections,
+                )
+                for hr in handler_results:
+                    actions = hr.get("actions_taken", [])
+                    if actions:
+                        log.info("🔧  %s %s: %s",
+                                 _c("[HANDLER]", "green"),
+                                 _c(hr.get("handler", "?"), "cyan"),
+                                 _c("; ".join(actions), "green"))
+                    for extra in hr.get("extra_urls", []):
+                        handler_extra_urls.add(extra)
+                    extra_hdrs = hr.get("extra_headers", {})
+                    if extra_hdrs:
+                        self.session.headers.update(extra_hdrs)
+                    cfg = hr.get("recommended_config", {})
+                    if cfg.get("delay") and cfg["delay"] > self.delay:
+                        self.delay = cfg["delay"]
+            except Exception as exc:
+                log.debug("Handler dispatch error: %s", exc)
+
         # Save the page HTML
         page_path = smart_local_path(resp.url, self.output_dir, ct)
         page_path.parent.mkdir(parents=True, exist_ok=True)
@@ -550,6 +576,10 @@ class SiteDownloader:
             discovered_urls |= extract_js_paths(body, resp.url, self.base)
         except Exception:
             pass
+
+        # Merge handler-discovered URLs
+        if handler_extra_urls:
+            discovered_urls |= handler_extra_urls
 
         # Filter and enqueue
         new_file_links = 0
