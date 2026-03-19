@@ -257,8 +257,10 @@ class HPSupportModule(BaseSiteModule):
         """
         entries: list[FileEntry] = []
         cc, lc = self._extract_locale(url)
-        # Track consecutive 403s to detect rate limiting
+        # Initialize rate-limit tracking state
         self._consecutive_403s = 0
+        self._ua_index = 0
+        self._hp_session = None  # will be lazily created by _get_session()
         log.info("[HP] ── Starting HP support file discovery ──")
         log.info("[HP] URL: %s", url)
         log.info("[HP] Locale: %s-%s", cc, lc)
@@ -1230,7 +1232,9 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP] SUDF script %s fetch failed: %s",
                          script_name, exc)
 
-        # 2. Probe known FTP tool paths
+        # 2. Probe known FTP tool paths (ftp.hp.com is a separate domain
+        #    from support.hp.com — not subject to Akamai rate limits, so
+        #    direct session.head() is used instead of _api_get()).
         log.info("[HP] Probing %d FTP tool paths …", len(_FTP_TOOL_PATHS))
         sess = self._get_session()
         for path in _FTP_TOOL_PATHS:
@@ -1350,7 +1354,7 @@ class HPSupportModule(BaseSiteModule):
     def _get_session(self) -> "requests.Session":
         if self.session is not None:
             return self.session
-        if hasattr(self, "_hp_session"):
+        if self._hp_session is not None:
             return self._hp_session
         import requests as _req
         s = _req.Session()
@@ -1360,7 +1364,7 @@ class HPSupportModule(BaseSiteModule):
 
     def _rotate_ua(self) -> None:
         """Rotate the User-Agent for the next batch of requests."""
-        self._ua_index = (getattr(self, "_ua_index", 0) + 1) % len(_USER_AGENTS)
+        self._ua_index = (self._ua_index + 1) % len(_USER_AGENTS)
         ua = _USER_AGENTS[self._ua_index]
         sess = self._get_session()
         sess.headers["User-Agent"] = ua
