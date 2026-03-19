@@ -509,6 +509,9 @@ class HPSupportModule(BaseSiteModule):
             if new_count:
                 log.info("[HP] Category [%d/%d] '%s' → %d new products (total %d)",
                          idx, len(categories), query, new_count, len(products))
+            else:
+                log.info("[HP] Category [%d/%d] '%s' → 0 new products",
+                         idx, len(categories), query)
 
         # Additional discovery: fetch popular printers (has OIDs in URLs)
         popular = self._fetch_popular_products(cc, lc)
@@ -708,6 +711,7 @@ class HPSupportModule(BaseSiteModule):
         terms: list[str] = []
         try:
             # 1. Fetch the main page to discover the main.js bundle URL
+            log.info("[HP] Fetching support page for JS bundle URL …")
             resp = self._api_get(
                 f"{_BASE}/{cc}-{lc}/",
                 headers=_HEADERS,
@@ -715,8 +719,12 @@ class HPSupportModule(BaseSiteModule):
                 allow_redirects=True,
             )
             if not resp.ok:
-                log.info("[HP] Could not fetch support page for JS analysis")
+                log.info("[HP] Could not fetch support page for JS analysis "
+                         "(HTTP %d)", resp.status_code)
                 return terms
+
+            # Force UTF-8 for the HTML page as well
+            resp.encoding = "utf-8"
 
             # Find main.*.js script tag
             main_js_match = re.search(
@@ -737,12 +745,18 @@ class HPSupportModule(BaseSiteModule):
                     "Accept": "*/*",
                     "Referer": f"{_BASE}/{cc}-{lc}/",
                 },
-                timeout=60,
+                timeout=20,
             )
             if not js_resp.ok:
                 log.info("[HP] main.js download failed: HTTP %d", js_resp.status_code)
                 return terms
 
+            log.info("[HP] Angular bundle downloaded: %d bytes",
+                     len(js_resp.content))
+            # Force UTF-8 to avoid slow charset detection on large JS files
+            # (the Content-Type from HP's CDN omits charset, triggering
+            # chardet/charset_normalizer on ~1.8 MB of JS — can take seconds).
+            js_resp.encoding = "utf-8"
             js_text = js_resp.text
 
             # 3. Extract product type names from the JS bundle.
