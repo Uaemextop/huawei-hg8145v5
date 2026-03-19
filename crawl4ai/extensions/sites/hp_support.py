@@ -737,7 +737,9 @@ class HPSupportModule(BaseSiteModule):
             main_js_url = f"{_BASE}{main_js_match.group(1)}"
             log.info("[HP] Downloading Angular bundle: %s", main_js_url)
 
-            # 2. Fetch main.js with proper headers
+            # 2. Fetch main.js with proper headers.
+            #    CDN typically serves this ~1.8 MB file in <1 s; 20 s gives
+            #    ample margin while preventing long silent stalls.
             js_resp = self._api_get(
                 main_js_url,
                 headers={
