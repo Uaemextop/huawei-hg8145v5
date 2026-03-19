@@ -31,6 +31,7 @@ setup(
         "chardet>=5.2.0",
         "httpx[http2]>=0.27.2",
         "fake-useragent>=2.2.0",
+        "curl_cffi>=0.7.0",
     ],
     extras_require={
         "ui": [
@@ -44,6 +45,9 @@ setup(
             "playwright>=1.49.0",
             "patchright>=1.49.0",
             "tf-playwright-stealth>=1.1.0",
+        ],
+        "selenium": [
+            "seleniumbase>=4.30.0",
         ],
         "images": [
             "numpy>=1.26.0,<3",

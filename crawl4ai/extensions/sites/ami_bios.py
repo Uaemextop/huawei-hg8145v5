@@ -91,7 +91,14 @@ _HUBSPOT_DOMAINS = {
 # ── File extension pattern for discoverable files ────────────────────────
 
 _DOWNLOAD_RE = re.compile(
-    r'https?://[^\s"\'<>]+\.(?:pdf|zip|exe|msi|bin|efi|7z|gz|tar)'
+    r'https?://[^\s"\'<>]+\.(?:'
+    r'pdf|zip|exe|msi|bin|efi|7z|gz|tar|tgz|bz2|xz|zst'
+    r'|cab|dmg|pkg|deb|rpm|apk|appimage|snap|flatpak|ipa'
+    r'|iso|img|rom|fw|uf2|hex|srec|vhd|vmdk|ova'
+    r'|doc|docx|xls|xlsx|ppt|pptx|rtf|odt|ods|odp'
+    r'|rar|lzh|arj|ace|lz|lzma|jar|war'
+    r'|dll|sys|so|dylib'
+    r')'
     r'(?:\?[^\s"\'<>]*)?',
     re.IGNORECASE,
 )
@@ -107,15 +114,63 @@ _GITHUB_RE = re.compile(
 
 _SITEMAP_LOC_RE = re.compile(r"<loc>([^<]+)</loc>")
 
+# ── Additional download-link patterns ────────────────────────────────────
+# onclick / data-* attributes that contain download URLs
+_ONCLICK_URL_RE = re.compile(
+    r"""(?:onclick|data-download-url|data-href|data-file|data-src)\s*=\s*['"]"""
+    r"""[^'"]*?(https?://[^\s"'<>]+\.(?:"""
+    r"""pdf|zip|exe|msi|bin|efi|7z|gz|tar|tgz|bz2|xz|cab|dmg|iso|rar"""
+    r"""|doc|docx|xls|xlsx|ppt|pptx|rom|fw|img|rpm|deb"""
+    r""")(?:\?[^\s"'<>]*)?)""",
+    re.IGNORECASE,
+)
+
+# JSON-embedded URLs in <script> tags
+_JSON_URL_RE = re.compile(
+    r'["\']'
+    r'(https?://[^\s"\'<>]+\.(?:'
+    r'pdf|zip|exe|msi|bin|efi|7z|gz|tar|tgz|cab|dmg|iso|rar'
+    r'|doc|docx|xls|xlsx|ppt|pptx|rom|fw|img'
+    r')(?:\?[^\s"\'<>]*)?)'
+    r'["\']',
+    re.IGNORECASE,
+)
+
+# HubSpot CDN URL pattern (any file on HubSpot CDN)
+_HUBSPOT_CDN_RE = re.compile(
+    r'(https?://(?:f\.hubspotusercontent\d*\.net|'
+    r'\d+\.fs\d+\.hubspotusercontent[a-z0-9-]*\.net|'
+    r'go\.ami\.com)'
+    r'/[^\s"\'<>]+)',
+    re.IGNORECASE,
+)
+
 # ── WP REST API endpoints ────────────────────────────────────────────────
 
 _WP_PROJECTS_URL = "https://www.ami.com/wp-json/wp/v2/project"
 _WP_PAGES_URL = "https://www.ami.com/wp-json/wp/v2/pages"
+_WP_MEDIA_URL = "https://www.ami.com/wp-json/wp/v2/media"
 _WP_AJAX_URL = "https://www.ami.com/wp-admin/admin-ajax.php"
 
 # ── Resource type taxonomies for AJAX query ──────────────────────────────
 
 _RESOURCE_TYPES = ("support-docs", "data-sheets", "white-papers")
+
+# ── Known HubSpot CDN paths to probe for binaries ────────────────────────
+
+_HUBSPOT_PROBE_PATHS = (
+    "Support/BIOS_Firmware_Update/",
+    "Support/AMI_Debug_Rx/",
+    "Support/BIOS_Checkpoint_and_Beep_Codes/",
+    "Support/Motherboard_ID_Tool/",
+    "Support/NwJsBin/",
+    "Data_Sheets/Firmware_Solutions/",
+    "Data_Sheets/Firmware_Tools_and_Utilities/",
+    "Data_Sheets/IT_Management_Solutions/",
+    "Data_Sheets/Security_Solutions/",
+    "Security Advisories/",
+    "Whitepapers/",
+)
 
 # ── Request settings ─────────────────────────────────────────────────────
 
@@ -162,11 +217,15 @@ class AMIBiosModule(BaseSiteModule):
         1. WP REST API ``/wp-json/wp/v2/project`` — scan ``content.rendered``
            for download URLs across all 460+ resource pages.
         2. WP REST API ``/wp-json/wp/v2/pages`` — same for product pages.
-        3. Full HTML scan for pages where API returned empty/short content.
-        4. ``/security-advisories/`` page — AMI-SA-* advisory PDFs.
-        5. GitHub repository links from community-edition pages.
-        6. Subdomain probing (meridian, eip, account, cp, go).
-        7. Deduplicate by download URL.
+        3. WP REST API ``/wp-json/wp/v2/media`` — scan media library for
+           downloadable attachments (exe, zip, tar, etc.).
+        4. WP AJAX ``query_resources`` — discover resources by taxonomy.
+        5. Full HTML scan for pages where API returned empty/short content.
+        6. ``/security-advisories/`` page — AMI-SA-* advisory PDFs.
+        7. GitHub repository links from community-edition pages.
+        8. Subdomain probing (meridian, eip, account, cp, go).
+        9. HubSpot CDN directory probing for known paths.
+        10. Deduplicate by download URL.
         """
         sess = self._get_session()
         entries: list[FileEntry] = []
@@ -184,7 +243,17 @@ class AMIBiosModule(BaseSiteModule):
         )
         entries.extend(api_entries)
 
-        # 3. Full HTML scan for pages with missing/short API content
+        # 3. WP Media Library — discover uploaded attachments
+        media_entries = self._scan_wp_media(sess, seen_urls)
+        log.info("[AMI] WP Media Library → %d files", len(media_entries))
+        entries.extend(media_entries)
+
+        # 4. WP AJAX resource queries by taxonomy
+        ajax_entries = self._scan_wp_ajax_resources(sess, seen_urls)
+        log.info("[AMI] WP AJAX resources → %d files", len(ajax_entries))
+        entries.extend(ajax_entries)
+
+        # 5. Full HTML scan for pages with missing/short API content
         if no_content_pages:
             log.info(
                 "[AMI] ── Full HTML scan for %d pages ──", len(no_content_pages),
@@ -203,22 +272,28 @@ class AMIBiosModule(BaseSiteModule):
                     entries.extend(page_entries)
                 time.sleep(_REQUEST_DELAY)
 
-        # 4. Security advisories page (too complex for API content scan)
+        # 6. Security advisories page (too complex for API content scan)
         sec_entries = self._scan_security_advisories(sess, seen_urls)
         log.info("[AMI] Security advisories → %d files", len(sec_entries))
         entries.extend(sec_entries)
 
-        # 5. GitHub repositories
+        # 7. GitHub repositories
         gh_entries = self._discover_github_repos(sess, seen_urls)
         if gh_entries:
             log.info("[AMI] GitHub repositories → %d entries", len(gh_entries))
             entries.extend(gh_entries)
 
-        # 6. Subdomain probing
+        # 8. Subdomain probing
         sub_entries = self._probe_subdomains(sess, seen_urls)
         if sub_entries:
             log.info("[AMI] Subdomains → %d entries", len(sub_entries))
             entries.extend(sub_entries)
+
+        # 9. HubSpot CDN directory probing
+        cdn_entries = self._probe_hubspot_cdn(sess, seen_urls)
+        if cdn_entries:
+            log.info("[AMI] HubSpot CDN probing → %d entries", len(cdn_entries))
+            entries.extend(cdn_entries)
 
         log.info(
             "[AMI] ── Complete: %d total files discovered ──",
@@ -369,13 +444,18 @@ class AMIBiosModule(BaseSiteModule):
     ) -> int:
         """Extract download URLs from HTML content and append to entries.
 
-        Finds both direct HubSpot file URLs and ``window.location.href``
-        JS redirect targets (used by Divi popup download buttons).
+        Finds:
+        - Direct HubSpot file URLs (via ``_DOWNLOAD_RE``)
+        - ``window.location.href`` JS redirect targets (Divi popup buttons)
+        - ``onclick`` / ``data-*`` download attributes
+        - JSON-embedded URLs in ``<script>`` tags
+        - HubSpot CDN URLs (any file hosted on HubSpot CDN)
 
         Returns the number of new entries added.
         """
         count = 0
 
+        # 1. Standard download URLs with known file extensions
         for match in _DOWNLOAD_RE.finditer(html):
             file_url = _clean_url(match.group(0))
             if not file_url or file_url in seen_urls:
@@ -386,7 +466,7 @@ class AMIBiosModule(BaseSiteModule):
             entries.append(_build_entry(file_url, title, page_type))
             count += 1
 
-        # JS redirect downloads (Divi popup "accept" button pattern)
+        # 2. JS redirect downloads (Divi popup "accept" button pattern)
         for m in re.finditer(
             r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', html,
         ):
@@ -396,6 +476,40 @@ class AMIBiosModule(BaseSiteModule):
                 entries.append(
                     _build_entry(js_url, title, page_type + " (JS redirect)"),
                 )
+                count += 1
+
+        # 3. onclick / data-* download attributes
+        for m in _ONCLICK_URL_RE.finditer(html):
+            attr_url = _clean_url(m.group(1))
+            if attr_url and attr_url not in seen_urls and _is_ami_download(attr_url):
+                seen_urls.add(attr_url)
+                entries.append(
+                    _build_entry(attr_url, title, page_type + " (data-attr)"),
+                )
+                count += 1
+
+        # 4. JSON-embedded URLs in <script> tags
+        for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.I):
+            script_body = m.group(1)
+            for jm in _JSON_URL_RE.finditer(script_body):
+                json_url = _clean_url(jm.group(1))
+                if json_url and json_url not in seen_urls and _is_ami_download(json_url):
+                    seen_urls.add(json_url)
+                    entries.append(
+                        _build_entry(json_url, title, page_type + " (script)"),
+                    )
+                    count += 1
+
+        # 5. HubSpot CDN URLs (catch-all for any file on HubSpot CDN)
+        for m in _HUBSPOT_CDN_RE.finditer(html):
+            hub_url = _clean_url(m.group(1))
+            if not hub_url or hub_url in seen_urls:
+                continue
+            # Only include if URL has a file extension
+            path = urllib.parse.urlparse(hub_url).path
+            if "." in path.split("/")[-1]:
+                seen_urls.add(hub_url)
+                entries.append(_build_entry(hub_url, title, page_type + " (CDN)"))
                 count += 1
 
         return count
@@ -520,6 +634,172 @@ class AMIBiosModule(BaseSiteModule):
 
         return entries
 
+    # ── WP Media Library scanning ────────────────────────────────────────
+
+    def _scan_wp_media(
+        self,
+        sess: "requests.Session",
+        seen_urls: set[str],
+    ) -> list[FileEntry]:
+        """Scan WP Media Library for downloadable attachments.
+
+        The ``/wp-json/wp/v2/media`` endpoint exposes uploaded files
+        including ZIPs, EXEs, PDFs, and other binaries that may not be
+        linked from any published page.
+        """
+        entries: list[FileEntry] = []
+        page_num = 1
+        while True:
+            try:
+                resp = self._safe_get(
+                    sess, _WP_MEDIA_URL,
+                    params={"per_page": 100, "page": page_num},
+                )
+                if not resp or resp.status_code != 200:
+                    break
+                data = resp.json()
+                if not isinstance(data, list) or not data:
+                    break
+
+                for item in data:
+                    media_url = item.get("source_url", "")
+                    if not media_url or media_url in seen_urls:
+                        continue
+                    mime_type = item.get("mime_type", "")
+                    title = _clean_html(
+                        (item.get("title") or {}).get("rendered", "")
+                    ) or _extract_filename(media_url)
+
+                    # Only include binary / document types
+                    if not _is_downloadable_mime(mime_type):
+                        continue
+
+                    seen_urls.add(media_url)
+                    entries.append(FileEntry(
+                        name=title,
+                        url=media_url,
+                        category=_classify_file(media_url, title),
+                        source="WP Media Library",
+                        product="AMI",
+                        description=mime_type,
+                    ))
+
+                log.info(
+                    "[AMI] WP media page %d: %d items, %d new (total %d)",
+                    page_num, len(data),
+                    sum(1 for e in entries if e.get("source") == "WP Media Library"),
+                    len(entries),
+                )
+                page_num += 1
+                time.sleep(_REQUEST_DELAY * 2)
+            except Exception as exc:
+                log.info("[AMI] WP media API error: %s", exc)
+                break
+
+        return entries
+
+    # ── WP AJAX resource queries ─────────────────────────────────────────
+
+    def _scan_wp_ajax_resources(
+        self,
+        sess: "requests.Session",
+        seen_urls: set[str],
+    ) -> list[FileEntry]:
+        """Query the WP AJAX ``query_resources`` endpoint for each taxonomy.
+
+        This discovers resources filtered by type (support-docs, data-sheets,
+        white-papers) that may not appear in the REST API content.
+        """
+        entries: list[FileEntry] = []
+
+        for resource_type in _RESOURCE_TYPES:
+            try:
+                resp = sess.post(
+                    _WP_AJAX_URL,
+                    data={
+                        "action": "query_resources",
+                        "resource_type": resource_type,
+                        "paged": 1,
+                    },
+                    headers={
+                        **_HEADERS,
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                if resp.status_code != 200:
+                    log.info(
+                        "[AMI] AJAX %s → HTTP %d", resource_type, resp.status_code,
+                    )
+                    continue
+                resp.encoding = "utf-8"
+                html = resp.text
+
+                # Extract download URLs from AJAX response HTML
+                found = self._extract_downloads_from_html(
+                    html,
+                    f"AJAX {resource_type}",
+                    f"ajax-{resource_type}",
+                    seen_urls,
+                    entries,
+                )
+                if found:
+                    log.info(
+                        "[AMI] AJAX %s → %d new files", resource_type, found,
+                    )
+                time.sleep(_REQUEST_DELAY * 2)
+            except Exception as exc:
+                log.info("[AMI] AJAX %s error: %s", resource_type, exc)
+
+        return entries
+
+    # ── HubSpot CDN probing ──────────────────────────────────────────────
+
+    def _probe_hubspot_cdn(
+        self,
+        sess: "requests.Session",
+        seen_urls: set[str],
+    ) -> list[FileEntry]:
+        """Probe known HubSpot CDN paths for directory listings and files.
+
+        HubSpot CDN sometimes returns directory-like HTML pages for folder
+        paths, containing links to individual files.  This probes known
+        AMI content paths to discover files not linked from any page.
+        """
+        entries: list[FileEntry] = []
+
+        base_cdn = "https://f.hubspotusercontent10.net/hubfs/9443417"
+        for path in _HUBSPOT_PROBE_PATHS:
+            probe_url = f"{base_cdn}/{path}"
+            if probe_url in seen_urls:
+                continue
+
+            try:
+                resp = sess.get(
+                    probe_url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if resp.status_code != 200:
+                    continue
+                resp.encoding = "utf-8"
+
+                # Look for file links in the CDN response
+                found = self._extract_downloads_from_html(
+                    resp.text,
+                    f"HubSpot CDN /{path}",
+                    "hubspot-cdn",
+                    seen_urls,
+                    entries,
+                )
+                if found:
+                    log.info("[AMI] CDN /%s → %d files", path, found)
+                time.sleep(_REQUEST_DELAY)
+            except Exception:
+                pass
+
+        return entries
+
     # ── Subdomain probing ────────────────────────────────────────────────
 
     def _probe_subdomains(
@@ -576,12 +856,16 @@ class AMIBiosModule(BaseSiteModule):
     # ── Session management ───────────────────────────────────────────────
 
     def _get_session(self) -> "requests.Session":
-        """Return or create an HTTP session."""
+        """Return or create an HTTP session with TLS fingerprinting."""
         if self.session is not None:
             return self.session
 
-        import requests as _requests
-        sess = _requests.Session()
+        try:
+            from crawl4ai.extensions.bypass.tls_session import build_tls_session
+            sess = build_tls_session(verify_ssl=True)
+        except ImportError:
+            import requests as _requests
+            sess = _requests.Session()
         sess.headers.update(_HEADERS)
         self.session = sess
         return sess
@@ -663,8 +947,41 @@ def _classify_file(url: str, filename: str) -> str:
         return "Diagnostic Tool"
     if "nwjs" in fn_lower:
         return "Runtime Binary"
+    if fn_lower.endswith((".exe", ".msi", ".cab", ".appimage")):
+        return "Executable/Installer"
+    if fn_lower.endswith((".tar", ".tgz", ".bz2", ".xz", ".zst", ".rar", ".7z")):
+        return "Archive"
+    if fn_lower.endswith((".iso", ".img", ".vmdk", ".vhd", ".ova")):
+        return "Disk Image"
+    if fn_lower.endswith((".rom", ".fw", ".uf2", ".hex", ".bin", ".efi")):
+        return "Firmware"
+    if fn_lower.endswith((".deb", ".rpm", ".apk", ".snap", ".flatpak")):
+        return "Package"
+    if fn_lower.endswith((".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf")):
+        return "Document"
     if fn_lower.endswith(".zip"):
         return "Utility/Tool"
     if fn_lower.endswith(".pdf"):
         return "Documentation"
     return "Other"
+
+
+def _is_downloadable_mime(mime_type: str) -> bool:
+    """Return *True* if the MIME type represents a downloadable binary/document."""
+    if not mime_type:
+        return False
+    mime = mime_type.lower()
+    # Always include binary types
+    if mime.startswith(("application/", "audio/", "video/")):
+        # Exclude web-page content types
+        if mime in (
+            "application/json",
+            "application/xml",
+            "application/xhtml+xml",
+            "application/rss+xml",
+            "application/javascript",
+            "application/x-javascript",
+        ):
+            return False
+        return True
+    return False

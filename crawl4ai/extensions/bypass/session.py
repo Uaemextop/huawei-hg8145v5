@@ -1,10 +1,13 @@
 """
 HTTP session builder with retry logic, User-Agent rotation, Client Hints,
-and cache-busting headers.
+cache-busting headers, and **TLS fingerprint impersonation**.
 
-The :func:`build_session` function returns a ``requests.Session`` pre-configured
-for resilient web crawling with anti-bot-detection headers (Client Hints
-required by Akamai / Imperva / Cloudflare).
+The :func:`build_session` function returns an HTTP session pre-configured for
+resilient web crawling.  When ``curl_cffi`` is installed the session
+impersonates a real browser's TLS fingerprint (JA3/JA4), allowing it to
+pass Cloudflare, Akamai, and Imperva bot checks without a headless browser.
+
+Falls back to a plain ``requests.Session`` when ``curl_cffi`` is unavailable.
 """
 
 from __future__ import annotations
@@ -16,12 +19,20 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# Import the new TLS session builder — it handles curl_cffi availability
+# internally and always returns a requests-compatible session.
+from crawl4ai.extensions.bypass.tls_session import (
+    build_tls_session,
+    TLS_ENGINE,
+)
+
 __all__ = [
     "build_session",
     "random_headers",
     "cache_bust_url",
     "USER_AGENTS",
     "MAX_RETRIES",
+    "TLS_ENGINE",
 ]
 
 MAX_RETRIES = 3
@@ -91,48 +102,15 @@ def _client_hints_for_ua(ua: str) -> dict[str, str]:
 
 
 def build_session(verify_ssl: bool = True) -> requests.Session:
-    """Return a ``requests.Session`` with retry logic, keep-alive,
-    randomised User-Agent, cache-busting headers, and Client Hints
-    derived from the chosen User-Agent (required by Akamai and similar
-    bot-detection systems)."""
-    session = requests.Session()
-    retry = Retry(
-        total=MAX_RETRIES,
-        backoff_factor=0.5,
-        status_forcelist=[500, 502, 503, 504],
-        connect=MAX_RETRIES,
-        read=MAX_RETRIES,
-    )
-    adapter = HTTPAdapter(
-        max_retries=retry,
-        pool_connections=50,
-        pool_maxsize=50,
-        pool_block=True,
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    session.verify = verify_ssl
-    ua = random.choice(USER_AGENTS)
-    headers: dict[str, str] = {
-        "User-Agent": ua,
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,image/apng,*/*;q=0.8"
-        ),
-        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Connection": "keep-alive",
-    }
-    headers.update(_client_hints_for_ua(ua))
-    session.headers.update(headers)
-    return session
+    """Return an HTTP session with TLS fingerprint impersonation, retry
+    logic, keep-alive, randomised User-Agent, cache-busting headers, and
+    Client Hints.
+
+    When ``curl_cffi`` is installed the session impersonates Chrome's TLS
+    fingerprint (JA3/JA4).  Falls back to a plain ``requests.Session``
+    with anti-bot headers when ``curl_cffi`` is not available.
+    """
+    return build_tls_session(verify_ssl=verify_ssl)
 
 
 def random_headers(base_url: str = "") -> dict[str, str]:

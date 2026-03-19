@@ -1391,8 +1391,12 @@ class HPSupportModule(BaseSiteModule):
             return self.session
         if self._hp_session is not None:
             return self._hp_session
-        import requests as _req
-        s = _req.Session()
+        try:
+            from crawl4ai.extensions.bypass.tls_session import build_tls_session
+            s = build_tls_session(verify_ssl=True)
+        except ImportError:
+            import requests as _req
+            s = _req.Session()
         s.headers.update(_HEADERS)
         self._hp_session = s
         return s
