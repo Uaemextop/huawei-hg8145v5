@@ -93,8 +93,10 @@ _PRODUCT_TYPE_RE = re.compile(
 _BASE = "https://support.hp.com"
 _SWD_DRIVERS_URL = f"{_BASE}/wcc-services/swd-v2/driverDetails"
 _SWD_OS_URL = f"{_BASE}/wcc-services/swd-v2/osVersionData"
+_SWD_POPULAR_PRINTERS_URL = f"{_BASE}/wcc-services/swd-v2/popularPrinters"
 _INIT_URL = f"{_BASE}/wcc-services/s/init"
 _SEARCH_URL = f"{_BASE}/wcc-services/searchresult"
+_WARRANTY_SPECS_URL = f"{_BASE}/wcc-services/profile/devices/warranty/specs"
 
 # Product detail page (PDP) endpoints — manuals, security alerts, specs
 _PDP_MANUALS_URL = f"{_BASE}/wcc-services/pdp/manuals/getManuals"
@@ -114,12 +116,18 @@ _METHONE_URL = f"{_BASE}/wcc-services/methone/va-url"
 _FTP_HP = "https://ftp.hp.com"
 _SUDF_RESOURCES = "https://sudf-resources.hpcloud.hp.com"
 
-# Known staging / QA / developer endpoints (discovered from main.js bundle).
-# These are probed dynamically — only accessible ones are used.
+# Known staging / QA / developer endpoints (discovered from main.js bundle
+# and commUtil.js HAR analysis).  Probed dynamically — only accessible ones used.
 _STAGING_HOSTS = (
     # QA environments (internal — usually unreachable from public internet)
     "qa2.houston.hp.com",
     "ppssupport-qa2.houston.hp.com",
+    # ITG (integration-test) environments (from commUtil.js — unreachable)
+    "wcc-dev1.itg.support.hp.com",
+    "wcc-qa1.itg.support.hp.com",
+    "mastiff-itg.ext.hp.com",
+    # UAT environment (returns 403 Access Denied from Akamai)
+    "uat.support.hp.com",
     # Staging portal (CloudFront-backed — sometimes 403)
     "stage.portalshell.int.hp.com",
     "myaccount.stage.portalshell.int.hp.com",
@@ -127,6 +135,10 @@ _STAGING_HOSTS = (
     "stg.cd.id.hp.com",
     "account.stg.cd.id.hp.com",
     "myaccount.stg.cd.id.hp.com",
+    # Staging navbar (from commUtil.js — publicly accessible)
+    "global-navbar-backend.stg.cd.id.hp.com",
+    # ITG live www (from commUtil.js — publicly accessible)
+    "itg-live.www.hp.com",
 )
 
 # Methone virtual-agent API endpoints (discovered from SSF HPWPD/HPDIA scripts)
@@ -414,6 +426,16 @@ class HPSupportModule(BaseSiteModule):
                     products.append((oid, name))
             log.debug("[HP] Query '%s' → %d new products (total %d)",
                       query, len(found), len(products))
+
+        # Additional discovery: fetch popular printers (has OIDs in URLs)
+        popular = self._fetch_popular_products(cc, lc)
+        for oid, name in popular:
+            if oid not in seen_oids:
+                seen_oids.add(oid)
+                products.append((oid, name))
+        if popular:
+            log.info("[HP] Popular products: %d new products (total %d)",
+                     len(popular), len(products))
 
         # Last resort: parse the support page HTML for product links
         if not products:
@@ -711,6 +733,101 @@ class HPSupportModule(BaseSiteModule):
             if m:
                 results.append((m.group(1), name))
 
+    def _fetch_popular_products(
+        self, cc: str, lc: str,
+    ) -> list[tuple[str, str]]:
+        """Fetch popular products from HP's ``/swd-v2/popularPrinters`` API.
+
+        HAR analysis shows this endpoint returns product titles and URLs
+        with ``h_product=<OID>`` parameters.  Returns ``(oid, name)`` pairs.
+        """
+        sess = self._get_session()
+        results: list[tuple[str, str]] = []
+        try:
+            resp = sess.get(
+                f"{_SWD_POPULAR_PRINTERS_URL}/{cc}-{lc}",
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return results
+            data = resp.json().get("data", [])
+            if not isinstance(data, list):
+                return results
+            for item in data:
+                title = item.get("productTitle", "")
+                url = item.get("productUrl", "")
+                # Extract h_product=<OID> from the navigation URL
+                m = re.search(r"h_product=(\d+)", url)
+                if m and title:
+                    results.append((m.group(1), title))
+            if results:
+                log.info("[HP] popularPrinters: discovered %d products",
+                         len(results))
+        except Exception as exc:
+            log.info("[HP] popularPrinters fetch failed: %s", exc)
+        return results
+
+    def _fetch_product_specs(
+        self, oid: str, cc: str, lc: str,
+    ) -> dict:
+        """Fetch product specifications from ``/wcc-services/profile/devices/warranty/specs``.
+
+        HAR analysis shows this endpoint returns:
+        - ``productName``: human-readable name (e.g. "HP Pavilion - 15-ec0004la")
+        - ``productSeriesName``: series name
+        - ``productLineCode``, ``productNumberOid``, ``productNameOid``
+        - ``imageUri``: product image URL
+
+        Returns a dict with extracted fields, or empty dict on failure.
+        """
+        sess = self._get_session()
+        try:
+            resp = sess.post(
+                _WARRANTY_SPECS_URL,
+                json={
+                    "cc": cc,
+                    "lc": lc,
+                    "utcOffset": "M0600",
+                    "devices": [{
+                        "seriesOid": None,
+                        "modelOid": int(oid) if oid.isdigit() else None,
+                        "serialNumber": None,
+                        "displayProductNumber": None,
+                        "countryOfPurchase": cc,
+                    }],
+                    "captchaToken": "",
+                },
+                params={"cache": "true"},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                return {}
+            data = resp.json().get("data", {})
+            if not data:
+                return {}
+            devices = data.get("devices", [])
+            if not devices:
+                return {}
+            specs_data = devices[0].get("productSpecs", {})
+            if isinstance(specs_data, dict):
+                # The specs data may be nested inside its own data key
+                inner = specs_data.get("data", specs_data)
+                return {
+                    "productName": inner.get("productName", ""),
+                    "productSeriesName": inner.get("productSeriesName", ""),
+                    "productLineCode": inner.get("productLineCode", ""),
+                    "productNumberOid": inner.get("productNumberOid"),
+                    "productNameOid": inner.get("productNameOid"),
+                    "productSeriesOid": inner.get("productSeriesOid"),
+                    "productBigSeriesOid": inner.get("productBigSeriesOid"),
+                    "imageUri": inner.get("imageUri", ""),
+                }
+        except Exception as exc:
+            log.info("[HP] Product specs fetch failed for OID=%s: %s", oid, exc)
+        return {}
+
     def _collect_files_for_product(
         self,
         oid: str,
@@ -720,10 +837,34 @@ class HPSupportModule(BaseSiteModule):
         product_name: str = "",
     ) -> None:
         """Fetch OS versions and driver metadata for a single product
-        and append discovered :class:`FileEntry` items to *entries*."""
+        and append discovered :class:`FileEntry` items to *entries*.
+
+        Uses the warranty/specs API to resolve the real product name and
+        additional OID fields (productLineCode, productNumberOid,
+        productNameOid) that HP's SPA includes in the driverDetails POST
+        body for more accurate results.
+        """
+        # Resolve real product name from specs API when only a URL-derived
+        # name is available (e.g. "hp-pavilion-gaming" → "HP Pavilion - 15-ec0004la")
+        specs = self._fetch_product_specs(oid, cc, lc)
+        if specs.get("productName") and (
+            not product_name or product_name == product_name.replace("-", " ").title()
+        ):
+            product_name = specs["productName"]
+            log.info("[HP] Resolved product name: %s", product_name)
+
         os_list = self._fetch_os_versions(oid, cc, lc)
         if not os_list:
             os_list = self._detect_os_from_init(cc, lc)
+
+        # Enrich OS info dicts with product-specific fields from specs
+        for os_info in os_list:
+            if specs.get("productLineCode"):
+                os_info.setdefault("productLineCode", specs["productLineCode"])
+            if specs.get("productNumberOid"):
+                os_info.setdefault("productNumberOid", specs["productNumberOid"])
+            if specs.get("productNameOid"):
+                os_info.setdefault("productNameOid", specs["productNameOid"])
 
         for os_info in os_list:
             try:
@@ -1217,17 +1358,37 @@ class HPSupportModule(BaseSiteModule):
         product, and URL.
         """
         sess = self._get_session()
-        payload = {
+        # The ``osName`` field should contain the OS display name (e.g.
+        # "Windows 10"), NOT the platform name (e.g. "Windows").  The HAR
+        # traffic shows HP's SPA sends ``osName: "Windows 10"`` derived
+        # from the OS version entry's name, stripped of bit/version suffix.
+        os_name = os_info.get("name", "")
+        os_display = os_info.get("platformName", os_name)
+        # Try to derive a clean OS family name for the POST body
+        # e.g. "Windows 10, versión 1903 (64 bits)" → "Windows 10"
+        if os_name and os_name != os_display:
+            # Extract the base OS name (before comma or parenthesis)
+            base = os_name.split(",")[0].split("(")[0].strip()
+            if base:
+                os_display = base
+
+        payload: dict = {
             "cc": cc,
             "lc": lc,
             "productSeriesOid": oid,
             "osTMSId": os_info.get("id", ""),
-            "osName": os_info.get("platformName", ""),
-            "platformId": os_info.get("platformId", ""),
+            "osName": os_display,
+            "platformId": os_info.get("id", os_info.get("platformId", "")),
         }
+        # Include extra fields from product specs if available
+        if os_info.get("productLineCode"):
+            payload["productLineCode"] = os_info["productLineCode"]
+        if os_info.get("productNumberOid"):
+            payload["productNumberOid"] = os_info["productNumberOid"]
+        if os_info.get("productNameOid"):
+            payload["productNameOid"] = os_info["productNameOid"]
 
         entries: list[FileEntry] = []
-        os_name = os_info.get("name", "")
         try:
             resp = sess.post(
                 _SWD_DRIVERS_URL,
@@ -1244,9 +1405,16 @@ class HPSupportModule(BaseSiteModule):
                 return entries
 
             for sw_type in data.get("softwareTypes", []):
+                # HAR analysis: category name is in ``accordionNameEn``
+                # (canonical English name like "Driver-Network") and
+                # ``accordionName`` (localized).  Use English first for
+                # consistency across locales.
                 category = sw_type.get(
-                    "accordionName",
-                    sw_type.get("categoryName", ""),
+                    "accordionNameEn",
+                    sw_type.get(
+                        "accordionName",
+                        sw_type.get("categoryName", ""),
+                    ),
                 )
                 # Primary structure: softwareDriversList[]
                 for drv in sw_type.get("softwareDriversList", []):
@@ -1282,33 +1450,44 @@ class HPSupportModule(BaseSiteModule):
         latest = driver.get("latestVersionDriver") or {}
 
         # The real driver name is in ``title``, NOT ``name`` (which is
-        # typically "N/A" in HP's API).  Fallback chain:
-        #   title → name (if not "N/A") → detailInformation.fileName → URL
-        drv_title = latest.get("title", "").strip()
-        drv_name_raw = latest.get("name", "").strip()
+        # typically "N/A" or ``None`` in HP's API).  HAR analysis confirms
+        # title contains human-readable names like "Realtek RTL8xxx
+        # Wireless LAN Drivers".  Titles often have a BOM prefix (U+FEFF)
+        # that must be stripped.
+        #
+        # Fallback chain:
+        #   title → name (if not "N/A"/None) → detailInformation.fileName → URL
+        drv_title = (latest.get("title") or "").strip().lstrip("\ufeff").strip()
+        drv_name_raw = (latest.get("name") or "").strip().lstrip("\ufeff").strip()
+        outer_name = (driver.get("name") or "").strip().lstrip("\ufeff").strip()
         drv_name = drv_title or (
             drv_name_raw if drv_name_raw and drv_name_raw.upper() != "N/A"
-            else driver.get("name", "")
+            else outer_name if outer_name and outer_name.upper() != "N/A"
+            else ""
         )
 
-        version = latest.get("version", "")
-        size = latest.get("fileSize", "")
-        release = latest.get("releaseDate", "")
+        version = latest.get("version") or ""
+        size = latest.get("fileSize") or ""
+        release = latest.get("releaseDate") or ""
+        release_str = latest.get("releaseDateString") or ""
 
         desc_html = (latest.get("detailInformation") or {}).get("description", "")
         # Strip HTML tags for plain-text description
         description = re.sub(r"<[^>]+>", " ", desc_html).strip()[:_MAX_DESCRIPTION_LENGTH]
 
-        file_url = latest.get("fileUrl", "")
+        file_url = latest.get("fileUrl") or ""
         if file_url and file_url.startswith("http"):
             # Derive file name from productSoftwareFileList or URL
-            sub_files = latest.get("productSoftwareFileList", [])
+            sub_files = latest.get("productSoftwareFileList") or []
             if sub_files:
-                fname = sub_files[0].get("fileName", "")
-                fsize = sub_files[0].get("fileSize", size)
+                fname = sub_files[0].get("fileName") or ""
+                fsize = sub_files[0].get("fileSize") or size
             else:
                 detail_info = latest.get("detailInformation") or {}
-                fname = detail_info.get("fileName", "")
+                fname = detail_info.get("fileName") or ""
+                # HAR shows fileName can be None string "None" — skip those
+                if fname and fname.lower() == "none":
+                    fname = ""
                 if not fname:
                     fname = file_url.rsplit("/", 1)[-1].split("?")[0]
                 fsize = size
@@ -1324,12 +1503,17 @@ class HPSupportModule(BaseSiteModule):
                 if fname_base != drv_base and fname_base not in drv_base:
                     display_name = f"{drv_name} ({fname})"
 
+            # Prefer releaseDateString (human-readable) over ISO release date
+            rel_date = release_str or (
+                str(release).split("T")[0] if release else ""
+            )
+
             entries.append(FileEntry(
                 name=display_name or file_url.rsplit("/", 1)[-1],
                 url=file_url,
                 size=str(fsize) if fsize else "",
                 version=str(version) if version else "",
-                release_date=str(release).split("T")[0] if release else "",
+                release_date=rel_date,
                 category=category,
                 os=os_name,
                 description=description,
