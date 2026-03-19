@@ -610,19 +610,9 @@ def _is_ami_download(url: str) -> bool:
     except Exception:
         return False
     host = host.lower()
-    return any(d in host for d in _HUBSPOT_DOMAINS) or "ami.com" in host
-
-
-def _is_product_page(link: str, slug: str) -> bool:
-    """Return *True* if a WP page is a product or solution page."""
-    if "/products/" in link or "/solutions/" in link:
+    if any(d in host for d in _HUBSPOT_DOMAINS):
         return True
-    if slug in (
-        "security-center", "security-advisories", "support-login",
-        "learning-center",
-    ):
-        return True
-    return False
+    return host == "ami.com" or host.endswith(".ami.com")
 
 
 def _build_entry(
