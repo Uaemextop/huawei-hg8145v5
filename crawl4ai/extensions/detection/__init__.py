@@ -1,5 +1,5 @@
 """
-crawl4ai.extensions.detection – WAF / CAPTCHA / soft-404 / WordPress detection.
+crawl4ai.extensions.detection – technology / framework detection.
 
 Individual detector modules:
 
@@ -9,6 +9,19 @@ Individual detector modules:
 * :mod:`.soft404` – Soft-404 page detection
 * :mod:`.wordpress` – WordPress fingerprinting
 * :mod:`.captcha` – CAPTCHA embed detection (reCAPTCHA, hCAPTCHA, Turnstile, …)
+* :mod:`.react` – React.js detection
+* :mod:`.angular` – Angular detection
+* :mod:`.vue` – Vue.js detection
+* :mod:`.nextjs` – Next.js detection
+* :mod:`.nuxt` – Nuxt.js detection
+* :mod:`.svelte` – Svelte / SvelteKit detection
+* :mod:`.ember` – Ember.js detection
+* :mod:`.jquery` – jQuery detection
+* :mod:`.bootstrap` – Bootstrap detection
+* :mod:`.tailwind` – Tailwind CSS detection
+* :mod:`.gatsby` – Gatsby detection
+* :mod:`.backbone` – Backbone.js detection
+* :mod:`.typescript` – TypeScript build-artifact detection
 """
 
 from __future__ import annotations
@@ -20,6 +33,19 @@ from .waf import WAFDetector, WAF_SIGNATURES
 from .soft404 import Soft404Detector
 from .wordpress import WordPressDetector
 from .captcha import CaptchaDetector
+from .react import ReactDetector
+from .angular import AngularDetector
+from .vue import VueDetector
+from .nextjs import NextjsDetector
+from .nuxt import NuxtDetector
+from .svelte import SvelteDetector
+from .ember import EmberDetector
+from .jquery import JQueryDetector
+from .bootstrap import BootstrapDetector
+from .tailwind import TailwindDetector
+from .gatsby import GatsbyDetector
+from .backbone import BackboneDetector
+from .typescript import TypeScriptDetector
 
 ALL_DETECTORS: list[BaseDetector] = [
     CloudflareDetector(),
@@ -28,6 +54,19 @@ ALL_DETECTORS: list[BaseDetector] = [
     Soft404Detector(),
     WordPressDetector(),
     CaptchaDetector(),
+    ReactDetector(),
+    AngularDetector(),
+    VueDetector(),
+    NextjsDetector(),
+    NuxtDetector(),
+    SvelteDetector(),
+    EmberDetector(),
+    JQueryDetector(),
+    BootstrapDetector(),
+    TailwindDetector(),
+    GatsbyDetector(),
+    BackboneDetector(),
+    TypeScriptDetector(),
 ]
 
 
@@ -58,6 +97,19 @@ __all__ = [
     "Soft404Detector",
     "WordPressDetector",
     "CaptchaDetector",
+    "ReactDetector",
+    "AngularDetector",
+    "VueDetector",
+    "NextjsDetector",
+    "NuxtDetector",
+    "SvelteDetector",
+    "EmberDetector",
+    "JQueryDetector",
+    "BootstrapDetector",
+    "TailwindDetector",
+    "GatsbyDetector",
+    "BackboneDetector",
+    "TypeScriptDetector",
     "ALL_DETECTORS",
     "WAF_SIGNATURES",
 ]
