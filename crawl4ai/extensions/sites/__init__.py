@@ -30,12 +30,14 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import BaseSiteModule, FileEntry
+from .ami_bios import AMIBiosModule
 from .hp_support import HPSupportModule
 
 if TYPE_CHECKING:
     import requests
 
 __all__ = [
+    "AMIBiosModule",
     "BaseSiteModule",
     "FileEntry",
     "HPSupportModule",
@@ -48,6 +50,7 @@ log = logging.getLogger(__name__)
 # Add new site modules here.  Order does not matter – all matching modules
 # are applied, not just the first one.
 _REGISTRY: list[type[BaseSiteModule]] = [
+    AMIBiosModule,
     HPSupportModule,
 ]
 
