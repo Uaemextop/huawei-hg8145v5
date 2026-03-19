@@ -79,13 +79,19 @@ class BaseSiteModule(abc.ABC):
         metadata (name, size, version, release date, category, OS,
         description) and the download URL.
 
-        The downloader will write these entries to a ``file_index.md``
-        Markdown file instead of downloading the actual files.
+        The downloader:
+
+        1. Writes the returned entries to a ``file_index.md`` Markdown
+           file as a structured catalog.
+        2. **Enqueues every ``url`` field for actual download**, so the
+           discovered files are fetched and saved to disk alongside the
+           crawled HTML pages.
 
         Returns
         -------
         list[FileEntry]
-            One entry per discoverable file.
+            One entry per discoverable file.  Each entry must include a
+            ``url`` key with the direct HTTP(S) download link.
         """
 
     def page_urls(self, url: str) -> list[str]:

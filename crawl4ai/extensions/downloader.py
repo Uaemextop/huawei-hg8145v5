@@ -222,6 +222,24 @@ _META_REFRESH_RE = re.compile(
 # ── Chunk size for streaming ─────────────────────────────────────────────
 _STREAM_CHUNK = 524_288  # 512 KiB
 
+# ── CDN / file-hosting domain patterns for "all" mode ────────────────────
+# Used by _is_downloadable to recognise extensionless tracking-redirect
+# URLs (e.g. HubSpot go.ami.com) that ultimately serve binary files.
+# Matching is intentionally loose (substring against the lowercased host)
+# so that CDN subdomains like "fs1.hubspotusercontent-na1.net" are caught.
+# False-positive risk is low: these matches only apply when _target_exts is
+# None ("all" mode), and the actual Content-Type check from the HEAD
+# response provides the definitive gate before any file is downloaded.
+_CDN_HOST_PATTERNS: tuple[str, ...] = (
+    "hubspot",                    # *.hubspotusercontent*.net, go.ami.com, etc.
+    "amazonaws.com",              # S3 presigned URLs
+    "cloudfront.net",             # CloudFront distributions
+    "akamaized.net",              # Akamai media delivery
+    "fastly.net",                 # Fastly CDN
+    "storage.googleapis.com",     # GCS public buckets
+    "blob.core.windows.net",      # Azure Blob Storage
+)
+
 
 class SiteDownloader:
     """Download pages and files from a website, saving locally and optionally
@@ -342,8 +360,10 @@ class SiteDownloader:
         self._queue.append((self.start_url, 0))
 
         # ── Site-specific modules ────────────────────────────────────
-        # Check if any site module matches the start URL and generate
-        # a file index with metadata instead of downloading files.
+        # Matching site modules (e.g. AMIBiosModule, HPSupportModule) are
+        # called to dynamically discover downloadable files via site APIs.
+        # The discovered entries are written to file_index.md AND their
+        # URLs are enqueued into the download queue for actual download.
         site_modules = get_matching_modules(self.start_url, session=self.session)
         for mod in site_modules:
             log.info("🔌 %s matched — generating file index …",
@@ -358,6 +378,28 @@ class SiteDownloader:
                              _c(mod.name, "magenta"),
                              _c(len(index_entries), "green"),
                              _c(index_path, "green"))
+
+                    # Enqueue every discovered file URL for actual download.
+                    # Site modules return FileEntry dicts whose "url" field
+                    # is the direct download link (CDN, cloud storage, etc.).
+                    # Without this step the entries appear in file_index.md
+                    # but are never fetched and saved to disk.
+                    _enqueued = 0
+                    for _entry in index_entries:
+                        _file_url = (_entry.get("url") or "").strip()
+                        if not _file_url or not _file_url.startswith(
+                            ("http://", "https://")
+                        ):
+                            continue
+                        _key = self._url_key(_file_url)
+                        with self._lock:
+                            if _key not in self._visited:
+                                self._queue.append((_file_url, 0))
+                                _enqueued += 1
+                    if _enqueued:
+                        log.info("🔌 %s: enqueued %s URL(s) for download",
+                                 _c(mod.name, "magenta"),
+                                 _c(_enqueued, "green"))
                 else:
                     log.info("🔌 %s: no files discovered", _c(mod.name, "magenta"))
             except Exception as exc:
@@ -466,31 +508,56 @@ class SiteDownloader:
     # ── Internal: process a single URL ───────────────────────────────
 
     def _process_url(self, url: str, depth: int) -> None:
-        """Fetch a URL: if it's a page, scan for links; if it's a file, download it."""
+        """Fetch a URL: if it's a page, scan for links; if it's a file, download it.
+
+        Uses a HEAD request first to inspect Content-Type cheaply.
+        Falls back to a byte-range GET when HEAD is rejected (non-2xx) or
+        returns an empty Content-Type, which is common for CDN presigned
+        URLs and HubSpot tracking redirects.
+        """
+        ct = ""
+        cl = 0
+        head_ok = False
         try:
-            # HEAD first to check Content-Type without downloading body
             resp = self.session.head(
                 url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
             )
+            if resp.ok:
+                ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                cl = int(resp.headers.get("Content-Length", "0") or "0")
+                head_ok = True
+                # Use the final URL after redirects for type/extension check
+                url = resp.url
         except _NETWORK_ERRORS as exc:
             log.debug("HEAD failed for %s: %s", url, exc)
-            with self._lock:
-                self._error_count += 1
-            return
 
-        ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        cl = int(resp.headers.get("Content-Length", "0") or "0")
+        if not head_ok:
+            # HEAD failed or was refused – sniff Content-Type with a range GET
+            try:
+                resp = self.session.get(
+                    url, timeout=REQUEST_TIMEOUT, allow_redirects=True,
+                    stream=True, headers={"Range": "bytes=0-0"},
+                )
+                ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                cl = int(resp.headers.get("Content-Length", "0") or "0")
+                url = resp.url
+                resp.close()
+            except _NETWORK_ERRORS as exc:
+                log.debug("GET sniff failed for %s: %s", url, exc)
+                with self._lock:
+                    self._error_count += 1
+                return
 
         # Is this a downloadable file?
         if self._is_downloadable(url, ct):
             self._download_file(url, ct, cl)
             return
 
-        # Otherwise treat as a page to scan
-        if "html" in ct or "xml" in ct or "text" in ct:
+        # Otherwise treat as a page to scan for further links
+        if "html" in ct or "xml" in ct or "text" in ct or not ct:
             self._scan_page(url, depth)
         else:
-            # Unknown content type – save it anyway
+            # Unknown/binary content type with no recognised extension – save it
             self._download_file(url, ct, cl)
 
     def _scan_page(self, url: str, depth: int) -> None:
@@ -592,27 +659,44 @@ class SiteDownloader:
             abs_url = urllib.parse.urljoin(resp.url, link)
             parsed = urllib.parse.urlparse(abs_url)
 
+            # Skip completely invalid or non-HTTP URLs
+            if parsed.scheme not in ("http", "https"):
+                continue
+
             # Check host
             is_external = parsed.netloc != self.allowed_host
-            if is_external and not self.allow_external:
-                # Allow cloud storage hosts even when external is disabled
+
+            # Downloadable files: always enqueue regardless of host / allow_external.
+            # The binary extension / Content-Type check is the real gate.
+            if self._is_downloadable(abs_url, ""):
+                key = self._url_key(abs_url)
+                with self._lock:
+                    if key not in self._visited:
+                        new_file_links += 1
+                        self._queue.append((abs_url, depth + 1))
+                continue
+
+            # For page links: respect host restriction and depth limit.
+            # External page links are skipped (we don't want to crawl other sites).
+            # allow_external=False also blocks non-cloud external file links but
+            # that is handled above — here we only gate further page crawling.
+            if is_external:
+                # Allow cloud storage hosts for page-level following only when
+                # allow_external is True (cloud pages may contain more links).
+                if not self.allow_external:
+                    continue
                 is_cloud = parsed.netloc in CLOUD_STORAGE_HOSTS or any(
                     parsed.netloc.endswith("." + h) for h in CLOUD_STORAGE_HOSTS
                 )
                 if not is_cloud:
                     continue
 
-            key = self._url_key(abs_url)
-            with self._lock:
-                if key in self._visited:
-                    continue
-
-            if self._is_downloadable(abs_url, ""):
-                new_file_links += 1
-                self._queue.append((abs_url, depth + 1))
-            elif depth < self.max_depth and not is_external:
-                new_page_links += 1
-                self._queue.append((abs_url, depth + 1))
+            if depth < self.max_depth:
+                key = self._url_key(abs_url)
+                with self._lock:
+                    if key not in self._visited:
+                        new_page_links += 1
+                        self._queue.append((abs_url, depth + 1))
 
         log.info("📄 %s %s → %s file links, %s page links",
                  _c("[PAGE]", "blue"), _c(url, "cyan"),
@@ -748,7 +832,18 @@ class SiteDownloader:
     # ── File type detection ──────────────────────────────────────────
 
     def _is_downloadable(self, url: str, content_type: str) -> bool:
-        """Check if a URL points to a downloadable file."""
+        """Check if a URL points to a downloadable file.
+
+        Detection order:
+        1. Content-Type is a known binary MIME type.
+        2. URL path has a file extension in the target extension set.
+        3. In "all" mode (``_target_exts is None``): any URL whose path
+           contains a dot (has an extension) is downloadable.
+        4. In "all" mode: URLs that lack an extension but whose hostname
+           matches a known CDN / file-hosting domain pattern are treated
+           as downloadable so tracking-redirect URLs (e.g. HubSpot) that
+           ultimately serve binaries are followed and saved to disk.
+        """
         # Check by content type
         ct = content_type.split(";")[0].strip().lower() if content_type else ""
         if ct in BINARY_CONTENT_TYPES:
@@ -762,21 +857,29 @@ class SiteDownloader:
         # Check by extension
         parsed = urllib.parse.urlparse(url)
         path = parsed.path.lower()
-        # Get extension
+        # Get extension (strip query/fragment artifacts)
         dot_pos = path.rfind(".")
         if dot_pos >= 0:
             ext = path[dot_pos + 1:]
-            # Strip trailing slashes or query artifacts
             ext = ext.split("/")[0].split("?")[0].split("#")[0]
             if self._target_exts is None:
-                # "all" mode – any file with an extension is downloadable
+                # "all" mode – any URL with a file extension is downloadable
                 return bool(ext)
             if ext in self._target_exts:
                 return True
 
-        # Check with regex if available
+        # Check with compiled regex if available
         if self._ext_re and self._ext_re.search(parsed.path):
             return True
+
+        # In "all" mode, extensionless URLs from known CDN / file-hosting
+        # domains are treated as downloadable so that tracking-redirect
+        # URLs (e.g. HubSpot go.ami.com) that resolve to binary files are
+        # fetched and saved to disk.  Only applies when _target_exts is None.
+        if self._target_exts is None:
+            host = parsed.netloc.lower()
+            if any(pattern in host for pattern in _CDN_HOST_PATTERNS):
+                return True
 
         return False
 
