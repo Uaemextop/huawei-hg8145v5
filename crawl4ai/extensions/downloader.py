@@ -104,6 +104,10 @@ def _setup_colored_logging(level: int = logging.INFO) -> None:
     Colour is applied inline via :func:`_c` to individual keywords / URLs
     inside the log message – the line itself is not coloured.
 
+    Also configures the ``crawl4ai.extensions.sites`` logger so that
+    site-specific modules (e.g. HP support) can emit real-time progress
+    messages through the same handler.
+
     Side-effects (intentional for CLI / workflow usage):
     * Suppresses verbose ``urllib3`` pool and retry log messages.
     """
@@ -115,6 +119,15 @@ def _setup_colored_logging(level: int = logging.INFO) -> None:
     log.addHandler(handler)
     log.setLevel(level)
     log.propagate = False
+
+    # Configure site-module loggers so their info messages appear in
+    # real-time (they use logging.getLogger(__name__) which falls under
+    # the ``crawl4ai.extensions.sites`` hierarchy).
+    sites_log = logging.getLogger("crawl4ai.extensions.sites")
+    if not sites_log.handlers:
+        sites_log.addHandler(handler)
+        sites_log.setLevel(level)
+        sites_log.propagate = False
 
     # Quiet down noisy third-party loggers (urllib3 pool/retry messages)
     logging.getLogger("urllib3").setLevel(logging.ERROR)

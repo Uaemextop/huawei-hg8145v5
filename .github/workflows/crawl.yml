@@ -249,7 +249,7 @@ jobs:
           ALLOW_EXT="True"
           [ "${{ inputs.allow_external_urls }}" = "false" ] && ALLOW_EXT="False"
 
-          python3 -c "
+          python3 -u -c "
           from crawl4ai.extensions.downloader import SiteDownloader
 
           exts = '${{ inputs.download_extensions }}'.split(',')
