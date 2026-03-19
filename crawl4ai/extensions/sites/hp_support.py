@@ -174,15 +174,35 @@ _NAV_CHILD_KEYS = (
     "menuItems", "childNodes",
 )
 
-_HEADERS = {
+# Pool of User-Agent strings — rotated across request batches to reduce
+# the chance of a single fingerprint hitting Akamai rate limits.
+_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
+    "Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:128.0) "
+    "Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
+    "Gecko/20100101 Firefox/128.0",
+)
+
+_HEADERS: dict[str, str] = {
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
+    "Referer": "https://support.hp.com/us-en/drivers",
+    "Origin": "https://support.hp.com",
+    "User-Agent": _USER_AGENTS[0],
 }
+
+# Minimum delay (seconds) between API requests to avoid Akamai rate
+# limits.  Curl testing shows ~45 burst requests trigger a 5-minute
+# IP-level ban; 1 req/s sustains indefinitely.
+_REQUEST_DELAY = 0.35
 
 
 def _strip_bom(text: str | None) -> str:
@@ -347,9 +367,8 @@ class HPSupportModule(BaseSiteModule):
             _add(f"{_BASE}/{cc}-{lc}/drivers/{oid}")
 
         # 2. Add category page links from the navigation API
-        sess = self._get_session()
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _NAV_URL,
                 params={"cc": cc, "lc": lc},
                 headers=_HEADERS,
@@ -365,7 +384,7 @@ class HPSupportModule(BaseSiteModule):
 
         # 3. Add sitemap URLs from HP's sitemap API
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _SITEMAP_URL,
                 params={"cc": cc, "lc": lc},
                 headers=_HEADERS,
@@ -515,11 +534,10 @@ class HPSupportModule(BaseSiteModule):
         full category tree and extracts all category/sub-category names
         to use as search queries.
         """
-        sess = self._get_session()
         categories: list[str] = []
         try:
             log.info("[HP] Fetching categories from /wcc-services/navigation …")
-            resp = sess.get(
+            resp = self._api_get(
                 _NAV_URL,
                 params={"cc": cc, "lc": lc},
                 headers=_HEADERS,
@@ -570,10 +588,9 @@ class HPSupportModule(BaseSiteModule):
         The init response contains ``supportCategories`` and
         ``productFinder`` data that can yield category keywords.
         """
-        sess = self._get_session()
         categories: list[str] = []
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _INIT_URL,
                 params={"cc": cc, "lc": lc},
                 headers=_HEADERS,
@@ -628,12 +645,11 @@ class HPSupportModule(BaseSiteModule):
         returns device types (printer, laptop, desktop, etc.) with their
         ``deviceType`` and ``toolTipTitle`` fields.
         """
-        sess = self._get_session()
         types: list[str] = []
         seen: set[str] = set()
         for cms_key in ("wcc_swd_pfinder", "wcc_sitehome_producticons"):
             try:
-                resp = sess.get(
+                resp = self._api_get(
                     f"{_CMS_URL}/{cc}-{lc}/{cms_key}",
                     headers=_HEADERS,
                     timeout=_REQUEST_TIMEOUT,
@@ -670,11 +686,10 @@ class HPSupportModule(BaseSiteModule):
         This is a dynamic fallback: the terms come from the live JS
         bundle, not from a static list.
         """
-        sess = self._get_session()
         terms: list[str] = []
         try:
             # 1. Fetch the main page to discover the main.js bundle URL
-            resp = sess.get(
+            resp = self._api_get(
                 f"{_BASE}/{cc}-{lc}/",
                 headers=_HEADERS,
                 timeout=_REQUEST_TIMEOUT,
@@ -696,7 +711,7 @@ class HPSupportModule(BaseSiteModule):
             log.info("[HP] Downloading Angular bundle: %s", main_js_url)
 
             # 2. Fetch main.js with proper headers
-            js_resp = sess.get(
+            js_resp = self._api_get(
                 main_js_url,
                 headers={
                     **_HEADERS,
@@ -744,7 +759,6 @@ class HPSupportModule(BaseSiteModule):
         - ``context=swd`` with ``navigation=false`` — driver download pages
         Both are tried for maximum coverage.
         """
-        sess = self._get_session()
         results: list[tuple[str, str]] = []
         seen: set[str] = set()
 
@@ -754,7 +768,7 @@ class HPSupportModule(BaseSiteModule):
                 params: dict = {"q": query, "context": ctx}
                 if ctx == "swd":
                     params["navigation"] = "false"
-                resp = sess.get(
+                resp = self._api_get(
                     f"{_SEARCH_URL}/{cc}-{lc}",
                     params=params,
                     headers=_HEADERS,
@@ -828,11 +842,10 @@ class HPSupportModule(BaseSiteModule):
         products.  It fetches the HTML of the support page and extracts
         links matching product URL patterns.
         """
-        sess = self._get_session()
         results: list[tuple[str, str]] = []
         try:
             url = f"{_BASE}/{cc}-{lc}/"
-            resp = sess.get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
+            resp = self._api_get(url, headers=_HEADERS, timeout=_REQUEST_TIMEOUT)
             if not resp.ok:
                 log.info("[HP] Support page HTML fetch returned HTTP %d",
                          resp.status_code)
@@ -876,10 +889,9 @@ class HPSupportModule(BaseSiteModule):
         HAR analysis shows this endpoint returns product titles and URLs
         with ``h_product=<OID>`` parameters.  Returns ``(oid, name)`` pairs.
         """
-        sess = self._get_session()
         results: list[tuple[str, str]] = []
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 f"{_SWD_POPULAR_PRINTERS_URL}/{cc}-{lc}",
                 headers=_HEADERS,
                 timeout=_REQUEST_TIMEOUT,
@@ -916,9 +928,8 @@ class HPSupportModule(BaseSiteModule):
 
         Returns a dict with extracted fields, or empty dict on failure.
         """
-        sess = self._get_session()
         try:
-            resp = sess.post(
+            resp = self._api_post(
                 _WARRANTY_SPECS_URL,
                 json={
                     "cc": cc,
@@ -1022,11 +1033,11 @@ class HPSupportModule(BaseSiteModule):
 
         total_os_entries = 0
         consecutive_driver_403s = 0
-        for os_info in os_list:
+        for idx, os_info in enumerate(os_list):
             # Rate-limit detection: if driverDetails returned 403 three
             # times in a row for this product, stop trying more OS versions.
             if consecutive_driver_403s >= 3:
-                remaining = len(os_list) - os_list.index(os_info)
+                remaining = len(os_list) - idx
                 log.info(
                     "[HP]   Rate-limited — skipping remaining %d OS versions "
                     "for this product",
@@ -1066,10 +1077,9 @@ class HPSupportModule(BaseSiteModule):
 
         Returns :class:`FileEntry` dicts for each manual PDF/document.
         """
-        sess = self._get_session()
         entries: list[FileEntry] = []
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _PDP_MANUALS_URL,
                 params={
                     "productID": oid,
@@ -1118,10 +1128,9 @@ class HPSupportModule(BaseSiteModule):
 
         Returns :class:`FileEntry` dicts for alerts that have links.
         """
-        sess = self._get_session()
         entries: list[FileEntry] = []
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 f"{_PDP_SECURITY_ALERTS_URL}/{cc}-{lc}/{oid}",
                 headers=_HEADERS,
                 timeout=_REQUEST_TIMEOUT,
@@ -1173,7 +1182,6 @@ class HPSupportModule(BaseSiteModule):
         for HP Support Solutions Framework and other diagnostic tools.
         Also probes the known FTP tool paths.
         """
-        sess = self._get_session()
         entries: list[FileEntry] = []
         seen_urls: set[str] = set()
 
@@ -1197,7 +1205,7 @@ class HPSupportModule(BaseSiteModule):
         for script_name in _SUDF_SCRIPTS:
             try:
                 log.info("[HP] Fetching SUDF script: %s", script_name)
-                resp = sess.get(
+                resp = self._api_get(
                     f"{_SUDF_RESOURCES}/DMDScripts/{script_name}",
                     headers={**_HEADERS, "Accept": "*/*"},
                     timeout=_REQUEST_TIMEOUT,
@@ -1224,6 +1232,7 @@ class HPSupportModule(BaseSiteModule):
 
         # 2. Probe known FTP tool paths
         log.info("[HP] Probing %d FTP tool paths …", len(_FTP_TOOL_PATHS))
+        sess = self._get_session()
         for path in _FTP_TOOL_PATHS:
             url = f"{_FTP_HP}/{path}"
             if url not in seen_urls:
@@ -1269,14 +1278,13 @@ class HPSupportModule(BaseSiteModule):
         Only accessible endpoints generate entries.  Unreachable hosts
         are silently skipped.
         """
-        sess = self._get_session()
         entries: list[FileEntry] = []
         log.info("[HP] Probing %d staging/QA hosts + 2 Methone APIs …",
                  len(_STAGING_HOSTS))
 
         for host in _STAGING_HOSTS:
             try:
-                resp = sess.get(
+                resp = self._api_get(
                     f"https://{host}/",
                     headers=_HEADERS,
                     timeout=10,
@@ -1309,7 +1317,7 @@ class HPSupportModule(BaseSiteModule):
             (_METHONE_ITG, "Methone API (ITG staging)"),
         ):
             try:
-                resp = sess.get(
+                resp = self._api_get(
                     methone_url,
                     headers=_HEADERS,
                     timeout=10,
@@ -1337,15 +1345,79 @@ class HPSupportModule(BaseSiteModule):
                      len(entries))
         return entries
 
-    # ── Session helper ───────────────────────────────────────────────
+    # ── Session & rate-limit helpers ─────────────────────────────────
 
     def _get_session(self) -> "requests.Session":
         if self.session is not None:
             return self.session
+        if hasattr(self, "_hp_session"):
+            return self._hp_session
         import requests as _req
         s = _req.Session()
         s.headers.update(_HEADERS)
+        self._hp_session = s
         return s
+
+    def _rotate_ua(self) -> None:
+        """Rotate the User-Agent for the next batch of requests."""
+        self._ua_index = (getattr(self, "_ua_index", 0) + 1) % len(_USER_AGENTS)
+        ua = _USER_AGENTS[self._ua_index]
+        sess = self._get_session()
+        sess.headers["User-Agent"] = ua
+
+    def _api_get(
+        self, url: str, **kwargs,
+    ) -> "requests.Response":
+        """GET with per-request delay and 403 backoff.
+
+        Wraps ``session.get()`` with:
+
+        1. A minimum delay between requests (``_REQUEST_DELAY``)
+        2. Automatic retry on HTTP 403 (Akamai rate-limit): rotate UA,
+           clear cookies, wait 60 s, then retry once.
+        """
+        time.sleep(_REQUEST_DELAY)
+        sess = self._get_session()
+        kwargs.setdefault("headers", _HEADERS)
+        kwargs.setdefault("timeout", _REQUEST_TIMEOUT)
+        resp = sess.get(url, **kwargs)
+        if resp.status_code == 403:
+            self._handle_rate_limit()
+            resp = sess.get(url, **kwargs)
+        return resp
+
+    def _api_post(
+        self, url: str, **kwargs,
+    ) -> "requests.Response":
+        """POST with per-request delay and 403 backoff."""
+        time.sleep(_REQUEST_DELAY)
+        sess = self._get_session()
+        kwargs.setdefault("headers", _HEADERS)
+        kwargs.setdefault("timeout", _REQUEST_TIMEOUT)
+        resp = sess.post(url, **kwargs)
+        if resp.status_code == 403:
+            self._handle_rate_limit()
+            resp = sess.post(url, **kwargs)
+        return resp
+
+    def _handle_rate_limit(self) -> None:
+        """Handle an Akamai 403 rate-limit: rotate UA, clear cookies,
+        and wait for the ban to expire.
+
+        Curl debugging shows:
+        - ~45 burst requests trigger a 5-minute IP-level ban
+        - The ban applies to ALL support.hp.com endpoints
+        - No header trick (X-Forwarded-For, True-Client-IP) bypasses it
+        - After 5 minutes the ban lifts automatically
+        - 1 req/s sustained rate avoids triggering the ban
+        """
+        self._rotate_ua()
+        sess = self._get_session()
+        sess.cookies.clear()
+        wait = 60
+        log.info("[HP]   ⚠ Rate-limited (HTTP 403) — rotating UA, "
+                 "clearing cookies, waiting %ds …", wait)
+        time.sleep(wait)
 
     # ── URL parsing (no hardcoded IDs) ───────────────────────────────
 
@@ -1381,11 +1453,10 @@ class HPSupportModule(BaseSiteModule):
         Calls ``/wcc-services/searchresult/{cc}-{lc}?q=<name>&context=pdp``
         and extracts the first ``targetUrl`` that contains a numeric OID.
         """
-        sess = self._get_session()
         # Convert seo-name to search query: "hp-officejet-3830" → "hp officejet 3830"
         query = seo_name.replace("-", " ")
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 f"{_SEARCH_URL}/{cc}-{lc}",
                 params={"q": query, "context": "pdp"},
                 headers=_HEADERS,
@@ -1442,9 +1513,8 @@ class HPSupportModule(BaseSiteModule):
         where the API returns no data (e.g. due to rate limiting during
         large catalog crawls).
         """
-        sess = self._get_session()
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _SWD_OS_URL,
                 params={"cc": cc, "lc": lc, "productOid": oid},
                 headers=_HEADERS,
@@ -1526,9 +1596,8 @@ class HPSupportModule(BaseSiteModule):
         requesting client's User-Agent.  Used as a last-resort fallback
         when ``osVersionData`` returns no results.
         """
-        sess = self._get_session()
         try:
-            resp = sess.get(
+            resp = self._api_get(
                 _INIT_URL,
                 params={"cc": cc, "lc": lc},
                 headers=_HEADERS,
@@ -1581,7 +1650,6 @@ class HPSupportModule(BaseSiteModule):
         - ``platformId``: the **platform** TMS ID, NOT the version ID
         - ``productNumberOid``: from product specs (when available)
         """
-        sess = self._get_session()
         os_name = os_info.get("name", "")
 
         # HP's SPA sends platformName as osName (e.g. "Windows"),
@@ -1613,7 +1681,7 @@ class HPSupportModule(BaseSiteModule):
 
         entries: list[FileEntry] = []
         try:
-            resp = sess.post(
+            resp = self._api_post(
                 _SWD_DRIVERS_URL,
                 json=payload,
                 headers=_HEADERS,
