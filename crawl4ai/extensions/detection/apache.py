@@ -2,8 +2,7 @@
 Apache HTTP Server detection.
 
 Identifies Apache web servers by inspecting the ``server`` response header
-for ``Apache``. Also checks for ``X-Powered-By: PHP`` which commonly
-accompanies Apache deployments. Extracts the version number when present.
+for ``Apache``. Extracts the version number when present.
 """
 
 from __future__ import annotations
@@ -37,11 +36,5 @@ class ApacheDetector(BaseDetector):
             if match:
                 result["version"] = match.group(1)
             return result
-
-        # X-Powered-By: PHP is a common companion for Apache
-        powered_by = headers.get("x-powered-by", "")
-        if "PHP" in powered_by:
-            return {"type": "apache", "method": "header",
-                    "signature": "x-powered-by: PHP"}
 
         return None

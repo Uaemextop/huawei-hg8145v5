@@ -21,7 +21,7 @@ class DjangoDetector(BaseDetector):
 
     _SIGNATURES = (
         "csrfmiddlewaretoken",
-        "django",
+        "django.contrib",
         "__admin_media_prefix__",
         "/static/admin/",
         "djangoproject.com",

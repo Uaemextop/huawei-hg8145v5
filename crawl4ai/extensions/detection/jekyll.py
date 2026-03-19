@@ -2,7 +2,7 @@
 Jekyll static site generator detection.
 
 Identifies Jekyll-generated websites by checking for a ``Jekyll`` generator
-meta tag, body signatures such as ``jekyll-theme-`` and ``/assets/main.css``,
+meta tag, body signatures such as ``jekyll-theme-`` and ``jekyll-feed``,
 and the ``server: GitHub.com`` header (GitHub Pages often runs Jekyll).
 """
 
@@ -20,9 +20,9 @@ class JekyllDetector(BaseDetector):
 
     _SIGNATURES = (
         'generator" content="Jekyll',
-        "jekyll",
-        "/assets/main.css",
         "jekyll-theme-",
+        "jekyll-feed",
+        "jekyll-seo-tag",
     )
 
     def detect(

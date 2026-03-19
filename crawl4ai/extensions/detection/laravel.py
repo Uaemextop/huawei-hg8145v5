@@ -3,7 +3,7 @@ Laravel PHP framework detection.
 
 Identifies Laravel applications by checking for ``laravel_session`` and
 ``XSRF-TOKEN`` in the ``Set-Cookie`` header, and body signatures such as
-``/vendor/``, ``laravel``, and ``csrf-token``.
+``laravel-livewire`` and ``laravel.blade``.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ class LaravelDetector(BaseDetector):
     name = "laravel"
 
     _SIGNATURES = (
-        "/vendor/",
-        "laravel",
-        "csrf-token",
+        "laravel-livewire",
+        "laravel.blade",
+        "Laravel\\",
     )
 
     def detect(
