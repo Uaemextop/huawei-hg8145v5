@@ -1664,16 +1664,19 @@ class HPSupportModule(BaseSiteModule):
             )
             if not resp.ok:
                 return None
-            data = resp.json().get("data", {})
-            if data is None:
+            data = resp.json().get("data")
+            if not data:
                 return None
-            # popularPrinters returns HTML with product links containing h_product=<OID>
-            content = data if isinstance(data, str) else str(data)
-            oid_match = re.search(r'h_product[=:](\d+)', content)
-            if oid_match:
-                log.info("[HP]   Seed product OID from popularPrinters: %s",
-                         oid_match.group(1))
-                return oid_match.group(1)
+            # popularPrinters returns a list of dicts with productUrl
+            # containing h_product=<OID> as a query parameter.
+            if isinstance(data, list):
+                for item in data:
+                    product_url = item.get("productUrl", "")
+                    oid_match = re.search(r'h_product=(\d+)', product_url)
+                    if oid_match:
+                        log.info("[HP]   Seed product OID from popularPrinters: %s",
+                                 oid_match.group(1))
+                        return oid_match.group(1)
         except Exception as exc:
             log.info("[HP]   popularPrinters fetch failed: %s", exc)
         return None
