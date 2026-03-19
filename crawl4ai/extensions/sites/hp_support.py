@@ -378,8 +378,9 @@ class HPSupportModule(BaseSiteModule):
             )
             if resp.ok:
                 data = resp.json()
+                nav = data.get("data")
                 self._collect_nav_page_urls(
-                    data.get("data") or data, cc, lc, _add,
+                    nav if nav is not None else data, cc, lc, _add,
                 )
         except Exception as exc:
             log.debug("[HP] Navigation page URL discovery failed: %s", exc)
@@ -554,7 +555,9 @@ class HPSupportModule(BaseSiteModule):
                 return categories
             data = resp.json()
             # Walk the navigation tree to extract category names
-            nav_data = data.get("data") or data
+            nav_data = data.get("data")
+            if nav_data is None:
+                nav_data = data
             self._walk_nav_tree(nav_data, categories)
             if not categories:
                 log.info("[HP] Navigation API returned data but no categories extracted")
@@ -606,7 +609,9 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP] /s/init returned HTTP %d", resp.status_code)
                 return categories
             raw = resp.json()
-            data = raw.get("data") or raw
+            data = raw.get("data")
+            if data is None:
+                data = raw
             if not isinstance(data, dict):
                 data = {}
 
@@ -975,7 +980,9 @@ class HPSupportModule(BaseSiteModule):
             specs_data = (devices[0].get("productSpecs") or {})
             if isinstance(specs_data, dict):
                 # The specs data may be nested inside its own data key
-                inner = specs_data.get("data") or specs_data
+                inner = specs_data.get("data")
+                if inner is None:
+                    inner = specs_data
                 return {
                     "productName": inner.get("productName", ""),
                     "productSeriesName": inner.get("productSeriesName", ""),
