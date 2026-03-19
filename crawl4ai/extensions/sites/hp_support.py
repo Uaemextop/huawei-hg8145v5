@@ -416,6 +416,12 @@ class HPSupportModule(BaseSiteModule):
             # Fallback: extract product type names from the Angular JS
             categories = self._extract_search_terms_from_js(cc, lc)
 
+        # Supplement with device types from CMS product finder
+        cms_types = self._fetch_device_types_from_cms(cc, lc)
+        for dt in cms_types:
+            if dt not in categories:
+                categories.append(dt)
+
         log.info("[HP] Discovered %d categories to scan", len(categories))
 
         for query in categories:
@@ -559,6 +565,44 @@ class HPSupportModule(BaseSiteModule):
             log.info("[HP] /s/init category extraction failed: %s", exc)
         return categories
 
+    def _fetch_device_types_from_cms(
+        self, cc: str, lc: str,
+    ) -> list[str]:
+        """Fetch device type names from CMS product-finder and product-icons.
+
+        HAR analysis shows ``/wcc-services/cms-v2/{locale}/wcc_swd_pfinder``
+        returns device types (printer, laptop, desktop, etc.) with their
+        ``deviceType`` and ``toolTipTitle`` fields.
+        """
+        sess = self._get_session()
+        types: list[str] = []
+        seen: set[str] = set()
+        for cms_key in ("wcc_swd_pfinder", "wcc_sitehome_producticons"):
+            try:
+                resp = sess.get(
+                    f"{_CMS_URL}/{cc}-{lc}/{cms_key}",
+                    headers=_HEADERS,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                if not resp.ok:
+                    continue
+                data = resp.json().get("data", [])
+                if not isinstance(data, list):
+                    continue
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    for key in ("toolTipTitle", "deviceType", "title"):
+                        val = (item.get(key) or "").strip()
+                        if val and val.lower() not in seen and len(val) < 40:
+                            seen.add(val.lower())
+                            types.append(val)
+            except Exception:
+                pass
+        if types:
+            log.info("[HP] CMS device types: %s", types)
+        return types
+
     def _extract_search_terms_from_js(
         self, cc: str, lc: str,
     ) -> list[str]:
@@ -639,50 +683,87 @@ class HPSupportModule(BaseSiteModule):
         self, query: str, cc: str, lc: str,
     ) -> list[tuple[str, str]]:
         """Search HP and return ``(oid, name)`` tuples for all products
-        found."""
+        found.
+
+        HAR analysis shows HP's SPA uses two search contexts:
+        - ``context=pdp`` — general product pages
+        - ``context=swd`` with ``navigation=false`` — driver download pages
+        Both are tried for maximum coverage.
+        """
         sess = self._get_session()
         results: list[tuple[str, str]] = []
-        try:
-            resp = sess.get(
-                f"{_SEARCH_URL}/{cc}-{lc}",
-                params={"q": query, "context": "pdp"},
-                headers=_HEADERS,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            if not resp.ok:
-                log.info("[HP] Search '%s' returned HTTP %d", query, resp.status_code)
-                return results
-            data = resp.json()
+        seen: set[str] = set()
 
-            # Primary structure: data.kaaSResponse.data.searchResults.categories[]
-            categories = (
-                data.get("data", {})
-                .get("kaaSResponse", {})
-                .get("data", {})
-                .get("searchResults", {})
-                .get("categories", [])
-            )
-            for cat in categories:
-                self._extract_products_from_category(cat, results)
-                for sub in cat.get("subCategoryList") or []:
-                    self._extract_products_from_category(sub, results)
+        # Try both contexts: 'pdp' for general and 'swd' for drivers
+        for ctx in ("swd", "pdp"):
+            try:
+                params: dict = {"q": query, "context": ctx}
+                if ctx == "swd":
+                    params["navigation"] = "false"
+                resp = sess.get(
+                    f"{_SEARCH_URL}/{cc}-{lc}",
+                    params=params,
+                    headers=_HEADERS,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                if not resp.ok:
+                    log.info("[HP] Search '%s' (ctx=%s) returned HTTP %d",
+                             query, ctx, resp.status_code)
+                    continue
+                data = resp.json()
 
-            # Fallback: try direct structure data.categories[]
-            if not results:
-                for cat in data.get("data", {}).get("categories", []):
+                # Primary structure: data.kaaSResponse.data.searchResults.categories[]
+                categories = (
+                    data.get("data", {})
+                    .get("kaaSResponse", {})
+                    .get("data", {})
+                    .get("searchResults", {})
+                    .get("categories", [])
+                )
+                for cat in (categories or []):
                     self._extract_products_from_category(cat, results)
+                    for sub in cat.get("subCategoryList") or []:
+                        self._extract_products_from_category(sub, results)
 
-            # Fallback: try flat productList at top level
-            if not results:
-                for prod in data.get("data", {}).get("productList", []):
-                    target = prod.get("targetUrl", "")
-                    name = prod.get("productName", "")
-                    m = _OID_PRODUCT_RE.search(target) or _OID_LAST_RE.search(target)
-                    if m:
-                        results.append((m.group(1), name))
-        except Exception as exc:
-            log.debug("[HP] Product search '%s' failed: %s", query, exc)
-        return results
+                # Fallback: try direct structure data.categories[]
+                if not results:
+                    for cat in data.get("data", {}).get("categories", []):
+                        self._extract_products_from_category(cat, results)
+
+                # Fallback: try flat productList at top level
+                if not results:
+                    for prod in data.get("data", {}).get("productList", []):
+                        target = prod.get("targetUrl", "")
+                        name = prod.get("productName", "")
+                        m = _OID_PRODUCT_RE.search(target) or _OID_LAST_RE.search(target)
+                        if m:
+                            results.append((m.group(1), name))
+
+                # Also check verifyResponse for direct product match
+                verify = data.get("data", {}).get("verifyResponse", {})
+                if verify and isinstance(verify, dict):
+                    vdata = verify.get("data", {})
+                    if vdata and isinstance(vdata, dict):
+                        target_url = vdata.get("targetUrl", "")
+                        prod_name = vdata.get("productName", "")
+                        if target_url:
+                            m = (_OID_PRODUCT_RE.search(target_url) or
+                                 _OID_LAST_RE.search(target_url))
+                            if m and m.group(1) not in seen:
+                                results.append((m.group(1), prod_name or query))
+                                seen.add(m.group(1))
+
+            except Exception as exc:
+                log.debug("[HP] Product search '%s' (ctx=%s) failed: %s",
+                          query, ctx, exc)
+
+        # Deduplicate
+        unique: list[tuple[str, str]] = []
+        for oid, name in results:
+            if oid not in seen:
+                seen.add(oid)
+                unique.append((oid, name))
+        return unique
 
     def _discover_products_from_html(
         self, cc: str, lc: str,
