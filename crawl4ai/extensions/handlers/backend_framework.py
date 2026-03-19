@@ -15,13 +15,13 @@ log = logging.getLogger(__name__)
 
 __all__ = ["BackendFrameworkHandler"]
 
-_BACKEND_TYPES = frozenset({"django", "flask", "rails", "laravel", "aspnet"})
+_BACKEND_TYPES = frozenset({"django", "flask", "rails", "laravel", "aspnet", "spring"})
 
 
 class BackendFrameworkHandler(BaseHandler):
     """Probe API routes and handle CSRF / token mechanics for backend frameworks.
 
-    Supports Django, Flask, Rails, Laravel, and ASP.NET.
+    Supports Django, Flask, Rails, Laravel, ASP.NET, and Spring.
     """
 
     name = "backend_framework"
@@ -61,6 +61,10 @@ class BackendFrameworkHandler(BaseHandler):
 
             elif fw == "aspnet":
                 _handle_aspnet(url, response, actions,
+                               extra_urls, extra_headers)
+
+            elif fw == "spring":
+                _handle_spring(url, session, actions,
                                extra_urls, extra_headers)
 
         except Exception:
@@ -175,6 +179,25 @@ def _handle_aspnet(
         actions.append(
             "Detected __VIEWSTATE; form submissions will need it attached"
         )
+
+
+def _handle_spring(
+    url: str,
+    session: "requests.Session",
+    actions: list[str],
+    extra_urls: list[str],
+    extra_headers: dict,
+) -> None:
+    probes = ["/api/", "/actuator/health", "/actuator/info", "/swagger-ui/",
+              "/v3/api-docs", "/webjars/"]
+    for p in probes:
+        extra_urls.append(urljoin(url, p))
+    actions.append(f"Probing Spring endpoints: {', '.join(probes)}")
+
+    # JSESSIONID cookie handling
+    jsessionid = _cookie_value(session, "JSESSIONID")
+    if jsessionid:
+        actions.append("JSESSIONID cookie present – session tracking active")
 
 
 # ------------------------------------------------------------------

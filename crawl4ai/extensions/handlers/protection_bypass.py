@@ -16,6 +16,7 @@ __all__ = ["ProtectionBypassHandler"]
 _PROTECTION_TYPES = frozenset({
     "cloudflare", "siteground", "waf", "captcha",
     "akamai", "imperva", "sucuri", "wordfence", "modsecurity",
+    "aws_waf", "ddos_guard", "azure_front_door",
 })
 
 
@@ -142,6 +143,38 @@ class ProtectionBypassHandler(BaseHandler):
                 })
                 actions.append(
                     "SiteGround PoW challenge detected – triggering PoW solver"
+                )
+
+            elif ptype == "aws_waf":
+                config.update({
+                    "rate_limit_delay": 2,
+                    "rotate_user_agent": True,
+                    "use_browser": True,
+                })
+                actions.append(
+                    "AWS WAF detected – browser crawling with UA rotation "
+                    "and 2 s rate limit"
+                )
+
+            elif ptype == "ddos_guard":
+                config.update({
+                    "use_browser": True,
+                    "handle_cookies": True,
+                    "rate_limit_delay": 2,
+                })
+                actions.append(
+                    "DDoS-Guard detected – browser crawling with cookie "
+                    "persistence recommended"
+                )
+
+            elif ptype == "azure_front_door":
+                config.update({
+                    "rate_limit_delay": 1.5,
+                    "handle_cookies": True,
+                })
+                actions.append(
+                    "Azure Front Door detected – moderate rate limit with "
+                    "cookie handling"
                 )
 
         except Exception:

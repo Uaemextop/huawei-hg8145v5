@@ -19,6 +19,10 @@ Handler modules:
 * :mod:`.rate_limiter`      – Rate-limit header analyser
 * :mod:`.cdn_optimizer`     – CDN detection & header optimisation
 * :mod:`.analytics_stripper`– Analytics / tracking domain blocker
+* :mod:`.graphql_api`      – GraphQL endpoint discovery
+* :mod:`.firebase_handler` – Firebase project resource discovery
+* :mod:`.amp_handler`      – AMP page handling (canonical discovery)
+* :mod:`.pwa_handler`      – PWA manifest & service worker discovery
 """
 from __future__ import annotations
 
@@ -38,6 +42,10 @@ from .sitemap_robots import SitemapRobotsHandler
 from .rate_limiter import RateLimiterHandler
 from .cdn_optimizer import CDNOptimizerHandler
 from .analytics_stripper import AnalyticsStripperHandler
+from .graphql_api import GraphQLAPIHandler
+from .firebase_handler import FirebaseHandler
+from .amp_handler import AMPHandler
+from .pwa_handler import PWAHandler
 
 if TYPE_CHECKING:
     import requests
@@ -61,6 +69,10 @@ _ALL_HANDLERS: list[BaseHandler] = [
     RateLimiterHandler(),
     CDNOptimizerHandler(),
     AnalyticsStripperHandler(),
+    GraphQLAPIHandler(),
+    FirebaseHandler(),
+    AMPHandler(),
+    PWAHandler(),
 ]
 
 # ------------------------------------------------------------------
@@ -160,6 +172,10 @@ __all__ = [
     "RateLimiterHandler",
     "CDNOptimizerHandler",
     "AnalyticsStripperHandler",
+    "GraphQLAPIHandler",
+    "FirebaseHandler",
+    "AMPHandler",
+    "PWAHandler",
     # Internal (useful for testing)
     "_HANDLER_REGISTRY",
     "_ALL_HANDLERS",

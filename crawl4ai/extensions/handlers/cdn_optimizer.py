@@ -17,6 +17,7 @@ __all__ = ["CDNOptimizerHandler"]
 _CDN_TYPES = frozenset({
     "cloudfront", "fastly", "akamai_cdn", "cloudflare_cdn",
     "keycdn", "stackpath", "cdn",
+    "vercel", "netlify", "azure_front_door",
 })
 
 # CDN-specific Via / X-Cache header patterns → friendly name
