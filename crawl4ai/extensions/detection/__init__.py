@@ -40,6 +40,21 @@ Individual detector modules:
 * :mod:`.express` – Express.js (Node) detection
 * :mod:`.hugo` – Hugo static site generator detection
 * :mod:`.jekyll` – Jekyll static site generator detection
+* :mod:`.cloudfront` – AWS CloudFront CDN detection
+* :mod:`.fastly` – Fastly CDN detection
+* :mod:`.vercel` – Vercel platform detection
+* :mod:`.netlify` – Netlify platform detection
+* :mod:`.google_analytics` – Google Analytics / GTM detection
+* :mod:`.facebook_pixel` – Facebook / Meta Pixel detection
+* :mod:`.hotjar` – Hotjar analytics detection
+* :mod:`.aws_waf` – AWS WAF detection
+* :mod:`.ddos_guard` – DDoS-Guard detection
+* :mod:`.azure_front_door` – Azure Front Door CDN detection
+* :mod:`.spring` – Spring Framework (Java) detection
+* :mod:`.graphql` – GraphQL API detection
+* :mod:`.firebase` – Firebase detection
+* :mod:`.amp` – Google AMP detection
+* :mod:`.pwa` – Progressive Web App detection
 """
 
 from __future__ import annotations
@@ -82,6 +97,21 @@ from .aspnet import AspNetDetector
 from .express import ExpressDetector
 from .hugo import HugoDetector
 from .jekyll import JekyllDetector
+from .cloudfront import CloudFrontDetector
+from .fastly import FastlyDetector
+from .vercel import VercelDetector
+from .netlify import NetlifyDetector
+from .google_analytics import GoogleAnalyticsDetector
+from .facebook_pixel import FacebookPixelDetector
+from .hotjar import HotjarDetector
+from .aws_waf import AWSWAFDetector
+from .ddos_guard import DDoSGuardDetector
+from .azure_front_door import AzureFrontDoorDetector
+from .spring import SpringDetector
+from .graphql import GraphQLDetector
+from .firebase import FirebaseDetector
+from .amp import AMPDetector
+from .pwa import PWADetector
 
 ALL_DETECTORS: list[BaseDetector] = [
     CloudflareDetector(),
@@ -121,6 +151,21 @@ ALL_DETECTORS: list[BaseDetector] = [
     ExpressDetector(),
     HugoDetector(),
     JekyllDetector(),
+    CloudFrontDetector(),
+    FastlyDetector(),
+    VercelDetector(),
+    NetlifyDetector(),
+    GoogleAnalyticsDetector(),
+    FacebookPixelDetector(),
+    HotjarDetector(),
+    AWSWAFDetector(),
+    DDoSGuardDetector(),
+    AzureFrontDoorDetector(),
+    SpringDetector(),
+    GraphQLDetector(),
+    FirebaseDetector(),
+    AMPDetector(),
+    PWADetector(),
 ]
 
 
@@ -182,6 +227,21 @@ __all__ = [
     "ExpressDetector",
     "HugoDetector",
     "JekyllDetector",
+    "CloudFrontDetector",
+    "FastlyDetector",
+    "VercelDetector",
+    "NetlifyDetector",
+    "GoogleAnalyticsDetector",
+    "FacebookPixelDetector",
+    "HotjarDetector",
+    "AWSWAFDetector",
+    "DDoSGuardDetector",
+    "AzureFrontDoorDetector",
+    "SpringDetector",
+    "GraphQLDetector",
+    "FirebaseDetector",
+    "AMPDetector",
+    "PWADetector",
     "ALL_DETECTORS",
     "WAF_SIGNATURES",
 ]
