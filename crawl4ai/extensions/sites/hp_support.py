@@ -670,7 +670,7 @@ class HPSupportModule(BaseSiteModule):
                 )
                 if not resp.ok:
                     continue
-                data = resp.json().get("data", [])
+                data = resp.json().get("data") or []
                 if not isinstance(data, list):
                     continue
                 for item in data:
@@ -912,7 +912,7 @@ class HPSupportModule(BaseSiteModule):
             )
             if not resp.ok:
                 return results
-            data = resp.json().get("data", [])
+            data = resp.json().get("data") or []
             if not isinstance(data, list):
                 return results
             for item in data:
@@ -966,16 +966,16 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP]   Specs API returned HTTP %d for OID=%s",
                          resp.status_code, oid)
                 return {}
-            data = resp.json().get("data", {})
+            data = resp.json().get("data") or {}
             if not data:
                 return {}
-            devices = data.get("devices", [])
+            devices = (data.get("devices") or [])
             if not devices:
                 return {}
-            specs_data = devices[0].get("productSpecs", {})
+            specs_data = (devices[0].get("productSpecs") or {})
             if isinstance(specs_data, dict):
                 # The specs data may be nested inside its own data key
-                inner = specs_data.get("data", specs_data)
+                inner = specs_data.get("data") or specs_data
                 return {
                     "productName": inner.get("productName", ""),
                     "productSeriesName": inner.get("productSeriesName", ""),
@@ -1482,13 +1482,11 @@ class HPSupportModule(BaseSiteModule):
                 return None
             data = resp.json()
             # Walk the nested category/product tree
-            categories = (
-                data.get("data", {})
-                .get("kaaSResponse", {})
-                .get("data", {})
-                .get("searchResults", {})
-                .get("categories", [])
-            )
+            _d = data.get("data") or {}
+            _kaas = _d.get("kaaSResponse") or {}
+            _kaas_data = _kaas.get("data") or {}
+            _sr = _kaas_data.get("searchResults") or {}
+            categories = _sr.get("categories") or []
             for cat in categories:
                 for sub in cat.get("subCategoryList") or []:
                     for prod in sub.get("productList") or []:
@@ -1540,19 +1538,17 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP]   osVersionData HTTP %d for OID=%s",
                          resp.status_code, oid)
                 return []
-            data = resp.json().get("data", {})
-            if data is None:
-                return []
+            data = resp.json().get("data") or {}
 
             os_versions: list[dict] = []
 
             # Primary structure: osAvailablePlatformsAnsOS.osPlatforms[]
-            platforms_data = data.get("osAvailablePlatformsAnsOS", {})
-            platforms = platforms_data.get("osPlatforms", [])
+            platforms_data = (data.get("osAvailablePlatformsAnsOS") or {})
+            platforms = (platforms_data.get("osPlatforms") or [])
             for platform in platforms:
                 platform_id = platform.get("id", "")
                 platform_name = platform.get("name", "")
-                for version in platform.get("osVersions", []):
+                for version in (platform.get("osVersions") or []):
                     os_versions.append({
                         "id": version.get("id", ""),
                         "name": version.get("name", ""),
@@ -1562,10 +1558,10 @@ class HPSupportModule(BaseSiteModule):
 
             # Fallback structure 1: platformList[]
             if not os_versions:
-                for platform in data.get("platformList", []):
+                for platform in (data.get("platformList") or []):
                     platform_id = platform.get("platformId", "")
                     platform_name = platform.get("platformName", "")
-                    for version in platform.get("osVersions", []):
+                    for version in (platform.get("osVersions") or []):
                         os_versions.append({
                             "id": version.get("osTmsId", version.get("id", "")),
                             "name": version.get("osName", version.get("name", "")),
@@ -1575,9 +1571,9 @@ class HPSupportModule(BaseSiteModule):
 
             # Fallback structure 2: osversions[] (flat grouped by OS name)
             if not os_versions:
-                for os_group in data.get("osversions", []):
+                for os_group in (data.get("osversions") or []):
                     group_name = os_group.get("name", "")
-                    for version in os_group.get("osVersionList", []):
+                    for version in (os_group.get("osVersionList") or []):
                         os_versions.append({
                             "id": version.get("id", ""),
                             "name": version.get("name", group_name),
@@ -1622,10 +1618,8 @@ class HPSupportModule(BaseSiteModule):
             if not resp.ok:
                 log.info("[HP]   /s/init returned HTTP %d", resp.status_code)
                 return []
-            data = resp.json().get("data", {})
-            if data is None:
-                return []
-            os_info = data.get("osInfo", {})
+            data = resp.json().get("data") or {}
+            os_info = (data.get("osInfo") or {})
             os_tms_id = os_info.get("osTmsId", "")
             if not os_tms_id:
                 return []
@@ -1707,11 +1701,9 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP]   driverDetails HTTP %d for OID=%s",
                           resp.status_code, oid)
                 return entries, resp.status_code == 403
-            data = resp.json().get("data", {})
-            if data is None:
-                return entries, False
+            data = resp.json().get("data") or {}
 
-            for sw_type in data.get("softwareTypes", []):
+            for sw_type in (data.get("softwareTypes") or []):
                 # HAR analysis: category name is in ``accordionNameEn``
                 # (canonical English name like "Driver-Network") and
                 # ``accordionName`` (localized).  Use English first for
