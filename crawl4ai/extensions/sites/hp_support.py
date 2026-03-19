@@ -9,7 +9,8 @@ via the ``/wcc-services/`` JSON API.  This module:
 2. Dynamically resolves product OID from the URL path, or discovers
    products via HP's navigation and search APIs when no OID is present.
 3. Dynamically fetches all available OS platforms and versions from the
-   ``/wcc-services/swd-v2/osVersionData`` API (with automatic retry).
+   ``/wcc-services/swd-v2/osVersionData`` API, parsing three response
+   structures (``osPlatforms``, ``platformList``, ``osversions``).
 4. If the OS API returns no data, falls back to the
    ``/wcc-services/s/init`` API to detect the user's OS dynamically.
    If that also fails, reuses cached OS versions from a previously
@@ -42,7 +43,6 @@ from __future__ import annotations
 import itertools
 import logging
 import re
-import time
 import urllib.parse
 from typing import TYPE_CHECKING, Callable
 
@@ -1404,88 +1404,85 @@ class HPSupportModule(BaseSiteModule):
         and returns a flat list of ``{id, name, platformId, platformName}``
         dicts — one entry per OS version.
 
-        Includes automatic retry with a 2-second delay on transient
-        failures, parses three response structures (osPlatforms,
-        platformList, osversions), and caches successful results so
-        they can be reused as a last-resort fallback for products whose
-        API calls fail.
+        Parses three response structures from HP's API:
+
+        1. ``osAvailablePlatformsAnsOS.osPlatforms[]`` — primary structure
+        2. ``platformList[]`` — alternative flat structure
+        3. ``osversions[]`` — grouped by OS family (e.g. "Windows 10")
+
+        Successful results are cached so they can be reused for products
+        where the API returns no data (e.g. due to rate limiting during
+        large catalog crawls).
         """
         sess = self._get_session()
-        max_attempts = 2
-        for attempt in range(1, max_attempts + 1):
-            try:
-                resp = sess.get(
-                    _SWD_OS_URL,
-                    params={"cc": cc, "lc": lc, "productOid": oid},
-                    headers=_HEADERS,
-                    timeout=_REQUEST_TIMEOUT,
-                )
-                if not resp.ok:
-                    log.info("[HP] osVersionData HTTP %d for OID=%s (attempt %d/%d)",
-                             resp.status_code, oid, attempt, max_attempts)
-                    if attempt < max_attempts:
-                        time.sleep(2)
-                        continue
-                    return []
-                data = resp.json().get("data", {})
-                if data is None:
-                    return []
+        try:
+            resp = sess.get(
+                _SWD_OS_URL,
+                params={"cc": cc, "lc": lc, "productOid": oid},
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                log.info("[HP]   osVersionData HTTP %d for OID=%s",
+                         resp.status_code, oid)
+                return []
+            data = resp.json().get("data", {})
+            if data is None:
+                return []
 
-                os_versions: list[dict] = []
+            os_versions: list[dict] = []
 
-                # Primary structure: osAvailablePlatformsAnsOS.osPlatforms[]
-                platforms_data = data.get("osAvailablePlatformsAnsOS", {})
-                platforms = platforms_data.get("osPlatforms", [])
-                for platform in platforms:
-                    platform_id = platform.get("id", "")
-                    platform_name = platform.get("name", "")
+            # Primary structure: osAvailablePlatformsAnsOS.osPlatforms[]
+            platforms_data = data.get("osAvailablePlatformsAnsOS", {})
+            platforms = platforms_data.get("osPlatforms", [])
+            for platform in platforms:
+                platform_id = platform.get("id", "")
+                platform_name = platform.get("name", "")
+                for version in platform.get("osVersions", []):
+                    os_versions.append({
+                        "id": version.get("id", ""),
+                        "name": version.get("name", ""),
+                        "platformId": platform_id,
+                        "platformName": platform_name,
+                    })
+
+            # Fallback structure 1: platformList[]
+            if not os_versions:
+                for platform in data.get("platformList", []):
+                    platform_id = platform.get("platformId", "")
+                    platform_name = platform.get("platformName", "")
                     for version in platform.get("osVersions", []):
                         os_versions.append({
-                            "id": version.get("id", ""),
-                            "name": version.get("name", ""),
+                            "id": version.get("osTmsId", version.get("id", "")),
+                            "name": version.get("osName", version.get("name", "")),
                             "platformId": platform_id,
                             "platformName": platform_name,
                         })
 
-                # Fallback structure 1: platformList[]
-                if not os_versions:
-                    for platform in data.get("platformList", []):
-                        platform_id = platform.get("platformId", "")
-                        platform_name = platform.get("platformName", "")
-                        for version in platform.get("osVersions", []):
-                            os_versions.append({
-                                "id": version.get("osTmsId", version.get("id", "")),
-                                "name": version.get("osName", version.get("name", "")),
-                                "platformId": platform_id,
-                                "platformName": platform_name,
-                            })
+            # Fallback structure 2: osversions[] (flat grouped by OS name)
+            if not os_versions:
+                for os_group in data.get("osversions", []):
+                    group_name = os_group.get("name", "")
+                    for version in os_group.get("osVersionList", []):
+                        os_versions.append({
+                            "id": version.get("id", ""),
+                            "name": version.get("name", group_name),
+                            "platformId": "",
+                            "platformName": group_name,
+                        })
 
-                # Fallback structure 2: osversions[] (flat grouped by OS name)
-                if not os_versions:
-                    for os_group in data.get("osversions", []):
-                        group_name = os_group.get("name", "")
-                        for version in os_group.get("osVersionList", []):
-                            os_versions.append({
-                                "id": version.get("id", ""),
-                                "name": version.get("name", group_name),
-                                "platformId": "",
-                                "platformName": group_name,
-                            })
-
-                if os_versions:
-                    log.info("[HP]   Found %d OS versions across %d platforms",
-                             len(os_versions), len(platforms) or len(data.get("osversions", [])))
-                    # Cache for reuse as fallback by other products
-                    if not self._os_version_cache or len(os_versions) > len(self._os_version_cache):
-                        self._os_version_cache = list(os_versions)
-                else:
-                    log.info("[HP]   osVersionData returned empty for OID=%s", oid)
-                return os_versions
-            except Exception as exc:
-                log.info("[HP]   OS version fetch failed for OID=%s (attempt %d/%d): %s",
-                         oid, attempt, max_attempts, exc)
-                if attempt < max_attempts:
-                    time.sleep(2)
+            if os_versions:
+                log.info("[HP]   Found %d OS versions across %d platforms",
+                         len(os_versions),
+                         len(platforms) or len(data.get("osversions", [])))
+                # Cache for reuse as fallback by other products
+                if not self._os_version_cache or len(os_versions) > len(self._os_version_cache):
+                    self._os_version_cache = list(os_versions)
+            else:
+                log.info("[HP]   osVersionData returned empty for OID=%s", oid)
+            return os_versions
+        except Exception as exc:
+            log.info("[HP]   OS version fetch failed for OID=%s: %s", oid, exc)
         return []
 
     def _detect_os_from_init(
@@ -1542,21 +1539,27 @@ class HPSupportModule(BaseSiteModule):
         Returns a list of :class:`FileEntry` dicts with name, size,
         version, release date, category, OS, description, source,
         product, and URL.
+
+        The POST payload matches HP's Angular SPA exactly (from JS
+        analysis of ``swd-download-page`` component):
+
+        - ``osTMSId``: the OS **version** TMS ID (e.g. Windows 10 64-bit)
+        - ``osName``:  the **platform** name (e.g. ``"Windows"``), NOT
+          the version name (e.g. ``"Windows 10 (64-bit)"``)
+        - ``platformId``: the **platform** TMS ID, NOT the version ID
+        - ``productNumberOid``: from product specs (when available)
         """
         sess = self._get_session()
-        # The ``osName`` field should contain the OS display name (e.g.
-        # "Windows 10"), NOT the platform name (e.g. "Windows").  The HAR
-        # traffic shows HP's SPA sends ``osName: "Windows 10"`` derived
-        # from the OS version entry's name, stripped of bit/version suffix.
         os_name = os_info.get("name", "")
-        os_display = os_info.get("platformName", os_name)
-        # Try to derive a clean OS family name for the POST body
-        # e.g. "Windows 10, versión 1903 (64 bits)" → "Windows 10"
-        if os_name and os_name != os_display:
-            # Extract the base OS name (before comma or parenthesis)
-            base = os_name.split(",")[0].split("(")[0].strip()
-            if base:
-                os_display = base
+
+        # HP's SPA sends platformName as osName (e.g. "Windows"),
+        # NOT the version display name (e.g. "Windows 10 (64-bit)").
+        # JS source: ``osName: d.platformName`` in getProductDriversList()
+        os_display = os_info.get("platformName", "")
+
+        # JS source: ``platformId: d.platformId`` — this is the PLATFORM
+        # TMS ID, NOT the version ID.
+        platform_id = os_info.get("platformId", "")
 
         payload: dict = {
             "cc": cc,
@@ -1564,72 +1567,65 @@ class HPSupportModule(BaseSiteModule):
             "productSeriesOid": oid,
             "osTMSId": os_info.get("id", ""),
             "osName": os_display,
-            "platformId": os_info.get("id", os_info.get("platformId", "")),
+            "platformId": platform_id,
         }
         # Include extra fields from product specs if available
-        if os_info.get("productLineCode"):
-            payload["productLineCode"] = os_info["productLineCode"]
+        # JS source: ``productLineCode: u?.productLineCode ?? ""``
+        payload["productLineCode"] = os_info.get("productLineCode", "")
+        # JS source: ``productNumberOid: u.productNumberOid``
         if os_info.get("productNumberOid"):
             payload["productNumberOid"] = os_info["productNumberOid"]
+        # JS source: only included when NOT seriesContext
         if os_info.get("productNameOid"):
             payload["productNameOid"] = os_info["productNameOid"]
 
         entries: list[FileEntry] = []
-        max_attempts = 2
-        for attempt in range(1, max_attempts + 1):
-            try:
-                resp = sess.post(
-                    _SWD_DRIVERS_URL,
-                    json=payload,
-                    headers=_HEADERS,
-                    timeout=_REQUEST_TIMEOUT,
-                )
-                if not resp.ok:
-                    log.info("[HP]   driverDetails HTTP %d for OID=%s (attempt %d/%d)",
-                              resp.status_code, oid, attempt, max_attempts)
-                    if attempt < max_attempts:
-                        time.sleep(2)
-                        continue
-                    return entries
-                data = resp.json().get("data", {})
-                if data is None:
-                    return entries
+        try:
+            resp = sess.post(
+                _SWD_DRIVERS_URL,
+                json=payload,
+                headers=_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if not resp.ok:
+                log.info("[HP]   driverDetails HTTP %d for OID=%s",
+                          resp.status_code, oid)
+                return entries
+            data = resp.json().get("data", {})
+            if data is None:
+                return entries
 
-                for sw_type in data.get("softwareTypes", []):
-                    # HAR analysis: category name is in ``accordionNameEn``
-                    # (canonical English name like "Driver-Network") and
-                    # ``accordionName`` (localized).  Use English first for
-                    # consistency across locales.
-                    category = sw_type.get(
-                        "accordionNameEn",
-                        sw_type.get(
-                            "accordionName",
-                            sw_type.get("categoryName", ""),
-                        ),
+            for sw_type in data.get("softwareTypes", []):
+                # HAR analysis: category name is in ``accordionNameEn``
+                # (canonical English name like "Driver-Network") and
+                # ``accordionName`` (localized).  Use English first for
+                # consistency across locales.
+                category = sw_type.get(
+                    "accordionNameEn",
+                    sw_type.get(
+                        "accordionName",
+                        sw_type.get("categoryName", ""),
+                    ),
+                )
+                # Primary structure: softwareDriversList[]
+                for drv in sw_type.get("softwareDriversList", []):
+                    self._collect_entries_from_driver(
+                        drv, category, os_name, entries,
+                        product_name=product_name,
                     )
-                    # Primary structure: softwareDriversList[]
-                    for drv in sw_type.get("softwareDriversList", []):
-                        self._collect_entries_from_driver(
-                            drv, category, os_name, entries,
-                            product_name=product_name,
-                        )
-                    # Fallback structure: softwareList[]
-                    for item in sw_type.get("softwareList", []):
+                # Fallback structure: softwareList[]
+                for item in sw_type.get("softwareList", []):
+                    self._collect_entries_from_item(
+                        item, category, os_name, entries,
+                        product_name=product_name,
+                    )
+                    for sub in item.get("subCategory", {}).get("softwareList", []):
                         self._collect_entries_from_item(
-                            item, category, os_name, entries,
+                            sub, category, os_name, entries,
                             product_name=product_name,
                         )
-                        for sub in item.get("subCategory", {}).get("softwareList", []):
-                            self._collect_entries_from_item(
-                                sub, category, os_name, entries,
-                                product_name=product_name,
-                            )
-                break  # Success — exit retry loop
-            except Exception as exc:
-                log.info("[HP]   driverDetails call failed for OID=%s (attempt %d/%d): %s",
-                         oid, attempt, max_attempts, exc)
-                if attempt < max_attempts:
-                    time.sleep(2)
+        except Exception as exc:
+            log.info("[HP]   driverDetails call failed for OID=%s: %s", oid, exc)
 
         return entries
 
