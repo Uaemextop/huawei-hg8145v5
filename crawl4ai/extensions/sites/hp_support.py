@@ -379,7 +379,7 @@ class HPSupportModule(BaseSiteModule):
             if resp.ok:
                 data = resp.json()
                 self._collect_nav_page_urls(
-                    data.get("data", data), cc, lc, _add,
+                    data.get("data") or data, cc, lc, _add,
                 )
         except Exception as exc:
             log.debug("[HP] Navigation page URL discovery failed: %s", exc)
@@ -393,7 +393,7 @@ class HPSupportModule(BaseSiteModule):
                 timeout=_REQUEST_TIMEOUT,
             )
             if resp.ok:
-                sdata = resp.json().get("data", {})
+                sdata = resp.json().get("data") or {}
                 if isinstance(sdata, dict):
                     for _key, urls in sdata.items():
                         if isinstance(urls, list):
@@ -455,41 +455,45 @@ class HPSupportModule(BaseSiteModule):
     def _discover_catalog_products(
         self, cc: str, lc: str,
     ) -> list[tuple[str, str]]:
-        """Dynamically discover products from HP's category navigation
-        and search APIs.
+        """Dynamically discover products from HP's category and search APIs.
 
         Returns a list of ``(oid, product_name)`` tuples with **no**
         hard limit — all products found are returned.
 
-        Discovery flow:
-        1. Fetch category names from ``/wcc-services/navigation`` API.
-        2. If that fails, extract search terms from the Angular main.js
-           bundle (product type names used in the product finder).
-        3. For each category, query HP's search API to find products.
-        4. Collect all unique ``(oid, name)`` pairs across all categories.
-        5. If no products found from APIs, parse the support page HTML
+        Discovery flow (curl-verified):
+        1. Fetch device types from CMS product finder (always works,
+           returns Printer/Laptop/Desktop/Other/headset/Others).
+        2. Extract product-type search terms from the Angular main.js
+           bundle (tablet, server, monitor, projector, etc.).
+        3. Fallback: ``/s/init`` and ``/wcc-services/navigation`` APIs.
+        4. For each category, query HP's search API to find products.
+        5. Collect all unique ``(oid, name)`` pairs across all categories.
+        6. If no products found from APIs, parse the support page HTML
            for product links as a last resort.
         """
         seen_oids: set[str] = set()
         products: list[tuple[str, str]] = []
 
-        # Dynamically fetch category names from HP's navigation API
-        categories = self._fetch_navigation_categories(cc, lc)
-        if not categories:
-            # Fallback: fetch category keywords from the init API
-            log.info("[HP] Navigation API empty — trying /s/init fallback …")
-            categories = self._fetch_init_categories(cc, lc)
+        # 1. CMS product finder — most reliable source (curl-verified)
+        categories = self._fetch_device_types_from_cms(cc, lc)
 
-        if not categories:
-            # Fallback: extract product type names from the Angular JS
-            log.info("[HP] Init API empty — extracting from Angular JS bundle …")
-            categories = self._extract_search_terms_from_js(cc, lc)
+        # 2. Angular JS bundle — extracts product type names dynamically
+        js_terms = self._extract_search_terms_from_js(cc, lc)
+        for t in js_terms:
+            if t.lower() not in {c.lower() for c in categories}:
+                categories.append(t)
 
-        # Supplement with device types from CMS product finder
-        cms_types = self._fetch_device_types_from_cms(cc, lc)
-        for dt in cms_types:
-            if dt not in categories:
-                categories.append(dt)
+        # 3. Navigation API fallback (may return 400 on newer backend)
+        if not categories:
+            log.info("[HP] CMS + JS empty — trying navigation API …")
+            nav_cats = self._fetch_navigation_categories(cc, lc)
+            categories.extend(nav_cats)
+
+        # 4. /s/init fallback
+        if not categories:
+            log.info("[HP] Navigation API empty — trying /s/init …")
+            init_cats = self._fetch_init_categories(cc, lc)
+            categories.extend(init_cats)
 
         log.info("[HP] Discovered %d categories to scan", len(categories))
 
@@ -550,7 +554,7 @@ class HPSupportModule(BaseSiteModule):
                 return categories
             data = resp.json()
             # Walk the navigation tree to extract category names
-            nav_data = data.get("data", data)
+            nav_data = data.get("data") or data
             self._walk_nav_tree(nav_data, categories)
             if not categories:
                 log.info("[HP] Navigation API returned data but no categories extracted")
@@ -602,32 +606,40 @@ class HPSupportModule(BaseSiteModule):
                 log.info("[HP] /s/init returned HTTP %d", resp.status_code)
                 return categories
             raw = resp.json()
-            data = raw.get("data", raw)
+            data = raw.get("data") or raw
             if not isinstance(data, dict):
                 data = {}
 
             # Extract from supportCategories
-            for cat in data.get("supportCategories", []):
+            for cat in (data.get("supportCategories") or []):
+                if not isinstance(cat, dict):
+                    continue
                 name = cat.get("name", "") or cat.get("label", "")
                 if name:
                     categories.append(name)
 
             # Extract from productFinder categories
-            pf = data.get("productFinder", {})
+            pf = data.get("productFinder") or {}
             if isinstance(pf, dict):
-                for cat in pf.get("categories", []):
+                for cat in (pf.get("categories") or []):
+                    if not isinstance(cat, dict):
+                        continue
                     name = cat.get("name", "") or cat.get("label", "")
                     if name:
                         categories.append(name)
-                    for sub in cat.get("subCategories", []):
+                    for sub in (cat.get("subCategories") or []):
+                        if not isinstance(sub, dict):
+                            continue
                         sub_name = sub.get("name", "") or sub.get("label", "")
                         if sub_name:
                             categories.append(sub_name)
 
             # Extract from header/menu navigation
-            header = data.get("header", {})
+            header = data.get("header") or {}
             if isinstance(header, dict):
-                for nav in header.get("navigation", []):
+                for nav in (header.get("navigation") or []):
+                    if not isinstance(nav, dict):
+                        continue
                     name = nav.get("name", "") or nav.get("label", "")
                     if name:
                         categories.append(name)
@@ -783,13 +795,13 @@ class HPSupportModule(BaseSiteModule):
                 data = resp.json()
 
                 # Primary structure: data.kaaSResponse.data.searchResults.categories[]
-                categories = (
-                    data.get("data", {})
-                    .get("kaaSResponse", {})
-                    .get("data", {})
-                    .get("searchResults", {})
-                    .get("categories", [])
-                )
+                # Note: any of these fields can be JSON null → Python None,
+                # so we guard each level with ``or {}``.
+                _d = data.get("data") or {}
+                _kaas = _d.get("kaaSResponse") or {}
+                _kaas_data = _kaas.get("data") or {}
+                _sr = _kaas_data.get("searchResults") or {}
+                categories = _sr.get("categories") or []
                 for cat in (categories or []):
                     self._extract_products_from_category(cat, results)
                     for sub in cat.get("subCategoryList") or []:
@@ -797,12 +809,12 @@ class HPSupportModule(BaseSiteModule):
 
                 # Fallback: try direct structure data.categories[]
                 if not results:
-                    for cat in data.get("data", {}).get("categories", []):
+                    for cat in (_d.get("categories") or []):
                         self._extract_products_from_category(cat, results)
 
                 # Fallback: try flat productList at top level
                 if not results:
-                    for prod in data.get("data", {}).get("productList", []):
+                    for prod in (_d.get("productList") or []):
                         target = prod.get("targetUrl", "")
                         name = prod.get("productName", "")
                         m = _OID_PRODUCT_RE.search(target) or _OID_LAST_RE.search(target)
@@ -810,9 +822,9 @@ class HPSupportModule(BaseSiteModule):
                             results.append((m.group(1), name))
 
                 # Also check verifyResponse for direct product match
-                verify = data.get("data", {}).get("verifyResponse", {})
+                verify = _d.get("verifyResponse") or {}
                 if verify and isinstance(verify, dict):
-                    vdata = verify.get("data", {})
+                    vdata = verify.get("data") or {}
                     if vdata and isinstance(vdata, dict):
                         target_url = vdata.get("targetUrl", "")
                         prod_name = vdata.get("productName", "")
