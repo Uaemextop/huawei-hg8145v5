@@ -291,7 +291,10 @@ class AMIBiosModule(BaseSiteModule):
                 pass
         log.info("[AMI] Known CDN binaries → %d files", cdn_binary_count)
 
-        # 2. Security advisories — scan BEFORE WP API to avoid seen_urls collision
+        # 2. Security advisories — scan BEFORE WP API so that advisory PDFs
+        #    are added to seen_urls first.  The WP pages API may also
+        #    reference these same URLs in content.rendered; by discovering
+        #    them here first we get accurate per-source counts.
         sec_entries = self._scan_security_advisories(sess, seen_urls)
         log.info("[AMI] Security advisories → %d files", len(sec_entries))
         entries.extend(sec_entries)
@@ -557,12 +560,18 @@ class AMIBiosModule(BaseSiteModule):
             hub_url = _clean_url(m.group(1))
             if not hub_url or hub_url in seen_urls:
                 continue
-            # Only include if URL has a file extension
+            # Only include if the last path segment has a recognised extension
             path = urllib.parse.urlparse(hub_url).path
-            if "." in path.split("/")[-1]:
-                seen_urls.add(hub_url)
-                entries.append(_build_entry(hub_url, title, page_type + " (CDN)"))
-                count += 1
+            last_segment = path.rstrip("/").rsplit("/", 1)[-1]
+            if "." in last_segment:
+                ext = last_segment.rsplit(".", 1)[-1].lower()
+                # Must be a known file extension, not a domain-like dot
+                if len(ext) <= 10 and ext.isalnum():
+                    seen_urls.add(hub_url)
+                    entries.append(
+                        _build_entry(hub_url, title, page_type + " (CDN)"),
+                    )
+                    count += 1
 
         return count
 
@@ -801,7 +810,7 @@ class AMIBiosModule(BaseSiteModule):
                     if not isinstance(data, dict):
                         break
 
-                    max_pages = int(data.get("total_pages", 1) or 1)
+                    max_pages = int(data.get("total_pages") or 1)
                     html = data.get("html", "")
 
                     # Extract resource page URLs from AJAX HTML
