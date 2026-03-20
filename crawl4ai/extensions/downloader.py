@@ -46,6 +46,7 @@ import requests
 import urllib3
 
 from crawl4ai.extensions.bypass.session import build_session, random_headers
+from crawl4ai.extensions.bypass.tls_session import TLS_ENGINE, render_page
 from crawl4ai.extensions.detection import detect_all
 from crawl4ai.extensions.handlers import dispatch as dispatch_handlers
 from crawl4ai.extensions.sites import get_matching_modules
@@ -347,9 +348,9 @@ class SiteDownloader:
         _setup_colored_logging()
         log.info("🔍 Starting download from %s → %s",
                  _c(self.start_url, "cyan"), _c(self.output_dir, "green"))
-        log.info("   depth=%s  concurrency=%s  delay=%s",
+        log.info("   depth=%s  concurrency=%s  delay=%s  tls=%s",
                  _c(self.max_depth, "cyan"), _c(self.concurrency, "cyan"),
-                 _c(f"{self.delay:.2f}s", "cyan"))
+                 _c(f"{self.delay:.2f}s", "cyan"), _c(TLS_ENGINE, "green"))
         if self._target_exts:
             log.info("   target extensions: %s",
                      _c(", ".join(sorted(self._target_exts)), "cyan"))
@@ -613,6 +614,29 @@ class SiteDownloader:
                         self.delay = cfg["delay"]
             except Exception as exc:
                 log.debug("Handler dispatch error: %s", exc)
+
+        # ── Browser rendering fallback for JS-heavy / challenged pages ──
+        # When the page body is very short or looks like a Cloudflare
+        # challenge / SPA shell, try rendering with a headless browser
+        # (Selenium UC mode → Playwright) to get the real content.
+        _needs_render = (
+            len(body) < 512
+            or "just a moment" in body[:2048].lower()
+            or (
+                "<noscript>" in body[:4096].lower()
+                and len(body) < 2048
+            )
+        )
+        if _needs_render and depth < self.max_depth:
+            rendered = render_page(url, timeout=30, wait_seconds=3.0)
+            if rendered and len(rendered.html) > len(body):
+                log.info("🌐 %s %s — rendered with headless browser (%d → %d bytes)",
+                         _c("[RENDER]", "magenta"), _c(url, "cyan"),
+                         len(body), len(rendered.html))
+                body = rendered.html
+                # Merge browser cookies into session for future requests
+                for name, value in rendered.cookies.items():
+                    self.session.cookies.set(name, value)
 
         # Save the page HTML
         page_path = smart_local_path(resp.url, self.output_dir, ct)

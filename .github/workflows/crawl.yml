@@ -89,8 +89,9 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          # curl_cffi – TLS fingerprint spoofing for Cloudflare bypass
-          pip install curl_cffi
+          # curl_cffi – TLS fingerprint spoofing (already in requirements.txt)
+          # seleniumbase – Selenium + undetected-chromedriver for JS-heavy pages
+          pip install seleniumbase
           # Playwright – headless browser fallback for CF/CAPTCHA bypass
           pip install playwright
           python -m playwright install chromium firefox || true
