@@ -248,6 +248,17 @@ def _b64decode_json(text: str) -> Any:
         return json.loads(text)
 
 
+def _format_size(size_bytes: int) -> str:
+    """Format byte count as a human-readable string."""
+    if size_bytes >= 1_073_741_824:
+        return f"{size_bytes / 1_073_741_824:.2f} GB"
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes / 1_048_576:.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
 def _make_lmsa_body(
     dparams: Any = None,
     language: str = _LANGUAGE,
@@ -415,6 +426,11 @@ class LenovoRSDModule(BaseSiteModule):
                     log.info("    → %d file(s)", len(model_entries))
 
             time.sleep(_REQUEST_DELAY)
+
+        # ── Step 5: Probe file sizes via rsdsecure-test ──────────────
+        log.info("── LenovoRSD: Probing file sizes (%d entries) ──",
+                 len(entries))
+        self._enrich_file_sizes(entries)
 
         log.info("── LenovoRSD: Index complete — %d file entries ──",
                  len(entries))
@@ -840,6 +856,73 @@ class LenovoRSDModule(BaseSiteModule):
         if self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
         return headers
+
+    def _enrich_file_sizes(self, entries: list[FileEntry]) -> None:
+        """Probe each file URL to get actual size and S3 metadata.
+
+        ``rsdsecure-test.lenovo.com`` (S3+CloudFront) returns 403 for
+        HEAD requests but 206 for ``GET Range: bytes=0-0``.  The 206
+        response includes ``Content-Range: bytes 0-0/<total_size>``
+        and S3 metadata headers (``x-amz-meta-sha256``,
+        ``x-amz-meta-s3b-last-modified``, ``x-amz-storage-class``).
+
+        ``download.lenovo.com`` supports normal HEAD (200).
+        """
+        assert self.session is not None
+        headers = {
+            "User-Agent": _LMSA_HEADERS["User-Agent"],
+            "Request-Tag": "lmsa",
+            "Cache-Control": "no-store,no-cache",
+            "Pragma": "no-cache",
+        }
+        for entry in entries:
+            url = entry.get("url", "")
+            if not url or not url.startswith("http"):
+                continue
+            try:
+                resp = self.session.get(
+                    url,
+                    headers={**headers, "Range": "bytes=0-0"},
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                if resp.status_code in (200, 206):
+                    # Extract total size from Content-Range header.
+                    cr = resp.headers.get("Content-Range", "")
+                    if "/" in cr:
+                        total = cr.rsplit("/", 1)[-1]
+                        if total.isdigit():
+                            size_bytes = int(total)
+                            entry["size"] = _format_size(size_bytes)
+
+                    # S3 metadata enrichment.
+                    sha = resp.headers.get("x-amz-meta-sha256", "")
+                    if sha:
+                        desc = entry.get("description", "")
+                        entry["description"] = f"{desc} sha256={sha}"
+
+                    s3_mod = resp.headers.get(
+                        "x-amz-meta-s3b-last-modified", "",
+                    )
+                    if s3_mod and not entry.get("release_date"):
+                        entry["release_date"] = s3_mod
+
+                elif resp.status_code == 403:
+                    # Signed URL may have expired or requires different
+                    # access.  Try normal HEAD as fallback.
+                    resp2 = self.session.head(
+                        url, headers=headers, timeout=15,
+                        allow_redirects=True,
+                    )
+                    if resp2.status_code == 200:
+                        cl = resp2.headers.get("Content-Length", "")
+                        if cl and cl.isdigit():
+                            entry["size"] = _format_size(int(cl))
+
+            except Exception:
+                pass  # Non-critical — skip metadata for this file.
+
+            time.sleep(0.2)  # Gentle rate limit.
 
     def _discover_models(self) -> list[dict[str, Any]]:
         """Fetch all device models (HAR entry 32).
