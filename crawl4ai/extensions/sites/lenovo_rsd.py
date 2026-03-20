@@ -164,33 +164,22 @@ _RSD_HOSTS = {"rsdsecure-test.lenovo.com"}
 _LSATEST_BASE = f"https://{_LSATEST_HOST}"
 _PASSPORT_BASE = f"https://{_PASSPORT_HOST}"
 
-_CLIENT_VERSION = "7.5.5.3"
-_WINDOWS_INFO = "Microsoft Windows 11 Pro, x64-based PC"
-_LANGUAGE = "en-US"
+# Fallback values — used only when the API doesn't provide them.
+_DEFAULT_CLIENT_VERSION = "7.5.5.3"
+_DEFAULT_LANGUAGE = "en-US"
+_DEFAULT_WINDOWS_INFO = "Microsoft Windows 11 Pro"
 
-# Standard LMSA desktop-client headers (from HAR entries 1-5, 22-33).
-_LMSA_HEADERS: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36"
-    ),
-    "Content-Type": "application/json",
-    "Request-Tag": "lmsa",
-    "clientVersion": _CLIENT_VERSION,
-    "windowsInfo": "Microsoft Windows 11 Pro",
-    "language": _LANGUAGE,
-    "Cache-Control": "no-store,no-cache",
-    "Pragma": "no-cache",
-}
+# LMSA desktop-client User-Agent (identifies the client to the server).
+_LMSA_UA = (
+    "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36"
+)
 
-# Browser UA used for the passport OAuth2 redirect chain (HAR entries 7-17).
+# Browser UA used for the passport OAuth2 redirect chain.
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
-
-_CATEGORIES = ["Phone", "Tablet"]
-_COUNTRIES = ["Mexico"]
 
 # Delay between API calls (seconds) to avoid rate-limiting.
 _REQUEST_DELAY = 0.5
@@ -261,22 +250,20 @@ def _format_size(size_bytes: int) -> str:
 
 def _make_lmsa_body(
     dparams: Any = None,
-    language: str = _LANGUAGE,
+    language: str = _DEFAULT_LANGUAGE,
+    client_version: str = _DEFAULT_CLIENT_VERSION,
+    windows_info: str = _DEFAULT_WINDOWS_INFO,
 ) -> dict[str, Any]:
     """Build the standard LMSA request body envelope.
 
-    Every POST to ``lsatest.lenovo.com/Interface/…`` uses this envelope::
-
-        {"client":{"version":"7.5.5.3"}, "dparams":…,
-         "language":"en-US", "windowsInfo":"Microsoft Windows 11 Pro, x64-based PC"}
-
-    Observed in HAR entries 1-5, 10, 24-26, 28-33, 42.
+    All values default to compile-time constants but can be overridden
+    with runtime-discovered values.
     """
     return {
-        "client": {"version": _CLIENT_VERSION},
+        "client": {"version": client_version},
         "dparams": dparams,
         "language": language,
-        "windowsInfo": _WINDOWS_INFO,
+        "windowsInfo": windows_info,
     }
 
 
@@ -365,6 +352,10 @@ class LenovoRSDModule(BaseSiteModule):
     def __init__(self, session: "requests.Session | None" = None) -> None:
         super().__init__(session=session)
         self._auth_token: str | None = None
+        # Runtime-discovered configuration (populated in _bootstrap).
+        self._client_version: str = _DEFAULT_CLIENT_VERSION
+        self._language: str = _DEFAULT_LANGUAGE
+        self._windows_info: str = _DEFAULT_WINDOWS_INFO
 
     # ── Interface ────────────────────────────────────────────────────
 
@@ -384,6 +375,9 @@ class LenovoRSDModule(BaseSiteModule):
 
         # ── Step 1: Import cookies if available ──────────────────────
         self._load_cookies()
+
+        # ── Step 1b: Bootstrap — discover runtime config ─────────────
+        self._bootstrap()
 
         # ── Step 2: Authenticate ─────────────────────────────────────
         log.info("── LenovoRSD: Starting authentication flow ──")
@@ -538,12 +532,12 @@ class LenovoRSDModule(BaseSiteModule):
         ``state``, ``code_challenge``, ``redirect_uri``.
         """
         assert self.session is not None
-        body = _make_lmsa_body(dparams={"key": "TIP_URL"})
+        body = self._body(dparams={"key": "TIP_URL"})
         try:
             resp = self.session.post(
                 f"{_LSATEST_BASE}/Interface/dictionary/getApiInfo.jhtml",
                 json=body,
-                headers=_LMSA_HEADERS,
+                headers=self._lmsa_headers(auth=False),
                 timeout=30,
             )
             data = _b64decode_json(resp.text)
@@ -850,12 +844,71 @@ class LenovoRSDModule(BaseSiteModule):
 
     # ── Catalog discovery ────────────────────────────────────────────
 
-    def _api_headers(self) -> dict[str, str]:
-        """Return LMSA headers with optional Bearer auth (HAR entries 22-33)."""
-        headers = dict(_LMSA_HEADERS)
-        if self._auth_token:
+    def _lmsa_headers(self, *, auth: bool = True) -> dict[str, str]:
+        """Build LMSA headers dynamically from runtime-discovered config."""
+        headers: dict[str, str] = {
+            "User-Agent": _LMSA_UA,
+            "Content-Type": "application/json",
+            "Request-Tag": "lmsa",
+            "clientVersion": self._client_version,
+            "windowsInfo": self._windows_info,
+            "language": self._language,
+            "Cache-Control": "no-store,no-cache",
+            "Pragma": "no-cache",
+        }
+        if auth and self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
         return headers
+
+    def _body(self, dparams: Any = None) -> dict[str, Any]:
+        """Build a request body envelope using runtime config."""
+        return _make_lmsa_body(
+            dparams=dparams,
+            language=self._language,
+            client_version=self._client_version,
+            windows_info=self._windows_info,
+        )
+
+    def _bootstrap(self) -> None:
+        """Discover runtime configuration from the server.
+
+        Probes ``getNextUpdateClient`` to discover the latest LMSA
+        client version.  Reads ``LENOVO_RSD_LANGUAGE`` env var for
+        language override.  Falls back to defaults if the API
+        doesn't provide values.
+        """
+        assert self.session is not None
+
+        # Language from env or system locale.
+        lang_env = os.environ.get("LENOVO_RSD_LANGUAGE", "").strip()
+        if lang_env:
+            self._language = lang_env
+
+        # Try to discover latest client version from the server.
+        headers = self._lmsa_headers(auth=False)
+        body = self._body(dparams={"country": ""})
+        try:
+            resp = self.session.post(
+                f"{_LSATEST_BASE}/Interface/client/"
+                "getNextUpdateClient.jhtml",
+                json=body,
+                headers=headers,
+                timeout=15,
+            )
+            data = _b64decode_json(resp.text)
+            if data.get("code") == "0000" and data.get("content"):
+                content = data["content"]
+                ver = content.get("version") or content.get("versionName")
+                if ver:
+                    self._client_version = str(ver)
+                    log.info("  Discovered client version: %s",
+                             self._client_version)
+                    return
+        except Exception:
+            pass
+
+        log.info("  Using default client version: %s",
+                 self._client_version)
 
     def _enrich_file_sizes(self, entries: list[FileEntry]) -> None:
         """Probe each file URL to get actual size and S3 metadata.
@@ -870,7 +923,7 @@ class LenovoRSDModule(BaseSiteModule):
         """
         assert self.session is not None
         headers = {
-            "User-Agent": _LMSA_HEADERS["User-Agent"],
+            "User-Agent": _LMSA_UA,
             "Request-Tag": "lmsa",
             "Cache-Control": "no-store,no-cache",
             "Pragma": "no-cache",
@@ -925,96 +978,85 @@ class LenovoRSDModule(BaseSiteModule):
             time.sleep(0.2)  # Gentle rate limit.
 
     def _discover_models(self) -> list[dict[str, Any]]:
-        """Fetch all device models (HAR entry 32).
+        """Fetch ALL device models dynamically.
 
         ``POST /Interface/rescueDevice/getModelNames.jhtml``
-        Body: ``{"dparams":{"country":"Mexico","category":"Phone"}, …}``
-        → ``{"code":"0000","content":{"models":[…]}}``
+        with empty ``country`` and ``category`` returns the complete
+        global catalog (461+ models across all categories, brands,
+        and platforms).
 
-        Returns models with fields: ``category``, ``brand``, ``modelName``,
-        ``marketName``, ``platform`` (MTK/Qcom/Samsung/Unisoc),
-        ``readSupport``, ``readFlow``.
+        Returns models with fields: ``category`` (Phone/Tablet/Smart),
+        ``brand`` (Lenovo/Motorola/ZUK), ``modelName``, ``marketName``,
+        ``platform`` (MTK/Qcom/Samsung/Unisoc), ``readSupport``,
+        ``readFlow``.
         """
         assert self.session is not None
-        all_models: list[dict[str, Any]] = []
-        seen: set[str] = set()
 
-        for country in _COUNTRIES:
-            for category in _CATEGORIES:
-                body = _make_lmsa_body(
-                    dparams={"country": country, "category": category},
+        body = self._body(
+            dparams={"country": "", "category": ""},
+        )
+        try:
+            resp = self.session.post(
+                f"{_LSATEST_BASE}/Interface/rescueDevice/"
+                "getModelNames.jhtml",
+                json=body,
+                headers=self._lmsa_headers(),
+                timeout=60,
+            )
+            data = _b64decode_json(resp.text)
+            if data.get("code") != "0000":
+                log.info(
+                    "    getModelNames → code=%s desc=%s",
+                    data.get("code"), data.get("desc"),
                 )
-                try:
-                    resp = self.session.post(
-                        f"{_LSATEST_BASE}/Interface/rescueDevice/"
-                        "getModelNames.jhtml",
-                        json=body,
-                        headers=self._api_headers(),
-                        timeout=30,
-                    )
-                    data = _b64decode_json(resp.text)
-                    if data.get("code") != "0000":
-                        log.info(
-                            "    getModelNames %s/%s → code=%s desc=%s",
-                            country, category,
-                            data.get("code"), data.get("desc"),
-                        )
-                        continue
+                return []
 
-                    content = data.get("content") or {}
-                    models = content.get("models") or []
-                    new_count = 0
-                    for m in models:
-                        key = m.get("modelName", "")
-                        if key and key not in seen:
-                            seen.add(key)
-                            all_models.append(m)
-                            new_count += 1
+            content = data.get("content") or {}
+            models = content.get("models") or []
 
-                    log.info(
-                        "    getModelNames %s/%s → %d models (%d new)",
-                        country, category, len(models), new_count,
-                    )
-                except Exception as exc:
-                    log.info(
-                        "    getModelNames %s/%s error: %s",
-                        country, category, exc,
-                    )
+            # Deduplicate by modelName.
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for m in models:
+                key = m.get("modelName", "")
+                if key and key not in seen:
+                    seen.add(key)
+                    unique.append(m)
 
-                time.sleep(_REQUEST_DELAY)
+            # Log summary by category.
+            cats: dict[str, int] = {}
+            for m in unique:
+                c = m.get("category", "Unknown")
+                cats[c] = cats.get(c, 0) + 1
+            summary = ", ".join(f"{c}={n}" for c, n in sorted(cats.items()))
+            log.info(
+                "    getModelNames → %d models (%s)",
+                len(unique), summary,
+            )
+            return unique
 
-        return all_models
+        except Exception as exc:
+            log.info("    getModelNames error: %s", exc)
+            return []
 
     def _get_resources(
-        self, model_name: str, market_name: str,
+        self, model_name: str, market_name: str = "",
     ) -> list[dict[str, Any]]:
-        """``POST getResource`` for a single model (HAR entry 33).
+        """``POST getResource`` for a single model.
 
-        Body: ``{"dparams":{"modelName":"XT2523-2","marketName":"Moto g05 5G"}, …}``
-        → ``{"code":"0000","content":[{…, "romResource":{…},
-        "toolResource":{…}, "flashFlow":"https://rsdsecure-test…", …}]}``
-
-        Each resource in the ``content`` list contains:
-        - ``brand``, ``category``, ``modelName``, ``realModelName``
-        - ``platform`` (MTK, Qcom, Samsung, Unisoc)
-        - ``fingerPrint`` (Android build fingerprint)
-        - ``romResource`` — ROM image (``uri``, ``name``, ``type``,
-          ``publishDate``, ``fromS3``, ``unZip``, ``md5``)
-        - ``toolResource`` — flash tool (same fields)
-        - ``flashFlow`` — JSON config URL (string, not object)
-        - ``otaResource`` — OTA update (optional)
-        - ``romMatchId`` — match identifier
-        - ``marketName`` — human-readable device name
+        Only ``modelName`` is required — ``marketName`` is optional.
+        Returns the ``content`` list of resource objects.
         """
         assert self.session is not None
-        body = _make_lmsa_body(
-            dparams={"modelName": model_name, "marketName": market_name},
-        )
+        dparams: dict[str, str] = {"modelName": model_name}
+        if market_name:
+            dparams["marketName"] = market_name
+        body = self._body(dparams=dparams)
         try:
             resp = self.session.post(
                 f"{_LSATEST_BASE}/Interface/rescueDevice/getResource.jhtml",
                 json=body,
-                headers=self._api_headers(),
+                headers=self._lmsa_headers(),
                 timeout=30,
             )
             data = _b64decode_json(resp.text)
@@ -1035,10 +1077,12 @@ class LenovoRSDModule(BaseSiteModule):
     @staticmethod
     def _extract_file_entries(
         resource: dict[str, Any],
-        category: str,
+        category: str = "",
     ) -> list[FileEntry]:
         """Convert a resource API object into ``FileEntry`` dicts.
 
+        The ``category`` parameter is used as a fallback; the resource's
+        own ``category`` field takes priority when present.
         Each resource may contain up to four downloadable items:
 
         - ``romResource`` — ROM firmware image (from S3, 5+ GB).
@@ -1060,6 +1104,8 @@ class LenovoRSDModule(BaseSiteModule):
         market_name = resource.get("marketName", "")
         platform = resource.get("platform", "")
         fingerprint = resource.get("fingerPrint", "")
+        # Use resource's own category, fall back to caller-provided.
+        cat = resource.get("category", "") or category
         product_label = f"{brand} {market_name or model_name}".strip()
 
         def _clean_url(url: str) -> str:
@@ -1072,7 +1118,7 @@ class LenovoRSDModule(BaseSiteModule):
             entries.append(FileEntry(
                 name=rom.get("name", ""),
                 url=rom["uri"],
-                category=f"{category}/ROM",
+                category=f"{cat}/ROM",
                 os=fingerprint,
                 version=rom.get("name", ""),
                 release_date=rom.get("publishDate", ""),
@@ -1094,7 +1140,7 @@ class LenovoRSDModule(BaseSiteModule):
             entries.append(FileEntry(
                 name=tool.get("name", ""),
                 url=tool["uri"],
-                category=f"{category}/Tool",
+                category=f"{cat}/Tool",
                 version=tool.get("name", ""),
                 release_date=tool.get("publishDate", ""),
                 description=(
@@ -1116,7 +1162,7 @@ class LenovoRSDModule(BaseSiteModule):
             entries.append(FileEntry(
                 name=ff_name,
                 url=flash_flow,
-                category=f"{category}/FlashFlow",
+                category=f"{cat}/FlashFlow",
                 description=(
                     f"Flash-flow config for {product_label} ({platform})"
                 ),
@@ -1133,7 +1179,7 @@ class LenovoRSDModule(BaseSiteModule):
             entries.append(FileEntry(
                 name=ota.get("name", ""),
                 url=ota["uri"],
-                category=f"{category}/OTA",
+                category=f"{cat}/OTA",
                 version=ota.get("name", ""),
                 release_date=ota.get("publishDate", ""),
                 description=(
