@@ -195,6 +195,39 @@ _COUNTRIES = ["Mexico"]
 # Delay between API calls (seconds) to avoid rate-limiting.
 _REQUEST_DELAY = 0.5
 
+# ── Hardcoded passport-sit.lenovo.com session cookies ────────────────────
+# These cookies allow skipping the interactive login flow (reCAPTCHA +
+# password hash).  They are loaded into the requests session cookie jar
+# when no ``LENOVO_RSD_COOKIES`` env-var override is provided.
+#
+# The critical cookies for SSO auto-login are:
+# - LPSWUST / LPSWUTGT — session tokens from ``POST userLogin``
+# - LPSState=1 — login state flag
+# - JSESSIONID — server session
+# - lenovoid.realm — OAuth realm
+# - lenovoid.webLoginSignkey — anti-CSRF key
+_DEFAULT_PASSPORT_COOKIES: list[dict[str, object]] = [
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.action", "value": "", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": "passport-sit.lenovo.com", "name": "JSESSIONID", "value": "3CFDC96074D7B0AD46AADE3E5E3DBA36", "path": "/", "secure": True, "httpOnly": True, "hostOnly": True},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.diyoptions.w5", "value": "eyJsZW5vdm9pZC5oaWRlZGlzY29yZCI6IjEiLCJsZW5vdm9pZC5oaWRlZmFjZWJvb2siOiIxIiwibGVub3ZvaWQuaGlkZWdvb2dsZSI6IjEiLCJsZW5vdm9pZC5oaWRlbGFuZ3VhZ2UiOiIxIiwibGVub3ZvaWQuaGlkZXBob25lbG9naW4iOiIxIiwibGVub3ZvaWQuaGlkZWxvZ2lucmVnIjoiMSIsImxlbm92b2lkLmhpZGVtaWNyb3NvZnQiOiIxIiwibGVub3ZvaWQuaGlkZXN0ZWFtIjoiMSIsImxlbm92b2lkLmhpZGVyZWdwaG9uZSI6IjEiLCJsZW5vdm9pZC5oaWRldHdpdGNoIjoiMSIsImxlbm92b2lkLnByaXZhY3kiOm51bGwsImxlbm92b2lkLlRlcm1zIjpudWxsLCJsZW5vdm9pZC56b29tIjoiMSIsImxlbm92b2lkLnRoZW1lIjoiaWQiLCJsZW5vdm9pZC5zZGsiOm51bGx9", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "LenovoID.UNENC", "value": "eduardo%40uaemex.top", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "lang", "value": "en_US", "path": "/", "secure": False, "httpOnly": False, "hostOnly": False, "expirationDate": 1774851002},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.theme", "value": "", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.diyoptions", "value": "eyJsZW5vdm9pZC5oaWRld2VjaGF0IjoiMSIsImxlbm92b2lkLmhpZGVxcSI6IjEiLCJsZW5vdm9pZC5oaWRlc2luYSI6IjEiLCJsZW5vdm9pZC5oaWRlbGFuZ3VhZ2UiOiIxIiwibGVub3ZvaWQuaGlkZWF1dG9sb2dpbiI6IjEiLCJsZW5vdm9pZC5oaWRlcmVnZW1haWwiOiIxIiwibGVub3ZvaWQuaGlkZXJlZ21vYmlsZSI6IjEiLCJsZW5vdm9pZC5oaWRlc21zbG9naW4iOiIxIiwibGVub3ZvaWQuaGlkZXFybG9naW4iOiIxIiwibGVub3ZvaWQud2Vic3RhdGUiOiIwIiwibGVub3ZvaWQuaGlkZWxvZ2lucmVnIjoiMSIsImxlbm92b2lkLmhpZGVtYWlsbG9naW4iOiIxIiwibGVub3ZvaWQuYXV0aG5zZXEiOiIwIiwibGVub3ZvaWQuaGlkZW1pY3Jvc29mdCI6IjAifQ", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "LPSState", "value": "1", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.realm", "value": "lenovo.mbg.service.lmsa", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850952},
+    {"domain": ".passport-sit.lenovo.com", "name": "LenovoID.UN", "value": "eduardo@uaemex.top", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "LenovoID.usertype", "value": "LenovoID2C", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.webLoginBindPath", "value": "cnwebauthnv3", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.webLoginSignkey", "value": "1773986952719%23CA4OCgABDwAMCw4IAA%3D%3D", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid.zoom", "value": "", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "lenovoid_lastlogin", "value": "cnwebauthnv3", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False},
+    {"domain": ".passport-sit.lenovo.com", "name": "location", "value": "MX", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "loginSource", "value": "wauthen2", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850861},
+    {"domain": ".passport-sit.lenovo.com", "name": "LPSWUST", "value": "ZAgEAAAAAAGE9MTMwMDAwMTYxODI1OSZiPTImYz0xJmQ9MCZlPTYyRTcwNjI4MTcwNUE0MTM5N0I5MjhGNDEzRTczODVGMCZoPTE3NzM5ODYyMjc0NDgmaT0zNDU2MDAwJm89ZDllZGFlMjRiNzk5NWMzMTUxODFkMjA4MzU3MWY5ZDQmcD13YXV0aCZxPTAmcj0xJmFtcj1wd2QmdXNlcm5hbWU9ZWR1YXJkb0B1YWVtZXgudG9w5sQOryIwiKHoRqZRh4vytg", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+    {"domain": ".passport-sit.lenovo.com", "name": "LPSWUTGT", "value": "ZAgEAAAAAAGE9MTMwMDAwMTYxODI1OSZiPTImYz0xJmQ9MCZlPTYyRTcwNjI4MTcwNUE0MTM5N0I5MjhGNDEzRTczODVGMCZoPTE3NzM5ODYyMjc0NDgmaT0zNDU2MDAwJm89ZDllZGFlMjRiNzk5NWMzMTUxODFkMjA4MzU3MWY5ZDQmcD13YXV0aCZxPTAmcj0xJmFtcj1wd2QmdXNlcm5hbWU9ZWR1YXJkb0B1YWVtZXgudG9w5sQOryIwiKHoRqZRh4vytg", "path": "/", "secure": True, "httpOnly": True, "hostOnly": False, "expirationDate": 1774850226},
+]
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -390,41 +423,31 @@ class LenovoRSDModule(BaseSiteModule):
     # ── Cookie loading ───────────────────────────────────────────────
 
     def _load_cookies(self) -> None:
-        """Load passport cookies from LENOVO_RSD_COOKIES env var.
+        """Load passport cookies into the session.
 
-        The env var must contain a JSON array of cookie objects as exported
-        by browser cookie-editor extensions, e.g.::
-
-            [{"domain":".passport-sit.lenovo.com","name":"LPSWUST",
-              "value":"ZAgE…","path":"/","secure":true,"httpOnly":true}, …]
-
-        Critical cookies for SSO (set by ``POST userLogin``, HAR entry 16):
-        - ``LPSWUST`` — session token.
-        - ``LPSWUTGT`` — TGT ticket.
-        - ``LPSState`` — login state flag (``"1"``).
-        - ``JSESSIONID`` — server session ID.
-        - ``lenovoid.realm`` — OAuth realm (``lenovo.mbg.service.lmsa``).
-        - ``lenovoid.webLoginSignkey`` — anti-CSRF signing key.
-        - ``LenovoID.UN`` / ``LenovoID.UNENC`` — user email.
-        - ``LenovoID.usertype`` — ``LenovoID2C``.
-        - ``location`` — country (``MX``).
-        - ``loginSource`` / ``lenovoid_lastlogin`` — login provider.
+        Priority:
+        1. ``LENOVO_RSD_COOKIES`` env var (JSON array from browser export).
+        2. ``_DEFAULT_PASSPORT_COOKIES`` hardcoded in this module.
         """
         assert self.session is not None
+
+        # Try env var first.
         cookies_raw = os.environ.get("LENOVO_RSD_COOKIES", "").strip()
-        if not cookies_raw:
-            return
+        if cookies_raw:
+            try:
+                cookies = json.loads(cookies_raw)
+                if isinstance(cookies, list):
+                    _import_cookies_to_jar(self.session, cookies)
+                    log.info("  Loaded %d cookies from LENOVO_RSD_COOKIES",
+                             len(cookies))
+                    return
+            except json.JSONDecodeError as exc:
+                log.warning("  LENOVO_RSD_COOKIES JSON parse error: %s", exc)
 
-        try:
-            cookies = json.loads(cookies_raw)
-            if not isinstance(cookies, list):
-                log.warning("  LENOVO_RSD_COOKIES is not a JSON array")
-                return
-
-            _import_cookies_to_jar(self.session, cookies)
-            log.info("  Loaded %d cookies from LENOVO_RSD_COOKIES", len(cookies))
-        except json.JSONDecodeError as exc:
-            log.warning("  LENOVO_RSD_COOKIES JSON parse error: %s", exc)
+        # Fall back to hardcoded cookies.
+        _import_cookies_to_jar(self.session, _DEFAULT_PASSPORT_COOKIES)
+        log.info("  Loaded %d hardcoded passport cookies",
+                 len(_DEFAULT_PASSPORT_COOKIES))
 
     # ── Authentication ───────────────────────────────────────────────
 
@@ -459,10 +482,10 @@ class LenovoRSDModule(BaseSiteModule):
         #    With valid cookies (LPSWUST, LPSWUTGT), the chain is:
         #    authorize → gateway → (auto-login) → callback page with code.
         #    Without cookies: authorize → gateway → preLogin (login form).
-        auth_code = self._follow_oauth_chain(oauth_url)
+        redirect_qs = self._follow_oauth_chain(oauth_url)
 
         # 3. If no code from cookie-based flow, try username/password.
-        if not auth_code:
+        if not redirect_qs:
             username = os.environ.get("LENOVO_RSD_USERNAME", "")
             password = os.environ.get("LENOVO_RSD_PASSWORD", "")
 
@@ -475,18 +498,18 @@ class LenovoRSDModule(BaseSiteModule):
                     if prelogin_ok:
                         login_ok = self._passport_login(username, password)
                         if login_ok:
-                            auth_code = self._get_auth_code_from_callback()
+                            redirect_qs = self._get_auth_code_from_callback()
             else:
                 log.info("  No cookies and no credentials — unauthenticated mode")
 
-        if not auth_code:
+        if not redirect_qs:
             log.warning("  Could not obtain authorization code")
             return
 
         log.info("  Got authorization code")
 
         # 4. Exchange the code for a Bearer token (HAR entry 21).
-        token = self._exchange_code(auth_code)
+        token = self._exchange_code(redirect_qs)
         if token:
             self._auth_token = token
         else:
@@ -517,16 +540,23 @@ class LenovoRSDModule(BaseSiteModule):
     def _follow_oauth_chain(self, oauth_url: str) -> str | None:
         """Follow the OAuth2 redirect chain and extract the auth code.
 
-        When valid passport cookies are loaded (LPSWUST, LPSWUTGT, etc.),
-        the chain auto-redirects through:
-        authorize (302) → gateway (302) → callback (200 with HTML+JS).
+        The chain is: authorize (302) → gateway (302) → preLogin (200).
 
-        The callback page (HAR entry 17) contains JS like::
+        Two possible outcomes at preLogin:
 
-            window.location.href = "https://lsatest.lenovo.com/Tips/
-            lenovoIdSuccess.html?code=<AUTH_CODE>&scope=openid&state=…"
+        A) **Cookies valid (auto-login)** — The server recognizes the
+           LPSWUST/LPSWUTGT cookies and renders an HTML page with a JS
+           variable ``gateway`` containing the full callback URL::
 
-        We extract the ``code`` parameter from this redirect URL.
+               var gateway = 'https://passport-sit.lenovo.com/v1.0/
+               utility/lenovoid/oauth2/callback?lenovoid.wust=…';
+               window.location.href = gateway;
+
+           We extract this ``gateway`` URL and follow it to the callback
+           page (HAR entry 17), which contains the auth code in its JS.
+
+        B) **Cookies expired** — The server renders the login form
+           (``<title>Sign In</title>``).  Return ``None``.
         """
         assert self.session is not None
         headers = {
@@ -546,32 +576,71 @@ class LenovoRSDModule(BaseSiteModule):
             "Sec-Fetch-Dest": "document",
         }
         try:
+            # Follow the authorize → gateway → preLogin chain.
             resp = self.session.get(
                 oauth_url, headers=headers, timeout=30,
                 allow_redirects=True,
             )
             if resp.status_code != 200:
-                log.debug("  OAuth chain ended with status %d", resp.status_code)
+                log.debug("  OAuth chain ended with status %d",
+                          resp.status_code)
                 return None
 
-            # Check if we landed on the callback page with the code.
-            # The callback page (HAR entry 17) has JS containing the redirect
-            # URL with the code parameter.
-            match = re.search(
-                r'lenovoIdSuccess\.html\?code=([^&"\']+)', resp.text,
+            body = resp.text
+
+            # ── Case A: Auto-login page with gateway JS variable ─────
+            # HAR entry 16 (userLogin response) pattern:
+            #   var gateway = 'https://…/oauth2/callback?lenovoid.wust=…';
+            #   window.location.href = gateway;
+            # The server may escape slashes as \/ in the JS string.
+            gateway_match = re.search(
+                r"var\s+gateway\s*=\s*'([^']+)'", body,
             )
-            if match:
-                return match.group(1)
+            if gateway_match:
+                gateway_url = gateway_match.group(1)
+                # Unescape JS slash escapes: \/ → /
+                gateway_url = gateway_url.replace("\\/", "/")
+                if gateway_url.startswith("http"):
+                    log.info("  Found gateway redirect URL (auto-login)")
+                    # Follow the gateway URL to the callback page.
+                    resp2 = self.session.get(
+                        gateway_url, headers=headers, timeout=30,
+                        allow_redirects=True,
+                    )
+                    if resp2.status_code == 200:
+                        # The callback page (HAR entry 17) has JS:
+                        # window.location.href = "…lenovoIdSuccess.html?
+                        #   code=…&scope=openid&state=…"
+                        # We need ALL params (code, scope, state) for the
+                        # token exchange — 'state' is mandatory.
+                        redirect_match = re.search(
+                            r'lenovoIdSuccess\.html\?([^"\']+)',
+                            resp2.text,
+                        )
+                        if redirect_match:
+                            return redirect_match.group(1)
+                        # Also check for code in the final URL.
+                        url_match = re.search(
+                            r'[?&]code=([^&]+)', resp2.url,
+                        )
+                        if url_match:
+                            return f"code={url_match.group(1)}"
 
-            # Also check the final URL — the chain may have redirected
-            # all the way to lenovoIdSuccess.html with the code in the URL.
-            final_url = resp.url
-            code_match = re.search(r'[?&]code=([^&]+)', final_url)
-            if code_match:
-                return code_match.group(1)
+            # ── Direct callback check (rare: full redirect chain) ────
+            # Check if we landed directly on the callback page.
+            redirect_match = re.search(
+                r'lenovoIdSuccess\.html\?([^"\']+)', body,
+            )
+            if redirect_match:
+                return redirect_match.group(1)
 
-            # If we got the preLogin page (HAR entry 9), cookies didn't work.
-            if "preLogin" in final_url or "Sign In" in resp.text[:500]:
+            # Check the final URL for code parameter.
+            url_match = re.search(r'[?&]code=([^&]+)', resp.url)
+            if url_match:
+                return f"code={url_match.group(1)}"
+
+            # ── Case B: Login form — cookies didn't work ─────────────
+            if "preLogin" in resp.url or "Sign In" in body[:500]:
                 log.debug("  Landed on login page — cookies not sufficient")
                 return None
 
@@ -673,12 +742,11 @@ class LenovoRSDModule(BaseSiteModule):
         After ``userLogin``, the session has the LPSWUST/LPSWUTGT cookies.
         We call the ``oauth2/callback`` endpoint which returns HTML with
         the auth code embedded in a JS redirect URL.
+
+        Returns the full query string (``code=…&scope=…&state=…``) or None.
         """
         assert self.session is not None
 
-        # The callback URL includes a ``lenovoid.wust`` param from the
-        # userLogin response.  We call the base callback and let the
-        # server figure out the session.
         callback_url = (
             f"{_PASSPORT_BASE}/v1.0/utility/lenovoid/oauth2/callback"
         )
@@ -697,33 +765,46 @@ class LenovoRSDModule(BaseSiteModule):
             if resp.status_code != 200:
                 return None
 
-            # Extract code from HTML/JS (HAR entry 17 pattern).
-            match = re.search(
-                r'lenovoIdSuccess\.html\?code=([^&"\']+)', resp.text,
+            # Extract full redirect URL params from HTML/JS.
+            redirect_match = re.search(
+                r'lenovoIdSuccess\.html\?([^"\']+)', resp.text,
             )
-            if match:
-                return match.group(1)
+            if redirect_match:
+                return redirect_match.group(1)
 
             # Check final URL too.
             code_match = re.search(r'[?&]code=([^&]+)', resp.url)
             if code_match:
-                return code_match.group(1)
+                return f"code={code_match.group(1)}"
         except Exception as exc:
             log.debug("  auth code extraction error: %s", exc)
         return None
 
-    def _exchange_code(self, code: str) -> str | None:
+    def _exchange_code(self, redirect_qs: str) -> str | None:
         """Exchange the auth code for a Bearer token (HAR entry 21).
 
-        ``GET /Interface/user/oauth2/callback.jhtml?code=…&scope=openid``
+        ``GET /Interface/user/oauth2/callback.jhtml?code=…&scope=openid&state=…``
         → ``{"code":"0000","content":"softwareFix://callback?fullName=…
         &Authorization=<BEARER_TOKEN>"}``
 
-        The ``state`` parameter is optional — the HAR shows it's sent but
-        the server uses the ``code`` to look up the token.
+        Parameters
+        ----------
+        redirect_qs:
+            The full query string from the callback redirect URL, e.g.
+            ``code=…&scope=openid&state=…``.  The ``state`` param is
+            **required** by the server to match the original OAuth flow.
         """
         assert self.session is not None
-        params = {"code": code, "scope": "openid"}
+        # Parse the query string to get code, scope, state.
+        qs = urllib.parse.parse_qs(redirect_qs)
+        params = {
+            "code": qs.get("code", [""])[0],
+            "scope": qs.get("scope", ["openid"])[0],
+        }
+        state = qs.get("state", [""])[0]
+        if state:
+            params["state"] = state
+
         headers = {
             "User-Agent": _BROWSER_UA,
             "Accept": "application/json, text/plain, */*",
