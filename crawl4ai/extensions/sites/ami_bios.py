@@ -479,11 +479,13 @@ class AMIBiosModule(BaseSiteModule):
                         )
                         page_found += found
 
-                        # Queue ALL resource pages for full HTML scan.
+                        # Queue resource pages for full HTML scan.
                         # The WP API content.rendered excludes Divi popup
                         # modules which contain window.location.href JS
                         # redirects to download URLs (ZIPs, PDFs).  Only
                         # a full page GET captures these popup downloads.
+                        # Non-resource pages (products, solutions) are
+                        # excluded — they rarely have popup downloads.
                         if link and "/resource/" in link:
                             no_content_pages.append({"url": link, "title": title})
 
