@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from .base import BaseSiteModule, FileEntry
 from .ami_bios import AMIBiosModule
 from .hp_support import HPSupportModule
+from .lenovo_rsd import LenovoRSDModule
 
 if TYPE_CHECKING:
     import requests
@@ -41,6 +42,7 @@ __all__ = [
     "BaseSiteModule",
     "FileEntry",
     "HPSupportModule",
+    "LenovoRSDModule",
     "get_matching_modules",
 ]
 
@@ -52,6 +54,7 @@ log = logging.getLogger(__name__)
 _REGISTRY: list[type[BaseSiteModule]] = [
     AMIBiosModule,
     HPSupportModule,
+    LenovoRSDModule,
 ]
 
 
