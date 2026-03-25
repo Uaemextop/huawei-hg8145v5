@@ -1,11 +1,8 @@
-"""Base class for all link extractors."""
-from abc import ABC, abstractmethod
+"""Base class for all link extractors.
 
-class BaseExtractor(ABC):
-    name: str = ""
-    @abstractmethod
-    def extract(self, content, url, base):
-        ...
-    @abstractmethod
-    def can_handle(self, content_type, url):
-        ...
+Delegates to :mod:`crawl4ai.extensions.extraction`.
+"""
+
+from crawl4ai.extensions.extraction import BaseExtractor  # noqa: F401
+
+__all__ = ["BaseExtractor"]

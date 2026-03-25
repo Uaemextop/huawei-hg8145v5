@@ -1,6 +1,10 @@
 """
 Detection registry — runs all detectors against a page response.
 
+Delegates to :mod:`crawl4ai.extensions.detection`, which provides 50+
+technology detectors (frameworks, CDNs, WAFs, CMSs, etc.).  The
+original five detectors are re-exported for backward compatibility.
+
 Usage::
 
     from web_crawler.detection import detect_all
@@ -10,39 +14,16 @@ Usage::
         print(d["type"])   # "cloudflare", "siteground", "waf", ...
 """
 
-from web_crawler.detection.base import BaseDetector
-from web_crawler.detection.cloudflare import CloudflareDetector
-from web_crawler.detection.siteground import SiteGroundDetector
-from web_crawler.detection.waf import WAFDetector
-from web_crawler.detection.soft404 import Soft404Detector
-from web_crawler.detection.wordpress import WordPressDetector
-
-ALL_DETECTORS: list[BaseDetector] = [
-    CloudflareDetector(),
-    SiteGroundDetector(),
-    WAFDetector(),
-    Soft404Detector(),
-    WordPressDetector(),
-]
-
-
-def detect_all(
-    url: str,
-    status_code: int,
-    headers: dict,
-    body: str,
-) -> list[dict]:
-    """Run every registered detector and return a list of matches."""
-    results: list[dict] = []
-    for detector in ALL_DETECTORS:
-        try:
-            result = detector.detect(url, status_code, headers, body)
-            if result is not None:
-                results.append(result)
-        except Exception:
-            pass
-    return results
-
+from crawl4ai.extensions.detection import (  # noqa: F401
+    ALL_DETECTORS,
+    BaseDetector,
+    CloudflareDetector,
+    SiteGroundDetector,
+    WAFDetector,
+    Soft404Detector,
+    WordPressDetector,
+    detect_all,
+)
 
 __all__ = [
     "detect_all",

@@ -1,4 +1,7 @@
-"""Utility helpers for URL normalisation and logging."""
+"""Utility helpers for URL normalisation and logging.
+
+Re-exports from :mod:`crawl4ai.extensions`.
+"""
 
 from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
 from web_crawler.utils.log import setup_logging, log

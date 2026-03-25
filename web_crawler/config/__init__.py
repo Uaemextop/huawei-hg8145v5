@@ -1,4 +1,7 @@
-"""Crawler configuration and constants."""
+"""Crawler configuration and constants.
+
+Re-exports from :mod:`crawl4ai.extensions.settings`.
+"""
 
 from web_crawler.config.settings import (  # noqa: F401
     DEFAULT_OUTPUT,

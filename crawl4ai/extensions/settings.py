@@ -241,10 +241,11 @@ WAF_SIGNATURES = {
         "_incapsula_",
     ],
     "akamai": [
-        "akamai",
-        "akamaighost",
-        "x-akamai-transformed",
+        # Actual Akamai WAF blocking indicators.  Generic CDN-presence
+        # headers (server: AkamaiGHost, akamai-grn, x-akamai-transformed)
+        # appear on every Akamai-served page and must NOT trigger detection.
         "ak_bmsc",
+        "errors.edgesuite.net",
     ],
     "shield_security": [
         "icwp-wpsf",
