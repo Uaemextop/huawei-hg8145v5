@@ -165,7 +165,7 @@ def retry_with_headers(
                 url,
             )
         except _NETWORK_ERRORS as exc:
-            log.debug("  [RETRY %d/%d] Network error for %s: %s", attempt, HEADER_RETRY_MAX, url, exc)
+            log.debug("  [RETRY %d/%d] Network error for %s: %s", attempt, HEADER_RETRY_MAX, url, type(exc).__name__)
         time.sleep(crawler.delay * attempt)
     return None
 

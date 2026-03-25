@@ -60,7 +60,7 @@ def git_lfs_track_large_files(crawler: Crawler, cwd: str) -> None:
                 )
                 tracked_any = True
         except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("[GIT-LFS] Failed to track %s: %s", f, exc)
+            log.warning("[GIT-LFS] Failed to track %s: %s", rel, exc)
     if tracked_any:
         gitattr = out_dir / ".gitattributes"
         if gitattr.exists():

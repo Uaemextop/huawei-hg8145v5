@@ -139,8 +139,8 @@ def discover_wp_media(crawler: Crawler) -> None:
         )
         try:
             resp = crawler.session.get(api_url, timeout=REQUEST_TIMEOUT)
-        except _NETWORK_ERRORS:
-            log.debug("  [WP-MEDIA] Network error on page %d", page)
+        except _NETWORK_ERRORS as exc:
+            log.debug("  [WP-MEDIA] Network error on page %d: %s", page, type(exc).__name__)
             break
         if resp.status_code != 200:
             break
@@ -261,8 +261,8 @@ def probe_wc_uploads(crawler: Crawler) -> None:
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
             )
-        except _NETWORK_ERRORS:
-            log.debug("  [WC-UPLOADS] Network error probing %s", path)
+        except _NETWORK_ERRORS as exc:
+            log.debug("  [WC-UPLOADS] Network error probing %s: %s", path, type(exc).__name__)
             continue
         if not r.ok:
             continue
