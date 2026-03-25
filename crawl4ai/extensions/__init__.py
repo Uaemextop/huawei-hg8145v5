@@ -53,6 +53,7 @@ from .bypass import (  # noqa: F401
     inject_cf_clearance,
     solve_cf_challenge,
 )
+from .crawler import Crawler  # noqa: F401
 
 __all__ = [
     # detection
@@ -74,4 +75,6 @@ __all__ = [
     "is_cf_managed_challenge",
     "inject_cf_clearance",
     "solve_cf_challenge",
+    # crawler
+    "Crawler",
 ]
