@@ -37,10 +37,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python -m web_crawler https://example.com\n"
-            "  python -m web_crawler https://example.com --depth 3\n"
-            "  python -m web_crawler https://example.com --output my_site\n"
-            "  python -m web_crawler https://example.com --log-file crawl.log\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --depth 3\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --output my_site\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --log-file crawl.log\n"
         ),
     )
     parser.add_argument(
