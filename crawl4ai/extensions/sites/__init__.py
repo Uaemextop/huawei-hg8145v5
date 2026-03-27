@@ -33,6 +33,7 @@ from .base import BaseSiteModule, FileEntry
 from .ami_bios import AMIBiosModule
 from .hp_support import HPSupportModule
 from .lenovo_rsd import LenovoRSDModule
+from .moto_cds import MotoCDSModule
 
 if TYPE_CHECKING:
     import requests
@@ -43,6 +44,7 @@ __all__ = [
     "FileEntry",
     "HPSupportModule",
     "LenovoRSDModule",
+    "MotoCDSModule",
     "get_matching_modules",
 ]
 
@@ -55,6 +57,7 @@ _REGISTRY: list[type[BaseSiteModule]] = [
     AMIBiosModule,
     HPSupportModule,
     LenovoRSDModule,
+    MotoCDSModule,
 ]
 
 
