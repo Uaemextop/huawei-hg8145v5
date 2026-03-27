@@ -74,7 +74,7 @@ permissions:
 jobs:
   crawl:
     name: "Crawl ${{ inputs.url }}"
-    runs-on: aapt2
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
