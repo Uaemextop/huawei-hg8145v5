@@ -1,73 +1,64 @@
-# web-crawler
+# crawl4ai
 
-Generic Python web crawler that downloads all reachable pages and static assets
-from any website.
-
-Starting from a seed URL, the crawler performs an **exhaustive BFS** (breadth-first
-search), downloading every linked page and asset (HTML, JavaScript, CSS, images,
-fonts, JSON, XML, …) until no new URLs remain.  Preserves the original server
-directory structure on disk for fully-offline browsing and analysis.
+Unified Python web crawling engine combining an async browser-based crawler
+with a general-purpose BFS site downloader and specialised site modules
+(HP Support, AMI BIOS, Lenovo RSD, etc.).
 
 ## Features
 
-* **Generic** – works with any website (no site-specific authentication)
-* **Exhaustive recursive BFS** – continues until the queue is completely empty
-* **robots.txt respect** – checks `/robots.txt` before crawling (disable with `--no-robots`)
-* **Configurable depth limit** – limit crawl depth with `--depth N`
-* **Configurable page limit** – limit total pages with `--max-pages N`
-* **Configurable delay** – set delay between requests with `--delay N`
-* **AI-powered CAPTCHA solver** – solves CAPTCHAs using GitHub Models vision API (GPT-4o)
-* **Lenovo LMSA authentication** – full OAuth flow with automatic CAPTCHA solving
-* **Deep link extraction** from every content type:
-
-  | Source | Patterns extracted |
-  |--------|--------------------|
-  | HTML | `href`, `src`, `action`, `data-src`, `srcset`, inline `<style>`, inline `<script>` |
-  | CSS | `url()`, `@import` |
-  | JavaScript | `window.location`, `location.href`, `fetch()`, `$.ajax({url:})`, all root-relative `'/...'` string literals, `document.write(...)` |
-  | JSON | String values starting with `/` |
-
-* **Resume / skip already-downloaded files** – existing files are loaded from
-  disk and parsed for undiscovered links so the crawl continues without
-  re-fetching
-* **Content deduplication** – identical content is saved only once
+* **Async browser crawler** – Playwright/headless crawling with LLM extraction
+* **BFS site downloader** – exhaustive breadth-first file discovery and download
+* **50+ technology detectors** – Cloudflare, SiteGround, WordPress, React, Angular, Django, and more
+* **Deep link extraction** from HTML, CSS, JavaScript, JSON, and cloud storage
+* **WAF/CAPTCHA bypass** – Cloudflare Managed Challenge, SiteGround PoW, header rotation
+* **Site-specific modules** – HP Support, AMI BIOS, Lenovo RSD firmware crawlers
+* **Content deduplication** by SHA-256 hash
+* **Git integration** – periodic commit/push of downloaded files
+* **robots.txt respect** with configurable depth and delay
 
 ## Project structure
 
 ```
-web_crawler/              # Main Python package
-├── __init__.py           # Package version
-├── __main__.py           # Entry point: python -m web_crawler
-├── cli.py                # CLI argument parsing
-├── config.py             # Configuration constants
-├── session.py            # HTTP session creation (requests + retry)
-├── ai/                   # AI module (GitHub Models + CAPTCHA solver)
-│   ├── __init__.py
-│   ├── github_models.py  # GitHub Models API client (OpenAI SDK, vision)
-│   └── captcha_solver.py # Playwright-based CAPTCHA solver
-├── auth/                 # Authentication submodule
-│   ├── lenovo_id.py      # Lenovo ID OAuth (WUST → JWT) with AI CAPTCHA
-│   └── lmsa.py           # LMSA session management
-├── extraction/           # Link extraction submodule
-│   ├── __init__.py
-│   ├── css.py            # CSS url() and @import extraction
-│   ├── html_parser.py    # HTML attribute extraction (BeautifulSoup)
-│   ├── javascript.py     # Deep JS path extraction
-│   ├── json_extract.py   # JSON value path extraction
-│   └── links.py          # Master dispatcher
-├── core/                 # Core crawler submodule
-│   ├── __init__.py
-│   ├── crawler.py        # BFS Crawler class
-│   └── storage.py        # File I/O and local path mapping
-└── utils/                # Utility submodule
-    ├── __init__.py
-    ├── log.py            # Coloured logging setup
-    └── url.py            # URL normalisation and deduplication
-tests/                    # Unit tests
-├── test_ai.py            # AI module + CAPTCHA integration tests
-├── test_crawler.py       # Crawler tests
-├── test_extraction.py    # Link extraction tests
-└── test_url.py           # URL normalisation tests
+crawl4ai/                         # Main Python package
+├── __init__.py                   # Async crawler exports
+├── async_webcrawler.py           # Core AsyncWebCrawler
+├── extensions/                   # Extension modules
+│   ├── __init__.py               # Unified exports
+│   ├── settings.py               # Configuration constants
+│   ├── extraction.py             # Link extraction (HTML, CSS, JS, JSON)
+│   ├── storage.py                # File I/O and content hashing
+│   ├── downloader.py             # SiteDownloader for site modules
+│   ├── url_utils.py              # URL normalisation
+│   ├── log_utils.py              # Coloured logging
+│   ├── bypass/                   # Session & bypass helpers
+│   │   ├── session.py            # HTTP session builder
+│   │   ├── cloudflare.py         # CF challenge solver
+│   │   └── siteground.py         # SG CAPTCHA solver
+│   ├── detection/                # 50+ technology detectors
+│   │   ├── base.py               # BaseDetector ABC
+│   │   ├── cloudflare.py, waf.py, wordpress.py, ...
+│   │   └── react.py, angular.py, django.py, ...
+│   ├── handlers/                 # Response handlers
+│   │   ├── base.py               # BaseHandler ABC
+│   │   ├── spa_renderer.py, cdn_optimizer.py, ...
+│   │   └── protection_bypass.py, rate_limiter.py, ...
+│   ├── crawler/                  # BFS web crawler engine
+│   │   ├── __init__.py           # Exports: Crawler
+│   │   ├── engine.py             # Main BFS Crawler class
+│   │   ├── cli.py                # CLI entry point
+│   │   ├── wordpress.py          # WordPress discovery
+│   │   ├── protection.py         # WAF/protection detection
+│   │   ├── media.py              # Video/CDN/media handling
+│   │   ├── git_ops.py            # Git integration
+│   │   ├── models.py             # Data models
+│   │   ├── configs.py            # Config dataclasses
+│   │   └── handlers.py           # Handler base class
+│   └── sites/                    # Site-specific modules
+│       ├── base.py               # BaseSiteModule ABC
+│       ├── hp_support.py         # HP Support crawler
+│       ├── ami_bios.py           # AMI BIOS crawler
+│       └── lenovo_rsd.py         # Lenovo RSD crawler
+tests/                            # Unit tests
 ```
 
 ## Requirements
@@ -80,93 +71,28 @@ tests/                    # Unit tests
 ```bash
 pip install -r requirements.txt
 
-# Or install as a package (includes optional tqdm and colorlog):
+# Or install as a package:
 pip install -e ".[ui]"
-
-# For AI CAPTCHA solving (optional):
-pip install -e ".[ai]"
-playwright install chromium
 ```
 
 ## Usage
 
 ```bash
-# Basic crawl
-python -m web_crawler https://example.com
+# BFS crawler
+python -m crawl4ai.extensions.crawler https://example.com
 
 # With depth limit
-python -m web_crawler https://example.com --depth 3
+python -m crawl4ai.extensions.crawler https://example.com --depth 3
 
 # Custom output directory
-python -m web_crawler https://example.com --output my_site
-
-# Limit number of pages
-python -m web_crawler https://example.com --max-pages 100
-
-# Custom delay between requests (be polite!)
-python -m web_crawler https://example.com --delay 1.0
-
-# Ignore robots.txt
-python -m web_crawler https://example.com --no-robots
-
-# Force re-download even if files already exist
-python -m web_crawler https://example.com --force
+python -m crawl4ai.extensions.crawler https://example.com --output my_site
 
 # Verbose debug output
-python -m web_crawler https://example.com --debug
+python -m crawl4ai.extensions.crawler https://example.com --debug
 
-# Disable SSL verification (for self-signed certs)
-python -m web_crawler https://example.com --no-verify-ssl
+# Disable SSL verification
+python -m crawl4ai.extensions.crawler https://example.com --no-verify-ssl
 ```
-
-### AI CAPTCHA Solving + Lenovo LMSA Authentication
-
-The crawler can authenticate with Lenovo's LMSA service and automatically solve
-CAPTCHAs using the **GitHub Models** vision API (GPT-4o).  This is required for
-crawling `rsddownload-secure.lenovo.com` (private S3 bucket).
-
-**Prerequisites:**
-1. A **GitHub Personal Access Token** — create at
-   https://github.com/settings/tokens (the token needs access to GitHub Models;
-   enable the **Models** permission if prompted during token creation)
-2. **Playwright** + Chromium installed (`pip install playwright && playwright install chromium`)
-
-**⚠️ NEVER hardcode credentials in source code or command-line history.**
-Use environment variables or source from a secure `.env` file instead:
-
-```bash
-# Step 1: Create a .env file (make sure it's in .gitignore!)
-cat > .env << 'EOF'
-export GITHUB_TOKEN="ghp_your_token_here"
-export LMSA_EMAIL="your_email@example.com"
-export LMSA_PASSWORD="your_password_here"
-EOF
-chmod 600 .env
-
-# Step 2: Source the env file and run
-source .env
-python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
-  --lmsa-email "$LMSA_EMAIL" \
-  --lmsa-password "$LMSA_PASSWORD" \
-  --ai-captcha \
-  --ai-model "openai/gpt-4o" \
-  --debug \
-  --output ./lenovo_firmware
-
-# Or even shorter (reads from env vars automatically):
-python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
-  --ai-captcha --debug --output ./lenovo_firmware
-```
-
-**What happens:**
-1. The crawler fetches the OAuth login URL from `lsa.lenovo.com`
-2. Launches a headless browser to navigate to `passport.lenovo.com`
-3. Fills in your Lenovo ID credentials
-4. If a CAPTCHA appears → screenshots it → sends to GitHub Models GPT-4o vision API → fills in the solution
-5. Captures the WUST token from the redirect
-6. Exchanges WUST for a JWT at `lsa.lenovo.com`
-7. Uses the JWT to generate pre-signed S3 URLs for firmware downloads
-8. Crawls and downloads all discovered files
 
 ### Options
 
@@ -175,61 +101,21 @@ python -m web_crawler "https://rsddownload-secure.lenovo.com/" \
 | `url` | *(required)* | Target URL to crawl |
 | `--output` | `downloaded_site` | Local output directory |
 | `--depth` | `0` (unlimited) | Maximum crawl depth |
-| `--max-pages` | `0` (unlimited) | Maximum number of pages to download |
 | `--delay` | `0.25` | Delay between requests in seconds |
+| `--concurrency` | `auto` | Number of parallel workers |
 | `--no-verify-ssl` | off | Disable TLS certificate verification |
 | `--no-robots` | off | Ignore robots.txt restrictions |
-| `--force` | off | Re-download files even if they exist on disk |
+| `--force` | off | Re-download files even if they exist |
 | `--debug` | off | Verbose logging |
-| `--ai-captcha` | off | Enable AI CAPTCHA solving (requires `GITHUB_TOKEN`) |
-| `--ai-model` | `openai/gpt-4o` | GitHub Models vision model to use |
-| `--ai-captcha-type` | `auto` | CAPTCHA type: `auto`, `numbersOnly`, `lettersOnly` |
-| `--ai-captcha-url` | *(target URL)* | Override CAPTCHA page URL |
-| `--ai-login-user` | | Username for standalone CAPTCHA login |
-| `--ai-login-pass` | | Password for standalone CAPTCHA login |
-| `--lmsa-email` | `$LMSA_EMAIL` | Lenovo ID email |
-| `--lmsa-password` | `$LMSA_PASSWORD` | Lenovo ID password |
-| `--lmsa-wust` | | Pre-obtained WUST token (skip OAuth) |
-| `--lmsa-jwt` | | Pre-obtained JWT as `GUID:TOKEN` (skip all auth) |
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `GITHUB_TOKEN` | GitHub PAT with `models` scope (for AI CAPTCHA) |
-| `LMSA_EMAIL` | Lenovo ID email (alternative to `--lmsa-email`) |
-| `LMSA_PASSWORD` | Lenovo ID password (alternative to `--lmsa-password`) |
-| `AI_MODEL` | Override default AI model (alternative to `--ai-model`) |
+| `--git-push-every N` | `0` | Commit/push every N files |
+| `--cf-clearance` | | Cloudflare bypass cookie |
+| `--extra-hosts` | | Additional download hosts |
 
 ## Running tests
 
 ```bash
-# All tests
-python -m unittest discover -s tests -v
-
-# AI module tests only
-python -m unittest tests.test_ai -v
-```
-
-## Output structure (example)
-
-```
-downloaded_site/
-├── index.html
-├── about.html
-├── css/
-│   └── style.css
-├── js/
-│   └── main.js
-├── images/
-│   ├── logo.png
-│   └── banner.jpg
-└── blog/
-    ├── index.html
-    └── post-1.html
+python -m pytest tests/ -v
 ```
 
 > **Note:** Please be respectful when crawling websites. Always check
-> `robots.txt`, use appropriate delays between requests, and avoid
-> overwhelming servers. The `--delay` flag (default 0.25s) helps prevent
-> excessive load on the target server.
+> `robots.txt`, use appropriate delays, and avoid overwhelming servers.

@@ -1,11 +1,11 @@
-"""Package setup for web_crawler + crawl4ai combined project."""
+"""Package setup for crawl4ai — unified web crawling engine."""
 
 from setuptools import setup, find_packages
 
 setup(
-    name="web-crawler",
+    name="crawl4ai",
     version="3.0.0",
-    description="Combined web crawler: crawl4ai async engine + Huawei HG8145V5 specialised crawler",
+    description="Unified web crawling engine: async browser crawler + BFS site downloader",
     packages=find_packages(exclude=["tests", "tests.*"]),
     python_requires=">=3.10",
     install_requires=[
@@ -56,7 +56,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "web-crawler=web_crawler.cli:main",
+            "crawl4ai-crawler=crawl4ai.extensions.crawler.cli:main",
         ],
     },
 )

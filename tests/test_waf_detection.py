@@ -2,7 +2,7 @@
 
 import unittest
 
-from web_crawler.core.engine import Crawler
+from crawl4ai.extensions.crawler.engine import Crawler
 
 
 class TestDetectProtectionAkamaiFalsePositive(unittest.TestCase):

@@ -9,13 +9,13 @@ import sys
 import time
 from pathlib import Path
 
-from web_crawler.config.settings import (
+from crawl4ai.extensions.settings import (
     DEFAULT_OUTPUT, DEFAULT_MAX_DEPTH, DEFAULT_DELAY,
     DEFAULT_CONCURRENCY, DEFAULT_DOWNLOAD_EXTENSIONS,
     auto_concurrency,
 )
-from web_crawler.core.engine import Crawler
-from web_crawler.utils.log import setup_logging, log
+from crawl4ai.extensions.crawler.engine import Crawler
+from crawl4ai.extensions.log_utils import setup_logging, log
 
 try:
     from tqdm import tqdm as _tqdm  # noqa: F401
@@ -37,10 +37,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python -m web_crawler https://example.com\n"
-            "  python -m web_crawler https://example.com --depth 3\n"
-            "  python -m web_crawler https://example.com --output my_site\n"
-            "  python -m web_crawler https://example.com --log-file crawl.log\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --depth 3\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --output my_site\n"
+            "  python -m crawl4ai.extensions.crawler https://example.com --log-file crawl.log\n"
         ),
     )
     parser.add_argument(

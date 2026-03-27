@@ -10,3 +10,4 @@ build/
 .venv/
 venv/
 node_modules/
+.pytest_cache/

@@ -1,8 +1,17 @@
 """
-crawl4ai.extensions – Capabilities ported from the web_crawler package.
+crawl4ai.extensions – Specialised crawling, detection, and bypass modules.
 
 These modules add specialised features that complement crawl4ai's
 general-purpose async crawling engine:
+
+Crawler (``crawler/``):
+
+* :mod:`crawler.engine` – BFS web crawler (Crawler class)
+* :mod:`crawler.cli` – Command-line interface
+* :mod:`crawler.wordpress` – WordPress discovery & deep crawl
+* :mod:`crawler.protection` – WAF/protection detection & bypass
+* :mod:`crawler.media` – Video/CDN/media handling
+* :mod:`crawler.git_ops` – Git integration
 
 Detection (individual modules in ``detection/``):
 
@@ -53,6 +62,7 @@ from .bypass import (  # noqa: F401
     inject_cf_clearance,
     solve_cf_challenge,
 )
+from .crawler import Crawler  # noqa: F401
 
 __all__ = [
     # detection
@@ -74,4 +84,6 @@ __all__ = [
     "is_cf_managed_challenge",
     "inject_cf_clearance",
     "solve_cf_challenge",
+    # crawler
+    "Crawler",
 ]

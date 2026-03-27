@@ -61,7 +61,7 @@ try:
 except ImportError:
     _TQDM_AVAILABLE = False
 
-from web_crawler.config.settings import (
+from crawl4ai.extensions.settings import (
     BACKOFF_429_BASE,
     BACKOFF_429_MAX,
     BINARY_CONTENT_TYPES,
@@ -95,19 +95,23 @@ from web_crawler.config.settings import (
     WP_THEME_PROBES,
     auto_concurrency,
 )
-from web_crawler.session.http import (
-    build_cf_session, build_session, cache_bust_url, inject_cf_clearance,
-    is_cf_managed_challenge, is_s3_access_denied, is_sg_captcha_response,
-    is_tomcat_ip_restricted, random_headers, solve_cf_challenge,
-    solve_sg_captcha,
+from crawl4ai.extensions.bypass.session import build_session, random_headers, cache_bust_url
+from crawl4ai.extensions.bypass.cloudflare import (
+    build_cf_session,
+    is_cf_managed_challenge,
+    inject_cf_clearance,
+    solve_cf_challenge,
 )
-from web_crawler.core.storage import (
+from crawl4ai.extensions.bypass.siteground import solve_sg_captcha, is_sg_captcha_response
+from crawl4ai.extensions.bypass.s3 import is_s3_access_denied
+from crawl4ai.extensions.bypass.tomcat import is_tomcat_ip_restricted
+from crawl4ai.extensions.storage import (
     content_hash, file_content_hash, save_file, smart_local_path,
     stream_to_file,
 )
 
-from web_crawler.utils.log import ci_endgroup, ci_group, log
-from web_crawler.utils.url import normalise_url, url_key, url_to_local_path
+from crawl4ai.extensions.log_utils import ci_endgroup, ci_group, log
+from crawl4ai.extensions.url_utils import normalise_url, url_key, url_to_local_path
 
 
 class Crawler:
@@ -481,7 +485,7 @@ class Crawler:
         (e.g. from a JSON API response with empty fields), non-empty
         values from the new source are merged in rather than blocked.
         """
-        from web_crawler.extraction.html import (
+        from crawl4ai.extensions.extraction import (
             extract_page_metadata,
             extract_jsonld_video_meta,
             extract_microdata_video_meta,

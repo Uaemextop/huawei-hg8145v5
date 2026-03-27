@@ -2,12 +2,12 @@
 
 import unittest
 
-from web_crawler.session.http import (
+from crawl4ai.extensions.bypass.session import (
     _client_hints_for_ua,
     build_session,
     random_headers,
 )
-from web_crawler.config.settings import USER_AGENTS
+from crawl4ai.extensions.settings import USER_AGENTS
 
 
 class TestClientHintsForUA(unittest.TestCase):
